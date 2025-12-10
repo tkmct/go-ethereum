@@ -172,7 +172,40 @@ func (r *reader) Storage(accountHash, storageHash common.Hash) ([]byte, error) {
 func (db *Database) NodeReader(root common.Hash) (database.NodeReader, error) {
 	layer := db.tree.get(root)
 	if layer == nil {
-		return nil, fmt.Errorf("state %#x is not available", root)
+		// Fallback: Check if root node exists at path nil (like HashDB does)
+		// This enables stateless execution with witness data
+		rootBlob := rawdb.ReadAccountTrieNode(db.diskdb, nil)
+		if len(rootBlob) > 0 {
+			computedRoot, err := db.hasher(rootBlob)
+			if err == nil {
+				if computedRoot == root {
+					// Root node exists and hashes correctly - create disk layer on-the-fly
+					newLayer := newDiskLayer(root, rawdb.ReadPersistentStateID(db.diskdb), db, nil, nil,
+						newBuffer(db.config.WriteBufferSize, nil, nil, 0), nil)
+					// Register in tree (thread-safe)
+					db.tree.lock.Lock()
+					// Check again after acquiring lock (another goroutine might have added it)
+					if existing := db.tree.layers[root]; existing == nil {
+						db.tree.layers[root] = newLayer
+						// If this is the first layer, set it as base
+						if db.tree.base == nil {
+							db.tree.base = newLayer
+						}
+						// Initialize lookup if needed
+						if db.tree.lookup == nil {
+							db.tree.lookup = newLookup(newLayer, db.tree.isDescendant)
+						}
+						layer = newLayer
+					} else {
+						layer = existing
+					}
+					db.tree.lock.Unlock()
+				}
+			}
+		}
+		if layer == nil {
+			return nil, fmt.Errorf("state %#x is not available", root)
+		}
 	}
 	return &reader{
 		db:          db,

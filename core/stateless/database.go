@@ -21,6 +21,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/trie/bintrie"
 )
 
 // MakeHashDB imports tries, codes and block hashes from a witness into a new
@@ -63,5 +64,60 @@ func (w *Witness) MakeHashDB() ethdb.Database {
 
 		rawdb.WriteLegacyTrieNode(memdb, common.BytesToHash(hash), blob)
 	}
+	return memdb
+}
+
+// MakePathDB imports binary trie nodes, codes and block hashes from a witness
+// into a new path-based memory db for UBT/PathScheme support.
+//
+// PathDB wraps the database with VerklePrefix, so nodes must be stored with
+// the prefix already applied to be accessible through the wrapped interface.
+func (w *Witness) MakePathDB() ethdb.Database {
+	memdb := rawdb.NewMemoryDatabase()
+	verkleDB := rawdb.NewTable(memdb, string(rawdb.VerklePrefix))
+	hasher := crypto.NewKeccakState()
+	hash := make([]byte, 32)
+
+	// Inject all the "block hashes" (i.e. headers) into the ephemeral database
+	for _, header := range w.Headers {
+		rawdb.WriteHeader(memdb, header)
+	}
+
+	// Inject all the bytecodes into the ephemeral database
+	for code := range w.Codes {
+		blob := []byte(code)
+
+		hasher.Reset()
+		hasher.Write(blob)
+		hasher.Read(hash)
+
+		rawdb.WriteCode(memdb, common.BytesToHash(hash), blob)
+	}
+
+	// For UBT/PathScheme, use StatePaths if available (preserves paths)
+	// PathDB wraps memdb with VerklePrefix, so store nodes with prefix already applied
+	rootHash := w.Root()
+	computeNodeHash := func(blob []byte) common.Hash {
+		if len(blob) == 0 {
+			return common.Hash{}
+		}
+		node, err := bintrie.DeserializeNode(blob, 0)
+		if err != nil {
+			return common.Hash{}
+		}
+		return node.Hash()
+	}
+
+	// Store nodes: root node at nil path (PathDB.loadLayers() reads from nil path),
+	// all other nodes with their preserved paths
+	for pathStr, blob := range w.StatePaths {
+		nodeHash := computeNodeHash(blob)
+		if nodeHash == rootHash {
+			rawdb.WriteAccountTrieNode(verkleDB, nil, blob)
+		} else if pathStr != "" {
+			rawdb.WriteAccountTrieNode(verkleDB, []byte(pathStr), blob)
+		}
+	}
+
 	return memdb
 }

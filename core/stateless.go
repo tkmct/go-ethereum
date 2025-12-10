@@ -25,6 +25,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/stateless"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/trie"
@@ -50,8 +51,20 @@ func ExecuteStateless(config *params.ChainConfig, vmconfig vm.Config, block *typ
 		log.Error("stateless runner received receipt root it's expected to calculate (faulty consensus client)", "block", block.Number())
 	}
 	// Create and populate the state database to serve as the stateless backend
-	memdb := witness.MakeHashDB()
-	db, err := state.New(witness.Root(), state.NewDatabase(triedb.NewDatabase(memdb, triedb.HashDefaults), nil))
+	// Check if UBT/Verkle is enabled for this block
+	isVerkle := config.IsVerkle(block.Number(), block.Time())
+	var memdb ethdb.Database
+	var triedbConfig *triedb.Config
+	if isVerkle {
+		memdb = witness.MakePathDB()
+		triedbConfig = triedb.VerkleDefaults
+	} else {
+		memdb = witness.MakeHashDB()
+		triedbConfig = triedb.HashDefaults
+	}
+
+	triedb := triedb.NewDatabase(memdb, triedbConfig)
+	db, err := state.New(witness.Root(), state.NewDatabase(triedb, nil))
 	if err != nil {
 		return common.Hash{}, common.Hash{}, err
 	}

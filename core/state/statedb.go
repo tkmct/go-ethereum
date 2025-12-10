@@ -37,6 +37,8 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/trie"
+	"github.com/ethereum/go-ethereum/trie/bintrie"
+	"github.com/ethereum/go-ethereum/trie/transitiontrie"
 	"github.com/ethereum/go-ethereum/trie/trienode"
 	"github.com/holiman/uint256"
 	"golang.org/x/sync/errgroup"
@@ -856,8 +858,28 @@ func (s *StateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
 		})
 	}
 	// If witness building is enabled, gather all the read-only accesses.
-	// Skip witness collection in Verkle mode, they will be gathered
-	// together at the end.
+	// For UBT/BinaryTrie mode, collect witness from main trie (storage is unified)
+	// Use type assertion to detect BinaryTrie instead of relying on IsVerkle()
+	if s.witness != nil && s.trie != nil {
+		var witness map[string][]byte
+		// Check if trie is a TransitionTrie (wraps BinaryTrie)
+		if tt, ok := s.trie.(*transitiontrie.TransitionTrie); ok {
+			// TransitionTrie wraps BinaryTrie, get witness from overlay
+			if tt.Overlay() != nil {
+				witness = tt.Overlay().Witness()
+			}
+		} else if bt, ok := s.trie.(*bintrie.BinaryTrie); ok {
+			// Direct BinaryTrie instance
+			witness = bt.Witness()
+		} else {
+			// For other trie types (MPT), skip witness collection here
+			// (handled in MPT-specific code below)
+		}
+		if len(witness) > 0 {
+			s.witness.AddState(witness)
+		}
+	}
+	// For MPT mode, collect witness from storage tries
 	if s.witness != nil && !s.db.TrieDB().IsVerkle() {
 		// Pull in anything that has been accessed before destruction
 		for _, obj := range s.stateObjectsDestruct {
