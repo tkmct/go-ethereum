@@ -233,6 +233,9 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 			StateScheme:      scheme,
 			ChainHistoryMode: config.HistoryMode,
 			TxLookupLimit:    int64(min(config.TransactionHistory, math.MaxInt64)),
+			UseUBT:                  config.StateUseUBT,
+			SkipStateRootValidation: config.SkipStateRootValidation,
+			CommitStateRootToHeader: config.StateUseUBT,
 			VmConfig: vm.Config{
 				EnablePreimageRecording: config.EnablePreimageRecording,
 				EnableWitnessStats:      config.EnableWitnessStats,

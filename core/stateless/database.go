@@ -21,7 +21,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
-	"github.com/ethereum/go-ethereum/trie/bintrie"
 )
 
 // MakeHashDB imports tries, codes and block hashes from a witness into a new
@@ -95,26 +94,16 @@ func (w *Witness) MakePathDB() ethdb.Database {
 	}
 
 	// For UBT/PathScheme, use StatePaths if available (preserves paths)
-	// PathDB wraps memdb with VerklePrefix, so store nodes with prefix already applied
-	rootHash := w.Root()
-	computeNodeHash := func(blob []byte) common.Hash {
-		if len(blob) == 0 {
-			return common.Hash{}
-		}
-		node, err := bintrie.DeserializeNode(blob, 0)
-		if err != nil {
-			return common.Hash{}
-		}
-		return node.Hash()
+	// The root node of the trie is always located at the empty path. We must
+	// load it from this specific path to avoid ambiguity in case of hash collisions.
+	if rootBlob, ok := w.StatePaths[""]; ok {
+		// Write the root node at the special 'nil' path for pathdb.
+		rawdb.WriteAccountTrieNode(verkleDB, nil, rootBlob)
 	}
 
-	// Store nodes: root node at nil path (PathDB.loadLayers() reads from nil path),
-	// all other nodes with their preserved paths
+	// Inject all other trie nodes into the ephemeral database.
 	for pathStr, blob := range w.StatePaths {
-		nodeHash := computeNodeHash(blob)
-		if nodeHash == rootHash {
-			rawdb.WriteAccountTrieNode(verkleDB, nil, blob)
-		} else if pathStr != "" {
+		if pathStr != "" {
 			rawdb.WriteAccountTrieNode(verkleDB, []byte(pathStr), blob)
 		}
 	}

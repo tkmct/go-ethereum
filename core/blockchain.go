@@ -191,6 +191,11 @@ type BlockChainConfig struct {
 	Overrides  *ChainOverrides // Optional chain config overrides
 	VmConfig   vm.Config       // Config options for the EVM Interpreter
 
+	// Experimental options
+	UseUBT                  bool // Force using UBT/BinaryTrie as the state backend (path scheme only)
+	SkipStateRootValidation bool // Skip validating header stateRoot against computed root (dangerous)
+	CommitStateRootToHeader bool // Persist state under the canonical header.Root instead of computed root
+
 	// TxLookupLimit specifies the maximum number of blocks from head for which
 	// transaction hashes will be indexed.
 	//
@@ -357,11 +362,12 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 	}
 
 	// Open trie database with provided config
-	enableVerkle, err := EnableVerkleAtGenesis(db, genesis)
+	enableVerkle, err := EnableVerkleAtGenesisWithOverride(db, genesis, cfg.Overrides)
 	if err != nil {
 		return nil, err
 	}
-	triedb := triedb.NewDatabase(db, cfg.triedbConfig(enableVerkle))
+	trieIsVerkle := enableVerkle || cfg.UseUBT
+	triedb := triedb.NewDatabase(db, cfg.triedbConfig(trieIsVerkle))
 
 	// Write the supplied genesis to the database if it has not been initialized
 	// yet. The corresponding chain config will be returned, either from the
@@ -1650,7 +1656,15 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		hasStateSizer = bc.stateSizer != nil
 	)
 	if hasStateHook || hasStateSizer {
-		r, update, err := statedb.CommitWithUpdate(block.NumberU64(), isEIP158, isCancun)
+		var (
+			r      common.Hash
+			update *state.StateUpdate
+		)
+		if bc.cfg.CommitStateRootToHeader {
+			r, update, err = statedb.CommitWithUpdateAndRoot(block.NumberU64(), isEIP158, isCancun, block.Root())
+		} else {
+			r, update, err = statedb.CommitWithUpdate(block.NumberU64(), isEIP158, isCancun)
+		}
 		if err != nil {
 			return err
 		}
@@ -1666,7 +1680,11 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		}
 		root = r
 	} else {
-		root, err = statedb.Commit(block.NumberU64(), isEIP158, isCancun)
+		if bc.cfg.CommitStateRootToHeader {
+			root, err = statedb.CommitWithRoot(block.NumberU64(), isEIP158, isCancun, block.Root())
+		} else {
+			root, err = statedb.Commit(block.NumberU64(), isEIP158, isCancun)
+		}
 		if err != nil {
 			return err
 		}

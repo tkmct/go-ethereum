@@ -283,6 +283,19 @@ var (
 		Usage:    "Scheme to use for storing ethereum state ('hash' or 'path')",
 		Category: flags.StateCategory,
 	}
+	// Experimental: run with UBT/BinaryTrie state backend even on non-Verkle chains.
+	// This is intended for shadow-state experimentation and requires disabling
+	// state-root validation to follow canonical chains whose headers commit MPT roots.
+	StateUBTFlag = &cli.BoolFlag{
+		Name:     "state.ubt",
+		Usage:    "Store state in UBT/BinaryTrie (experimental; intended for shadow state, requires --state.scheme=path and typically --state.skiproot)",
+		Category: flags.StateCategory,
+	}
+	SkipStateRootValidationFlag = &cli.BoolFlag{
+		Name:     "state.skiproot",
+		Usage:    "Skip validating block header stateRoot against locally computed root (DANGEROUS; experimental)",
+		Category: flags.StateCategory,
+	}
 	StateSizeTrackingFlag = &cli.BoolFlag{
 		Name:     "state.size-tracking",
 		Usage:    "Enable state size tracking, retrieve state size with debug_stateSize.",
@@ -1044,6 +1057,8 @@ var (
 		RemoteDBFlag,
 		DBEngineFlag,
 		StateSchemeFlag,
+		StateUBTFlag,
+		SkipStateRootValidationFlag,
 		HttpHeaderFlag,
 	}
 )
@@ -1701,6 +1716,23 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	}
 	if ctx.IsSet(StateSchemeFlag.Name) {
 		cfg.StateScheme = ctx.String(StateSchemeFlag.Name)
+	}
+	if ctx.IsSet(StateUBTFlag.Name) {
+		cfg.StateUseUBT = ctx.Bool(StateUBTFlag.Name)
+	}
+	if ctx.IsSet(SkipStateRootValidationFlag.Name) {
+		cfg.SkipStateRootValidation = ctx.Bool(SkipStateRootValidationFlag.Name)
+	}
+	// UBT mode requires the path-based state scheme.
+	if cfg.StateUseUBT && cfg.StateScheme != "" && cfg.StateScheme != rawdb.PathScheme {
+		Fatalf("--%s requires --%s=%s", StateUBTFlag.Name, StateSchemeFlag.Name, rawdb.PathScheme)
+	}
+	if cfg.StateUseUBT && cfg.StateScheme == "" {
+		cfg.StateScheme = rawdb.PathScheme
+	}
+	if cfg.StateUseUBT && !cfg.SkipStateRootValidation {
+		cfg.SkipStateRootValidation = true
+		log.Warn("Enabling --state.skiproot automatically because --state.ubt is set (experimental)")
 	}
 	// Parse transaction history flag, if user is still using legacy config
 	// file with 'TxLookupLimit' configured, copy the value to 'TransactionHistory'.
