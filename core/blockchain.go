@@ -193,6 +193,8 @@ type BlockChainConfig struct {
 
 	// Experimental options
 	UseUBT                  bool // Force using UBT/BinaryTrie as the state backend (path scheme only)
+	UBTConversionBatchSize  int  // Number of accounts per commit during MPT→UBT conversion (default 1000)
+	UBTConversionDisable    bool // Disable automatic MPT→UBT conversion after snap sync
 	SkipStateRootValidation bool // Skip validating header stateRoot against computed root (dangerous)
 	CommitStateRootToHeader bool // Persist state under the canonical header.Root instead of computed root
 
@@ -1172,11 +1174,25 @@ func (bc *BlockChain) SnapSyncComplete(hash common.Hash) error {
 	if bc.snaps != nil {
 		bc.snaps.Rebuild(root)
 	}
+	// Start background MPT to UBT conversion if UBT mode is enabled.
+	// The snap sync stores state as MPT flat state, but UBT mode requires
+	// BinaryTrie format. The conversion runs in background allowing the node
+	// to continue processing blocks using MPT until conversion completes.
+	if bc.cfg.UseUBT && bc.triedb.Scheme() == rawdb.PathScheme && !bc.cfg.UBTConversionDisable {
+		batchSize := bc.cfg.UBTConversionBatchSize
+		if batchSize <= 0 {
+			batchSize = 1000 // default
+		}
+		if err := bc.triedb.StartUBTConversion(root, batchSize); err != nil {
+			log.Warn("Failed to start UBT conversion", "root", root, "err", err)
+		} else {
+			log.Info("Started background UBT conversion", "root", root, "batchSize", batchSize)
+		}
+	}
 
 	// If all checks out, manually set the head block.
 	bc.currentBlock.Store(block.Header())
 	headBlockGauge.Update(int64(block.NumberU64()))
-
 	log.Info("Committed new head block", "number", block.Number(), "hash", hash)
 	return nil
 }

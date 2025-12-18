@@ -384,3 +384,41 @@ func (db *Database) SnapshotCompleted() bool {
 	}
 	return pdb.SnapshotCompleted()
 }
+
+// StartUBTConversion initiates background MPT to UBT conversion.
+// Only supported for path-based database in verkle mode.
+// batchSize specifies the number of accounts to process per commit (default 1000).
+func (db *Database) StartUBTConversion(root common.Hash, batchSize int) error {
+	pdb, ok := db.backend.(*pathdb.Database)
+	if !ok {
+		return errors.New("UBT conversion only supported with path scheme")
+	}
+	return pdb.StartUBTConversion(root, db.disk, batchSize)
+}
+
+// UBTConversionStatus returns the current UBT conversion progress.
+func (db *Database) UBTConversionStatus() *rawdb.UBTConversionProgress {
+	pdb, ok := db.backend.(*pathdb.Database)
+	if !ok {
+		return nil
+	}
+	return pdb.UBTConversionStatus()
+}
+
+// StopUBTConversion stops the ongoing UBT conversion.
+func (db *Database) StopUBTConversion() {
+	pdb, ok := db.backend.(*pathdb.Database)
+	if !ok {
+		return
+	}
+	pdb.StopUBTConversion()
+}
+
+// UBTConversionDone returns true if UBT conversion has completed.
+func (db *Database) UBTConversionDone() bool {
+	pdb, ok := db.backend.(*pathdb.Database)
+	if !ok {
+		return false
+	}
+	return pdb.UBTConversionDone()
+}

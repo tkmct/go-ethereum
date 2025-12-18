@@ -291,6 +291,17 @@ var (
 		Usage:    "Store state in UBT/BinaryTrie (experimental; intended for shadow state, requires --state.scheme=path and typically --state.skiproot)",
 		Category: flags.StateCategory,
 	}
+	UBTConversionBatchSizeFlag = &cli.IntFlag{
+		Name:     "ubt.batchsize",
+		Usage:    "Number of accounts to process per commit during MPT to UBT conversion after snap sync",
+		Value:    1000,
+		Category: flags.StateCategory,
+	}
+	UBTConversionDisableFlag = &cli.BoolFlag{
+		Name:     "ubt.noconversion",
+		Usage:    "Disable automatic MPT to UBT conversion after snap sync (use if you want to manually control conversion)",
+		Category: flags.StateCategory,
+	}
 	SkipStateRootValidationFlag = &cli.BoolFlag{
 		Name:     "state.skiproot",
 		Usage:    "Skip validating block header stateRoot against locally computed root (DANGEROUS; experimental)",
@@ -1058,6 +1069,8 @@ var (
 		DBEngineFlag,
 		StateSchemeFlag,
 		StateUBTFlag,
+		UBTConversionBatchSizeFlag,
+		UBTConversionDisableFlag,
 		SkipStateRootValidationFlag,
 		HttpHeaderFlag,
 	}
@@ -1722,6 +1735,12 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	}
 	if ctx.IsSet(SkipStateRootValidationFlag.Name) {
 		cfg.SkipStateRootValidation = ctx.Bool(SkipStateRootValidationFlag.Name)
+	}
+	if ctx.IsSet(UBTConversionBatchSizeFlag.Name) {
+		cfg.UBTConversionBatchSize = ctx.Int(UBTConversionBatchSizeFlag.Name)
+	}
+	if ctx.IsSet(UBTConversionDisableFlag.Name) {
+		cfg.UBTConversionDisable = ctx.Bool(UBTConversionDisableFlag.Name)
 	}
 	// UBT mode requires the path-based state scheme.
 	if cfg.StateUseUBT && cfg.StateScheme != "" && cfg.StateScheme != rawdb.PathScheme {

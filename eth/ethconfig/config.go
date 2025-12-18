@@ -167,6 +167,14 @@ type Config struct {
 	// computed root will not match the header's stateRoot.
 	StateUseUBT bool
 
+	// UBTConversionBatchSize is the number of accounts to process per commit
+	// during MPT to UBT conversion after snap sync. Default is 1000.
+	UBTConversionBatchSize int
+
+	// UBTConversionDisable disables the automatic MPT to UBT conversion after
+	// snap sync completes. Use if you want to manually control conversion.
+	UBTConversionDisable bool
+
 	// SkipStateRootValidation disables validating the header stateRoot against the
 	// locally computed one (dangerous; required for StateUseUBT on non-Verkle chains).
 	SkipStateRootValidation bool

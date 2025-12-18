@@ -23,6 +23,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/rlp"
 )
 
 // ReadPreimage retrieves a single preimage of the provided hash.
@@ -359,4 +360,60 @@ func WriteTrienodeHistory(db ethdb.AncientWriter, id uint64, header []byte, keyS
 		return op.AppendRaw(trienodeHistoryValueSectionTable, id-1, valueSection)
 	})
 	return err
+}
+
+// UBTConversionStage represents the current stage of UBT conversion
+type UBTConversionStage uint8
+
+const (
+	UBTStageIdle UBTConversionStage = iota
+	UBTStageRunning
+	UBTStageFailed
+	UBTStageDone
+)
+
+// UBTConversionProgress tracks the progress of MPT to UBT conversion
+type UBTConversionProgress struct {
+	Version         uint8              // Schema version for future compatibility
+	Stage           UBTConversionStage // Current conversion stage
+	StateRoot       common.Hash        // MPT state root being converted
+	UbtRoot         common.Hash        // Last committed UBT root
+	NextAccountHash common.Hash        // AccountIterator seek position
+	CurrentAccount  common.Hash        // Currently processing account
+	NextStorageHash common.Hash        // StorageIterator seek position
+	AccountsDone    uint64             // Number of accounts processed
+	SlotsDone       uint64             // Number of storage slots processed
+	LastError       string             // Last error message if failed
+	UpdatedAt       uint64             // Unix timestamp of last update
+}
+
+// ReadUBTConversionStatus retrieves the UBT conversion progress from database
+func ReadUBTConversionStatus(db ethdb.KeyValueReader) *UBTConversionProgress {
+	data, err := db.Get(ubtConversionStatusKey)
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	var status UBTConversionProgress
+	if err := rlp.DecodeBytes(data, &status); err != nil {
+		return nil
+	}
+	return &status
+}
+
+// WriteUBTConversionStatus writes the UBT conversion progress to database
+func WriteUBTConversionStatus(db ethdb.KeyValueWriter, status *UBTConversionProgress) {
+	data, err := rlp.EncodeToBytes(status)
+	if err != nil {
+		log.Crit("Failed to encode UBT conversion status", "err", err)
+	}
+	if err := db.Put(ubtConversionStatusKey, data); err != nil {
+		log.Crit("Failed to store UBT conversion status", "err", err)
+	}
+}
+
+// DeleteUBTConversionStatus removes the UBT conversion progress from database
+func DeleteUBTConversionStatus(db ethdb.KeyValueWriter) {
+	if err := db.Delete(ubtConversionStatusKey); err != nil {
+		log.Crit("Failed to delete UBT conversion status", "err", err)
+	}
 }

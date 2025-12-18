@@ -138,6 +138,10 @@ type Database struct {
 	stateIndexer *historyIndexer              // History indexer historical state data, nil possible
 
 	lock sync.RWMutex // Lock to prevent mutations from happening at the same time
+
+	// UBT conversion worker (only used when isVerkle=true)
+	ubtConverter *ubtConverter
+	ubtLock      sync.RWMutex
 }
 
 // New attempts to load an already existing layer from a persistent key-value
@@ -553,6 +557,9 @@ func (db *Database) Close() error {
 	// following mutations.
 	db.readOnly = true
 
+	// Stop UBT converter if running
+	db.StopUBTConversion()
+
 	// Block until the background flushing is finished. It must
 	// be done before terminating the potential background snapshot
 	// generator.
@@ -691,4 +698,60 @@ func (db *Database) SnapshotCompleted() bool {
 		return false
 	}
 	return db.tree.bottom().genComplete()
+}
+
+// StartUBTConversion initiates or resumes the MPT to UBT conversion process.
+// This should be called after snap sync completes when in UBT mode.
+// batchSize specifies the number of accounts to process per commit.
+func (db *Database) StartUBTConversion(root common.Hash, diskdb ethdb.Database, batchSize int) error {
+	if !db.isVerkle {
+		return errors.New("UBT conversion only supported in verkle mode")
+	}
+
+	db.ubtLock.Lock()
+	defer db.ubtLock.Unlock()
+
+	// Check if already running
+	if db.ubtConverter != nil {
+		status := db.ubtConverter.status()
+		if status.Stage == rawdb.UBTStageRunning {
+			return nil // Already running
+		}
+		if status.Stage == rawdb.UBTStageDone {
+			return nil // Already completed
+		}
+	}
+
+	// Create and start converter
+	db.ubtConverter = newUBTConverter(db, diskdb, root, batchSize)
+	return db.ubtConverter.start()
+}
+
+// UBTConversionStatus returns the current UBT conversion progress.
+// Returns nil if no conversion has been started.
+func (db *Database) UBTConversionStatus() *rawdb.UBTConversionProgress {
+	db.ubtLock.RLock()
+	defer db.ubtLock.RUnlock()
+
+	if db.ubtConverter == nil {
+		// Check if there's persisted progress
+		return rawdb.ReadUBTConversionStatus(db.diskdb)
+	}
+	return db.ubtConverter.status()
+}
+
+// StopUBTConversion gracefully stops the ongoing UBT conversion.
+func (db *Database) StopUBTConversion() {
+	db.ubtLock.Lock()
+	defer db.ubtLock.Unlock()
+
+	if db.ubtConverter != nil {
+		db.ubtConverter.stop()
+	}
+}
+
+// UBTConversionDone returns true if UBT conversion has completed successfully.
+func (db *Database) UBTConversionDone() bool {
+	status := db.UBTConversionStatus()
+	return status != nil && status.Stage == rawdb.UBTStageDone
 }

@@ -244,9 +244,15 @@ func (db *CachingDB) OpenTrie(root common.Hash) (Trie, error) {
 			panic("state tree transition isn't supported yet")
 		}
 		if ts.Transitioned() {
-			// Use BinaryTrie instead of VerkleTrie when IsVerkle is set
-			// (IsVerkle actually means Binary Trie mode in this codebase)
-			return bintrie.NewBinaryTrie(root, db.triedb)
+			// Check if there's a pending UBT conversion. If conversion is in progress
+			// (not Done), we must fall back to MPT to avoid reading MPT data as UBT.
+			// If no conversion was started (status is nil) or conversion is complete,
+			// use BinaryTrie normally.
+			status := db.triedb.UBTConversionStatus()
+			if status == nil || status.Stage == rawdb.UBTStageDone {
+				return bintrie.NewBinaryTrie(root, db.triedb)
+			}
+			// Conversion is in progress (Idle, Running, or Failed) - fall through to MPT
 		}
 	}
 	tr, err := trie.NewStateTrie(trie.StateTrieID(root), db.triedb)
