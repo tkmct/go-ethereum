@@ -32,6 +32,10 @@ import (
 	"github.com/ethereum/go-ethereum/trie/trienode"
 )
 
+// errConverterStopped is returned when the converter is stopped mid-operation.
+// This is not a failure - it indicates the caller should save progress and exit.
+var errConverterStopped = errors.New("converter stopped")
+
 // ubtConverter handles background conversion from MPT flat state to UBT.
 type ubtConverter struct {
 	db     *Database      // pathdb backend
@@ -51,7 +55,12 @@ type ubtConverter struct {
 }
 
 // newUBTConverter creates a new converter, loading existing progress from disk.
+// Returns nil if diskdb is nil (required for reading/writing progress).
 func newUBTConverter(db *Database, diskdb ethdb.Database, root common.Hash, batchSize int) *ubtConverter {
+	if diskdb == nil {
+		log.Error("newUBTConverter called with nil diskdb")
+		return nil
+	}
 	if batchSize <= 0 {
 		batchSize = 1000
 	}
@@ -82,6 +91,9 @@ func (c *ubtConverter) start() error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
+	if c.db == nil {
+		return errors.New("cannot start UBT conversion: database is nil")
+	}
 	if c.progress.Stage == rawdb.UBTStageRunning {
 		return errors.New("UBT conversion already running")
 	}
@@ -186,6 +198,10 @@ func (c *ubtConverter) run() {
 		codeLen := 0
 		if !bytes.Equal(acc.CodeHash, types.EmptyCodeHash[:]) {
 			code := rawdb.ReadCode(c.diskdb, common.BytesToHash(acc.CodeHash))
+			if len(code) == 0 {
+				c.fail(fmt.Errorf("missing code for account %x with codeHash %x", addr, acc.CodeHash))
+				return
+			}
 			codeLen = len(code)
 		}
 
@@ -198,6 +214,12 @@ func (c *ubtConverter) run() {
 		// Process storage slots if account has storage
 		if acc.Root != types.EmptyRootHash {
 			if err := c.processStorage(accountHash, addr); err != nil {
+				if errors.Is(err, errConverterStopped) {
+					// Stopped mid-storage-processing, save progress and exit
+					c.saveProgress()
+					log.Info("UBT conversion stopped", "accounts", c.progress.AccountsDone, "slots", c.progress.SlotsDone)
+					return
+				}
 				c.fail(err)
 				return
 			}
@@ -260,7 +282,7 @@ func (c *ubtConverter) processStorage(accountHash common.Hash, addr common.Addre
 	for storageIter.Next() {
 		select {
 		case <-c.stopCh:
-			return nil // Interrupted, progress will be saved
+			return errConverterStopped // Interrupted, caller should not mark account as done
 		default:
 		}
 

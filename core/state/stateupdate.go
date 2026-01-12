@@ -96,6 +96,10 @@ type stateUpdate struct {
 	nodes *trienode.MergedNodeSet          // Aggregated dirty nodes caused by state changes
 }
 
+// StateUpdate is an exported alias for stateUpdate, allowing external packages
+// to receive state update information from commit operations.
+type StateUpdate = stateUpdate
+
 // empty returns a flag indicating the state transition is empty or not.
 func (sc *stateUpdate) empty() bool {
 	return sc.originRoot == sc.root

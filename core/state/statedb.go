@@ -873,6 +873,8 @@ func (s *StateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
 			// TransitionTrie wraps BinaryTrie, get witness from overlay
 			if tt.Overlay() != nil {
 				witness = tt.Overlay().Witness()
+			} else {
+				log.Debug("TransitionTrie overlay is nil, skipping witness collection")
 			}
 		} else if bt, ok := s.trie.(*bintrie.BinaryTrie); ok {
 			// Direct BinaryTrie instance
@@ -1340,6 +1342,9 @@ func (s *StateDB) commit(deleteEmptyObjects bool, noStorageWiping bool, blockNum
 
 	origin := s.originalRoot
 	if s.commitRootOverride != nil {
+		if *s.commitRootOverride == (common.Hash{}) {
+			return nil, errors.New("commitRootOverride cannot be zero hash")
+		}
 		root = *s.commitRootOverride
 		s.commitRootOverride = nil
 	}

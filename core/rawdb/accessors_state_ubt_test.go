@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/rlp"
 )
 
 func TestUBTConversionProgressSerialize(t *testing.T) {
@@ -117,5 +118,48 @@ func TestUBTConversionProgressStages(t *testing.T) {
 	}
 	if UBTStageDone != 3 {
 		t.Errorf("UBTStageDone: got %d, want 3", UBTStageDone)
+	}
+}
+
+func TestUBTConversionProgressCorruptedData(t *testing.T) {
+	db := NewMemoryDatabase()
+
+	// Write corrupted data directly
+	if err := db.Put(ubtConversionStatusKey, []byte("invalid rlp data")); err != nil {
+		t.Fatalf("Failed to write corrupted data: %v", err)
+	}
+
+	// Should return nil and log an error (not panic)
+	got := ReadUBTConversionStatus(db)
+	if got != nil {
+		t.Errorf("Expected nil for corrupted data, got %+v", got)
+	}
+}
+
+func TestUBTConversionProgressUnknownVersion(t *testing.T) {
+	db := NewMemoryDatabase()
+
+	// Write status with unknown version
+	progress := &UBTConversionProgress{
+		Version:      99, // Unknown version
+		Stage:        UBTStageDone,
+		StateRoot:    common.HexToHash("0x1234"),
+		AccountsDone: 100,
+		UpdatedAt:    uint64(time.Now().Unix()),
+	}
+
+	// Write directly without version check
+	data, err := rlp.EncodeToBytes(progress)
+	if err != nil {
+		t.Fatalf("Failed to encode: %v", err)
+	}
+	if err := db.Put(ubtConversionStatusKey, data); err != nil {
+		t.Fatalf("Failed to write: %v", err)
+	}
+
+	// Should return nil due to unknown version
+	got := ReadUBTConversionStatus(db)
+	if got != nil {
+		t.Errorf("Expected nil for unknown version, got %+v", got)
 	}
 }

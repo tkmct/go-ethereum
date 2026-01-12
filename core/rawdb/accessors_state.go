@@ -387,7 +387,8 @@ type UBTConversionProgress struct {
 	UpdatedAt       uint64             // Unix timestamp of last update
 }
 
-// ReadUBTConversionStatus retrieves the UBT conversion progress from database
+// ReadUBTConversionStatus retrieves the UBT conversion progress from database.
+// Returns nil if no status exists. Logs an error if status exists but is corrupted.
 func ReadUBTConversionStatus(db ethdb.KeyValueReader) *UBTConversionProgress {
 	data, err := db.Get(ubtConversionStatusKey)
 	if err != nil || len(data) == 0 {
@@ -395,6 +396,12 @@ func ReadUBTConversionStatus(db ethdb.KeyValueReader) *UBTConversionProgress {
 	}
 	var status UBTConversionProgress
 	if err := rlp.DecodeBytes(data, &status); err != nil {
+		log.Error("Failed to decode UBT conversion status", "err", err)
+		return nil
+	}
+	// Validate version for forward compatibility
+	if status.Version != 1 {
+		log.Error("Unknown UBT conversion status version", "version", status.Version)
 		return nil
 	}
 	return &status

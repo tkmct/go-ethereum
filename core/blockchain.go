@@ -1184,10 +1184,11 @@ func (bc *BlockChain) SnapSyncComplete(hash common.Hash) error {
 			batchSize = 1000 // default
 		}
 		if err := bc.triedb.StartUBTConversion(root, batchSize); err != nil {
-			log.Warn("Failed to start UBT conversion", "root", root, "err", err)
-		} else {
-			log.Info("Started background UBT conversion", "root", root, "batchSize", batchSize)
+			// UBT mode was explicitly requested, so fail if conversion cannot start
+			log.Error("Failed to start UBT conversion", "root", root, "err", err)
+			return fmt.Errorf("UBT conversion required but failed to start: %w", err)
 		}
+		log.Info("Started background UBT conversion", "root", root, "batchSize", batchSize)
 	}
 
 	// If all checks out, manually set the head block.

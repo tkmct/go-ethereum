@@ -253,7 +253,7 @@ func flushAllocWithRootID(ga *types.GenesisAlloc, triedb *triedb.Database, rootI
 		}
 		return rootID, nil
 	}
-	return flushAlloc(ga, triedb)
+	return flushAlloc(ga, triedb, nil)
 }
 
 func getGenesisState(db ethdb.Database, blockhash common.Hash) (alloc types.GenesisAlloc, err error) {
