@@ -100,7 +100,7 @@ func (c *ubtConverter) start() error {
 
 	c.progress.Stage = rawdb.UBTStageRunning
 	c.progress.UpdatedAt = uint64(time.Now().Unix())
-	c.saveProgress()
+	c.saveProgressLocked()
 
 	go c.run()
 	return nil
@@ -170,6 +170,10 @@ func (c *ubtConverter) run() {
 	for acctIter.Next() {
 		select {
 		case <-c.stopCh:
+			c.lock.Lock()
+			c.progress.Stage = rawdb.UBTStageIdle // Mark as idle so it can resume
+			c.progress.UpdatedAt = uint64(time.Now().Unix())
+			c.lock.Unlock()
 			c.saveProgress()
 			log.Info("UBT conversion stopped", "accounts", c.progress.AccountsDone, "slots", c.progress.SlotsDone)
 			return
@@ -215,7 +219,11 @@ func (c *ubtConverter) run() {
 		if acc.Root != types.EmptyRootHash {
 			if err := c.processStorage(accountHash, addr); err != nil {
 				if errors.Is(err, errConverterStopped) {
-					// Stopped mid-storage-processing, save progress and exit
+					// Stopped mid-storage-processing, mark as idle and save progress
+					c.lock.Lock()
+					c.progress.Stage = rawdb.UBTStageIdle
+					c.progress.UpdatedAt = uint64(time.Now().Unix())
+					c.lock.Unlock()
 					c.saveProgress()
 					log.Info("UBT conversion stopped", "accounts", c.progress.AccountsDone, "slots", c.progress.SlotsDone)
 					return
@@ -378,6 +386,12 @@ func (c *ubtConverter) saveProgress() {
 	progress := c.copyProgress()
 	c.lock.Unlock()
 
+	rawdb.WriteUBTConversionStatus(c.diskdb, progress)
+}
+
+// saveProgressLocked persists progress to disk. Caller must hold c.lock.
+func (c *ubtConverter) saveProgressLocked() {
+	progress := c.copyProgress()
 	rawdb.WriteUBTConversionStatus(c.diskdb, progress)
 }
 

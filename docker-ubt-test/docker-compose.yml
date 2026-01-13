@@ -1,0 +1,97 @@
+# UBT Conversion Test Environment
+# Geth with UBT flags + Lighthouse for checkpoint sync
+#
+# Usage:
+#   docker-compose up -d              # Start both services
+#   docker-compose logs -f geth       # Follow Geth logs
+#   ./scripts/monitor-ubt-progress.sh # Monitor UBT conversion
+#   docker-compose down               # Stop services
+
+services:
+  geth:
+    build:
+      context: ..
+      dockerfile: docker-ubt-test/geth/Dockerfile
+    container_name: geth-ubt-test
+    volumes:
+      - ./data/geth-data:/root/.ethereum
+      - ./geth/config:/config
+    ports:
+      - "8545:8545"   # HTTP RPC
+      - "8546:8546"   # WebSocket
+      - "30303:30303" # P2P TCP
+      - "30303:30303/udp" # P2P UDP
+      - "8551:8551"   # Engine API (for consensus)
+      - "6060:6060"   # Metrics/pprof
+    command: >
+      --sepolia
+      --syncmode snap
+      --state.scheme path
+      --state.ubt
+      --ubt.batchsize 1000
+      --datadir /root/.ethereum
+      --authrpc.addr 0.0.0.0
+      --authrpc.port 8551
+      --authrpc.vhosts "*"
+      --authrpc.jwtsecret /config/jwt.hex
+      --http
+      --http.addr 0.0.0.0
+      --http.port 8545
+      --http.vhosts "*"
+      --http.corsdomain "*"
+      --http.api eth,net,web3,debug,admin,txpool
+      --ws
+      --ws.addr 0.0.0.0
+      --ws.port 8546
+      --ws.origins "*"
+      --ws.api eth,net,web3,debug
+      --metrics
+      --metrics.addr 0.0.0.0
+      --metrics.port 6060
+      --pprof
+      --pprof.addr 0.0.0.0
+      --log.json
+      --verbosity 4
+    networks:
+      - eth-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8545"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  lighthouse:
+    image: sigp/lighthouse:latest
+    container_name: lighthouse-ubt-test
+    depends_on:
+      geth:
+        condition: service_healthy
+    volumes:
+      - ./data/lighthouse-data:/root/.lighthouse
+      - ./geth/config:/config
+    ports:
+      - "5052:5052"   # HTTP API
+      - "5054:5054"   # Metrics
+      - "9000:9000"   # P2P TCP
+      - "9000:9000/udp" # P2P UDP
+    command: >
+      lighthouse bn
+      --network sepolia
+      --execution-endpoint http://geth:8551
+      --execution-jwt /config/jwt.hex
+      --checkpoint-sync-url https://sepolia.beaconstate.info
+      --http
+      --http-address 0.0.0.0
+      --http-port 5052
+      --metrics
+      --metrics-address 0.0.0.0
+      --metrics-port 5054
+      --datadir /root/.lighthouse
+    networks:
+      - eth-network
+    restart: unless-stopped
+
+networks:
+  eth-network:
+    driver: bridge
