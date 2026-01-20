@@ -1258,9 +1258,10 @@ func (s *StateDB) commit(deleteEmptyObjects bool, noStorageWiping bool, blockNum
 	// off some milliseconds from the commit operation. Also accumulate the code
 	// writes to run in parallel with the computations.
 	var (
-		start   = time.Now()
-		root    common.Hash
-		workers errgroup.Group
+		start        = time.Now()
+		root         common.Hash
+		computedRoot common.Hash
+		workers      errgroup.Group
 	)
 	// Schedule the account trie first since that will be the biggest, so give
 	// it the most time to crunch.
@@ -1275,6 +1276,7 @@ func (s *StateDB) commit(deleteEmptyObjects bool, noStorageWiping bool, blockNum
 		// Write the account trie changes, measuring the amount of wasted time
 		newroot, set := s.trie.Commit(true)
 		root = newroot
+		computedRoot = newroot
 
 		if err := merge(set); err != nil {
 			return err
@@ -1349,8 +1351,9 @@ func (s *StateDB) commit(deleteEmptyObjects bool, noStorageWiping bool, blockNum
 		s.commitRootOverride = nil
 	}
 	s.originalRoot = root
-
-	return newStateUpdate(noStorageWiping, origin, root, blockNumber, deletes, updates, nodes), nil
+	ret := newStateUpdate(noStorageWiping, origin, root, blockNumber, deletes, updates, nodes)
+	ret.computedRoot = computedRoot
+	return ret, nil
 }
 
 // commitAndFlush is a wrapper of commit which also commits the state mutations
@@ -1436,12 +1439,36 @@ func (s *StateDB) CommitWithUpdate(block uint64, deleteEmptyObjects bool, noStor
 	return ret.root, ret, nil
 }
 
+// CommitWithUpdateNoCode writes the state mutations and returns the state update
+// without deriving contract code metadata. This is cheaper and intended for
+// lightweight progress logging.
+func (s *StateDB) CommitWithUpdateNoCode(block uint64, deleteEmptyObjects bool, noStorageWiping bool) (common.Hash, *StateUpdate, error) {
+	ret, err := s.commitAndFlush(block, deleteEmptyObjects, noStorageWiping, false)
+	if err != nil {
+		return common.Hash{}, nil, err
+	}
+	return ret.root, ret, nil
+}
+
 // CommitWithUpdateAndRoot writes the state mutations and returns the state update,
 // but persists the resulting state under the caller-provided root identifier.
 func (s *StateDB) CommitWithUpdateAndRoot(block uint64, deleteEmptyObjects bool, noStorageWiping bool, root common.Hash) (common.Hash, *StateUpdate, error) {
 	s.commitRootOverride = &root
 	defer func() { s.commitRootOverride = nil }()
 	ret, err := s.commitAndFlush(block, deleteEmptyObjects, noStorageWiping, true)
+	if err != nil {
+		return common.Hash{}, nil, err
+	}
+	return root, ret, nil
+}
+
+// CommitWithUpdateAndRootNoCode writes the state mutations and returns the state
+// update without deriving contract code metadata. The resulting state is stored
+// under the provided root identifier.
+func (s *StateDB) CommitWithUpdateAndRootNoCode(block uint64, deleteEmptyObjects bool, noStorageWiping bool, root common.Hash) (common.Hash, *StateUpdate, error) {
+	s.commitRootOverride = &root
+	defer func() { s.commitRootOverride = nil }()
+	ret, err := s.commitAndFlush(block, deleteEmptyObjects, noStorageWiping, false)
 	if err != nil {
 		return common.Hash{}, nil, err
 	}

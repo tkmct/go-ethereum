@@ -73,6 +73,7 @@ var Defaults = Config{
 	TxSyncDefaultTimeout: 20 * time.Second,
 	TxSyncMaxTimeout:     1 * time.Minute,
 	SlowBlockThreshold:   time.Second * 2,
+	UBTLogInterval:       1000,
 }
 
 //go:generate go run github.com/fjl/gencodec -type Config -formats toml -out gen_config.go
@@ -167,13 +168,9 @@ type Config struct {
 	// computed root will not match the header's stateRoot.
 	StateUseUBT bool
 
-	// UBTConversionBatchSize is the number of accounts to process per commit
-	// during MPT to UBT conversion after snap sync. Default is 1000.
-	UBTConversionBatchSize int
-
-	// UBTConversionDisable disables the automatic MPT to UBT conversion after
-	// snap sync completes. Use if you want to manually control conversion.
-	UBTConversionDisable bool
+	// UBTLogInterval controls how often to log UBT state progress (in blocks).
+	// Set to 0 to disable.
+	UBTLogInterval uint64
 
 	// SkipStateRootValidation disables validating the header stateRoot against the
 	// locally computed one (dangerous; required for StateUseUBT on non-Verkle chains).

@@ -54,6 +54,7 @@ func (c Config) MarshalTOML() (interface{}, error) {
 		EnableWitnessStats      bool
 		StatelessSelfValidation bool
 		StateUseUBT             bool
+		UBTLogInterval          uint64
 		SkipStateRootValidation bool
 		EnableStateSizeTracking bool
 		VMTrace                 string
@@ -106,6 +107,7 @@ func (c Config) MarshalTOML() (interface{}, error) {
 	enc.EnableWitnessStats = c.EnableWitnessStats
 	enc.StatelessSelfValidation = c.StatelessSelfValidation
 	enc.StateUseUBT = c.StateUseUBT
+	enc.UBTLogInterval = c.UBTLogInterval
 	enc.SkipStateRootValidation = c.SkipStateRootValidation
 	enc.EnableStateSizeTracking = c.EnableStateSizeTracking
 	enc.VMTrace = c.VMTrace
@@ -162,6 +164,7 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 		EnableWitnessStats      *bool
 		StatelessSelfValidation *bool
 		StateUseUBT             *bool
+		UBTLogInterval          *uint64
 		SkipStateRootValidation *bool
 		EnableStateSizeTracking *bool
 		VMTrace                 *string
@@ -290,6 +293,9 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	}
 	if dec.StateUseUBT != nil {
 		c.StateUseUBT = *dec.StateUseUBT
+	}
+	if dec.UBTLogInterval != nil {
+		c.UBTLogInterval = *dec.UBTLogInterval
 	}
 	if dec.SkipStateRootValidation != nil {
 		c.SkipStateRootValidation = *dec.SkipStateRootValidation

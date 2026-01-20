@@ -244,15 +244,9 @@ func (db *CachingDB) OpenTrie(root common.Hash) (Trie, error) {
 			panic("state tree transition isn't supported yet")
 		}
 		if ts.Transitioned() {
-			// Check if there's a pending UBT conversion. If conversion is in progress
-			// (not Done), we must fall back to MPT to avoid reading MPT data as UBT.
-			// If no conversion was started (status is nil) or conversion is complete,
-			// use BinaryTrie normally.
-			status := db.triedb.UBTConversionStatus()
-			if status == nil || status.Stage == rawdb.UBTStageDone {
-				return bintrie.NewBinaryTrie(root, db.triedb)
-			}
-			// Conversion is in progress (Idle, Running, or Failed) - fall through to MPT
+			// With full sync from genesis, UBT state is built directly.
+			// No conversion status check is needed.
+			return bintrie.NewBinaryTrie(root, db.triedb)
 		}
 	}
 	tr, err := trie.NewStateTrie(trie.StateTrieID(root), db.triedb)

@@ -1,5 +1,6 @@
 # Data directories (large, should not be committed)
 data/
+bin/
 
 # Generated files
 docker-compose.override.yml

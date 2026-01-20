@@ -167,9 +167,6 @@ var (
 
 	// Verkle transition information
 	VerkleTransitionStatePrefix = []byte("verkle-transition-state-")
-
-	// ubtConversionStatusKey tracks the MPT to UBT conversion progress.
-	ubtConversionStatusKey = []byte("UBTConversionStatus")
 )
 
 // LegacyTxLookupEntry is the legacy TxLookupEntry definition with some unnecessary

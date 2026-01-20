@@ -74,9 +74,10 @@ type accountUpdate struct {
 // execution. It contains information about mutated contract codes, accounts,
 // and storage slots, along with their original values.
 type stateUpdate struct {
-	originRoot  common.Hash // hash of the state before applying mutation
-	root        common.Hash // hash of the state after applying mutation
-	blockNumber uint64      // Associated block number
+	originRoot   common.Hash // hash of the state before applying mutation
+	root         common.Hash // hash of the state after applying mutation
+	blockNumber  uint64      // Associated block number
+	computedRoot common.Hash // hash computed from the trie before any root override
 
 	accounts       map[common.Hash][]byte    // accounts stores mutated accounts in 'slim RLP' encoding
 	accountsOrigin map[common.Address][]byte // accountsOrigin stores the original values of mutated accounts in 'slim RLP' encoding
@@ -94,6 +95,9 @@ type stateUpdate struct {
 
 	codes map[common.Address]*contractCode // codes contains the set of dirty codes
 	nodes *trienode.MergedNodeSet          // Aggregated dirty nodes caused by state changes
+
+	accountChanges     uint64 // number of mutated accounts in this update
+	storageSlotChanges uint64 // number of mutated storage slots in this update
 }
 
 // StateUpdate is an exported alias for stateUpdate, allowing external packages
@@ -177,18 +181,39 @@ func newStateUpdate(rawStorageKey bool, originRoot common.Hash, root common.Hash
 			}
 		}
 	}
-	return &stateUpdate{
-		originRoot:     originRoot,
-		root:           root,
-		blockNumber:    blockNumber,
-		accounts:       accounts,
-		accountsOrigin: accountsOrigin,
-		storages:       storages,
-		storagesOrigin: storagesOrigin,
-		rawStorageKey:  rawStorageKey,
-		codes:          codes,
-		nodes:          nodes,
+	var storageSlots uint64
+	for _, slots := range storages {
+		storageSlots += uint64(len(slots))
 	}
+	return &stateUpdate{
+		originRoot:         originRoot,
+		root:               root,
+		blockNumber:        blockNumber,
+		accounts:           accounts,
+		accountsOrigin:     accountsOrigin,
+		storages:           storages,
+		storagesOrigin:     storagesOrigin,
+		rawStorageKey:      rawStorageKey,
+		codes:              codes,
+		nodes:              nodes,
+		accountChanges:     uint64(len(accounts)),
+		storageSlotChanges: storageSlots,
+	}
+}
+
+// ComputedRoot returns the trie root computed before any commit root override.
+func (sc *stateUpdate) ComputedRoot() common.Hash {
+	return sc.computedRoot
+}
+
+// AccountChanges returns the number of account updates/deletes in this update.
+func (sc *stateUpdate) AccountChanges() uint64 {
+	return sc.accountChanges
+}
+
+// StorageSlotChanges returns the number of storage slot updates/deletes in this update.
+func (sc *stateUpdate) StorageSlotChanges() uint64 {
+	return sc.storageSlotChanges
 }
 
 // stateSet converts the current stateUpdate object into a triedb.StateSet

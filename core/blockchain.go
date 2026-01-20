@@ -192,11 +192,10 @@ type BlockChainConfig struct {
 	VmConfig   vm.Config       // Config options for the EVM Interpreter
 
 	// Experimental options
-	UseUBT                  bool // Force using UBT/BinaryTrie as the state backend (path scheme only)
-	UBTConversionBatchSize  int  // Number of accounts per commit during MPT→UBT conversion (default 1000)
-	UBTConversionDisable    bool // Disable automatic MPT→UBT conversion after snap sync
-	SkipStateRootValidation bool // Skip validating header stateRoot against computed root (dangerous)
-	CommitStateRootToHeader bool // Persist state under the canonical header.Root instead of computed root
+	UseUBT         bool   // Force using UBT/BinaryTrie as the state backend (path scheme only)
+	UBTLogInterval uint64 // Log UBT state progress every N blocks (0 = disable)
+	SkipStateRootValidation bool   // Skip validating header stateRoot against computed root (dangerous)
+	CommitStateRootToHeader bool   // Persist state under the canonical header.Root instead of computed root
 
 	// TxLookupLimit specifies the maximum number of blocks from head for which
 	// transaction hashes will be indexed.
@@ -224,6 +223,7 @@ func DefaultConfig() *BlockChainConfig {
 		SnapshotLimit:    256,
 		SnapshotWait:     true,
 		ChainHistoryMode: history.KeepAll,
+		UBTLogInterval:   0,
 		// Transaction indexing is disabled by default.
 		// This is appropriate for most unit tests.
 		TxLookupLimit: -1,
@@ -368,6 +368,12 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 	if err != nil {
 		return nil, err
 	}
+	// Enable verkle/UBT mode if:
+	// 1. Chain config enables verkle (enableVerkle), or
+	// 2. UseUBT flag is set (for full sync with UBT state backend)
+	//
+	// Note: UseUBT requires full sync mode (--syncmode full) because snap sync
+	// doesn't provide preimages needed for UBT key computation.
 	trieIsVerkle := enableVerkle || cfg.UseUBT
 	triedb := triedb.NewDatabase(db, cfg.triedbConfig(trieIsVerkle))
 
@@ -478,6 +484,7 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 			}
 		}
 	}
+	_ = bc.HasState(head.Root) // Placeholder for future state checks if needed
 	// Ensure that a previous crash in SetHead doesn't leave extra ancients
 	if frozen, err := bc.db.Ancients(); err == nil && frozen > 0 {
 		var (
@@ -1174,23 +1181,6 @@ func (bc *BlockChain) SnapSyncComplete(hash common.Hash) error {
 	if bc.snaps != nil {
 		bc.snaps.Rebuild(root)
 	}
-	// Start background MPT to UBT conversion if UBT mode is enabled.
-	// The snap sync stores state as MPT flat state, but UBT mode requires
-	// BinaryTrie format. The conversion runs in background allowing the node
-	// to continue processing blocks using MPT until conversion completes.
-	if bc.cfg.UseUBT && bc.triedb.Scheme() == rawdb.PathScheme && !bc.cfg.UBTConversionDisable {
-		batchSize := bc.cfg.UBTConversionBatchSize
-		if batchSize <= 0 {
-			batchSize = 1000 // default
-		}
-		if err := bc.triedb.StartUBTConversion(root, batchSize); err != nil {
-			// UBT mode was explicitly requested, so fail if conversion cannot start
-			log.Error("Failed to start UBT conversion", "root", root, "err", err)
-			return fmt.Errorf("UBT conversion required but failed to start: %w", err)
-		}
-		log.Info("Started background UBT conversion", "root", root, "batchSize", batchSize)
-	}
-
 	// If all checks out, manually set the head block.
 	bc.currentBlock.Store(block.Header())
 	headBlockGauge.Update(int64(block.NumberU64()))
@@ -1671,16 +1661,24 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		isCancun      = bc.chainConfig.IsCancun(block.Number(), block.Time())
 		hasStateHook  = bc.logger != nil && bc.logger.OnStateUpdate != nil
 		hasStateSizer = bc.stateSizer != nil
+		ubtLogEnabled = bc.cfg.UseUBT && bc.cfg.UBTLogInterval > 0 && bc.triedb.Scheme() == rawdb.PathScheme
+		update        *state.StateUpdate
 	)
-	if hasStateHook || hasStateSizer {
-		var (
-			r      common.Hash
-			update *state.StateUpdate
-		)
+	needUpdate := hasStateHook || hasStateSizer || ubtLogEnabled
+	needDeriveCode := hasStateHook || hasStateSizer
+	if needUpdate {
 		if bc.cfg.CommitStateRootToHeader {
-			r, update, err = statedb.CommitWithUpdateAndRoot(block.NumberU64(), isEIP158, isCancun, block.Root())
+			if needDeriveCode {
+				root, update, err = statedb.CommitWithUpdateAndRoot(block.NumberU64(), isEIP158, isCancun, block.Root())
+			} else {
+				root, update, err = statedb.CommitWithUpdateAndRootNoCode(block.NumberU64(), isEIP158, isCancun, block.Root())
+			}
 		} else {
-			r, update, err = statedb.CommitWithUpdate(block.NumberU64(), isEIP158, isCancun)
+			if needDeriveCode {
+				root, update, err = statedb.CommitWithUpdate(block.NumberU64(), isEIP158, isCancun)
+			} else {
+				root, update, err = statedb.CommitWithUpdateNoCode(block.NumberU64(), isEIP158, isCancun)
+			}
 		}
 		if err != nil {
 			return err
@@ -1695,7 +1693,6 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		if hasStateSizer {
 			bc.stateSizer.Notify(update)
 		}
-		root = r
 	} else {
 		if bc.cfg.CommitStateRootToHeader {
 			root, err = statedb.CommitWithRoot(block.NumberU64(), isEIP158, isCancun, block.Root())
@@ -1705,6 +1702,14 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		if err != nil {
 			return err
 		}
+	}
+	if ubtLogEnabled && update != nil && bc.cfg.UBTLogInterval > 0 && block.NumberU64()%bc.cfg.UBTLogInterval == 0 {
+		ubtRoot := update.ComputedRoot()
+		log.Info("UBT state progress",
+			"number", block.NumberU64(),
+			"ubtRoot", ubtRoot,
+			"accounts", update.AccountChanges(),
+			"slots", update.StorageSlotChanges())
 	}
 	// If node is running in path mode, skip explicit gc operation
 	// which is unnecessary in this mode.

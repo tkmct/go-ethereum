@@ -291,15 +291,10 @@ var (
 		Usage:    "Store state in UBT/BinaryTrie (experimental; intended for shadow state, requires --state.scheme=path and typically --state.skiproot)",
 		Category: flags.StateCategory,
 	}
-	UBTConversionBatchSizeFlag = &cli.IntFlag{
-		Name:     "ubt.batchsize",
-		Usage:    "Number of accounts to process per commit during MPT to UBT conversion after snap sync",
-		Value:    1000,
-		Category: flags.StateCategory,
-	}
-	UBTConversionDisableFlag = &cli.BoolFlag{
-		Name:     "ubt.noconversion",
-		Usage:    "Disable automatic MPT to UBT conversion after snap sync (use if you want to manually control conversion)",
+	UBTLogIntervalFlag = &cli.Uint64Flag{
+		Name:     "ubt.log-interval",
+		Usage:    "Log UBT state progress every N blocks (0 = disable)",
+		Value:    ethconfig.Defaults.UBTLogInterval,
 		Category: flags.StateCategory,
 	}
 	SkipStateRootValidationFlag = &cli.BoolFlag{
@@ -1069,8 +1064,7 @@ var (
 		DBEngineFlag,
 		StateSchemeFlag,
 		StateUBTFlag,
-		UBTConversionBatchSizeFlag,
-		UBTConversionDisableFlag,
+		UBTLogIntervalFlag,
 		SkipStateRootValidationFlag,
 		HttpHeaderFlag,
 	}
@@ -1736,11 +1730,8 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	if ctx.IsSet(SkipStateRootValidationFlag.Name) {
 		cfg.SkipStateRootValidation = ctx.Bool(SkipStateRootValidationFlag.Name)
 	}
-	if ctx.IsSet(UBTConversionBatchSizeFlag.Name) {
-		cfg.UBTConversionBatchSize = ctx.Int(UBTConversionBatchSizeFlag.Name)
-	}
-	if ctx.IsSet(UBTConversionDisableFlag.Name) {
-		cfg.UBTConversionDisable = ctx.Bool(UBTConversionDisableFlag.Name)
+	if ctx.IsSet(UBTLogIntervalFlag.Name) {
+		cfg.UBTLogInterval = ctx.Uint64(UBTLogIntervalFlag.Name)
 	}
 	// UBT mode requires the path-based state scheme.
 	if cfg.StateUseUBT && cfg.StateScheme != "" && cfg.StateScheme != rawdb.PathScheme {
@@ -1752,6 +1743,10 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	if cfg.StateUseUBT && !cfg.SkipStateRootValidation {
 		cfg.SkipStateRootValidation = true
 		log.Warn("Enabling --state.skiproot automatically because --state.ubt is set (experimental)")
+	}
+	// UBT mode requires full sync to avoid MPT/snap state without preimages.
+	if cfg.StateUseUBT && cfg.SyncMode != ethconfig.FullSync {
+		Fatalf("--%s requires --%s=full", StateUBTFlag.Name, SyncModeFlag.Name)
 	}
 	// Parse transaction history flag, if user is still using legacy config
 	// file with 'TxLookupLimit' configured, copy the value to 'TransactionHistory'.

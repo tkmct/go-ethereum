@@ -20,9 +20,11 @@ if [ ! -f "geth/config/jwt.hex" ]; then
 fi
 
 # Parse arguments
-NETWORK="sepolia"
+NETWORK="hoodi"
 BUILD_ONLY=false
-UBT_BATCH_SIZE=1000
+SYNC_MODE="snap"
+DATA_DIR="/mnt/q/ubt-sync"
+UBT_LOG_INTERVAL=1000
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -34,16 +36,28 @@ while [[ $# -gt 0 ]]; do
             NETWORK="sepolia"
             shift
             ;;
-        --holesky)
-            NETWORK="holesky"
+        --hoodi)
+            NETWORK="hoodi"
             shift
             ;;
         --build-only)
             BUILD_ONLY=true
             shift
             ;;
-        --batch-size)
-            UBT_BATCH_SIZE="$2"
+        --full-sync)
+            SYNC_MODE="full"
+            shift
+            ;;
+        --syncmode)
+            SYNC_MODE="$2"
+            shift 2
+            ;;
+        --data-dir)
+            DATA_DIR="$2"
+            shift 2
+            ;;
+        --ubt-log-interval)
+            UBT_LOG_INTERVAL="$2"
             shift 2
             ;;
         *)
@@ -53,7 +67,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "Network: $NETWORK"
-echo "UBT Batch Size: $UBT_BATCH_SIZE"
+echo "Sync Mode: $SYNC_MODE"
+echo "Data Dir: $DATA_DIR"
+echo "UBT Log Interval: $UBT_LOG_INTERVAL"
 
 # Determine checkpoint sync URL based on network
 case "$NETWORK" in
@@ -63,8 +79,8 @@ case "$NETWORK" in
     sepolia)
         CHECKPOINT_URL="https://sepolia.beaconstate.info"
         ;;
-    holesky)
-        CHECKPOINT_URL="https://checkpoint-sync.holesky.ethpandaops.io"
+    hoodi)
+        CHECKPOINT_URL="https://checkpoint-sync.hoodi.ethpandaops.io"
         ;;
     *)
         CHECKPOINT_URL="https://sepolia.beaconstate.info"
@@ -73,22 +89,30 @@ esac
 
 echo "Checkpoint Sync URL: $CHECKPOINT_URL"
 
+# Ensure data directories exist
+mkdir -p "${DATA_DIR}/geth-data" "${DATA_DIR}/lighthouse-data"
+
 # Create docker-compose override for network
 cat > docker-compose.override.yml << EOF
 version: '3.8'
 services:
   geth:
+    volumes:
+      - ${DATA_DIR}/geth-data:/root/.ethereum
+      - ./geth/config:/config
     command: >
       --${NETWORK}
-      --syncmode snap
+      --syncmode ${SYNC_MODE}
       --state.scheme path
       --state.ubt
-      --ubt.batchsize ${UBT_BATCH_SIZE}
+      --cache.preimages
+      --ubt.log-interval ${UBT_LOG_INTERVAL}
       --datadir /root/.ethereum
       --authrpc.addr 0.0.0.0
       --authrpc.port 8551
       --authrpc.vhosts "*"
       --authrpc.jwtsecret /config/jwt.hex
+      --ipcpath /tmp/geth.ipc
       --http
       --http.addr 0.0.0.0
       --http.port 8545
@@ -108,6 +132,9 @@ services:
       --log.json
       --verbosity 4
   lighthouse:
+    volumes:
+      - ${DATA_DIR}/lighthouse-data:/root/.lighthouse
+      - ./geth/config:/config
     command: >
       lighthouse bn
       --network ${NETWORK}
@@ -142,7 +169,6 @@ echo "=========================================="
 echo ""
 echo "Network: $NETWORK"
 echo "UBT Enabled: Yes (--state.ubt)"
-echo "Batch Size: $UBT_BATCH_SIZE"
 echo ""
 echo "Services:"
 echo "  Geth RPC:      http://localhost:8545"
@@ -154,7 +180,6 @@ echo ""
 echo "Useful commands:"
 echo "  docker-compose logs -f geth       # Follow Geth logs"
 echo "  docker-compose logs -f lighthouse # Follow Lighthouse logs"
-echo "  ./scripts/monitor-sync.sh         # Monitor sync progress"
-echo "  ./scripts/check-ubt-logs.sh       # Check UBT conversion logs"
+echo "  go run ./docker-ubt-test/cmd/ubtctl monitor  # Monitor sync progress"
 echo "  docker-compose down               # Stop everything"
 echo ""

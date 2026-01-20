@@ -6,8 +6,22 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKER_DIR="$(dirname "$SCRIPT_DIR")"
+DATA_DIR="/mnt/q/ubt-sync"
 
 cd "$DOCKER_DIR"
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --data-dir)
+            DATA_DIR="$2"
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
 
 echo "=========================================="
 echo "UBT Test Environment - Clean"
@@ -22,8 +36,8 @@ fi
 
 echo ""
 echo "This will delete:"
-echo "  - Geth chain data (data/geth-data/)"
-echo "  - Lighthouse beacon data (data/lighthouse-data/)"
+echo "  - Geth chain data (${DATA_DIR}/geth-data/)"
+echo "  - Lighthouse beacon data (${DATA_DIR}/lighthouse-data/)"
 echo "  - Generated override file (docker-compose.override.yml)"
 echo ""
 
@@ -36,12 +50,12 @@ fi
 echo ""
 echo "Cleaning data directories..."
 
-rm -rf data/geth-data/*
-rm -rf data/lighthouse-data/*
+rm -rf "${DATA_DIR}/geth-data"/*
+rm -rf "${DATA_DIR}/lighthouse-data"/*
 rm -f docker-compose.override.yml
 
 echo "Done. Data cleared."
 echo ""
 echo "To start fresh:"
-echo "  ./scripts/start-sync.sh"
+echo "  ./scripts/start-sync.sh --data-dir ${DATA_DIR}"
 echo ""

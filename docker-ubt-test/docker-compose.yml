@@ -14,7 +14,7 @@ services:
       dockerfile: docker-ubt-test/geth/Dockerfile
     container_name: geth-ubt-test
     volumes:
-      - ./data/geth-data:/root/.ethereum
+      - /mnt/q/ubt-sync/geth-data:/root/.ethereum
       - ./geth/config:/config
     ports:
       - "8545:8545"   # HTTP RPC
@@ -24,16 +24,17 @@ services:
       - "8551:8551"   # Engine API (for consensus)
       - "6060:6060"   # Metrics/pprof
     command: >
-      --sepolia
-      --syncmode snap
+      --hoodi
+      --syncmode full
       --state.scheme path
       --state.ubt
-      --ubt.batchsize 1000
+      --cache.preimages
       --datadir /root/.ethereum
       --authrpc.addr 0.0.0.0
       --authrpc.port 8551
       --authrpc.vhosts "*"
       --authrpc.jwtsecret /config/jwt.hex
+      --ipcpath /tmp/geth.ipc
       --http
       --http.addr 0.0.0.0
       --http.port 8545
@@ -68,7 +69,7 @@ services:
       geth:
         condition: service_healthy
     volumes:
-      - ./data/lighthouse-data:/root/.lighthouse
+      - /mnt/q/ubt-sync/lighthouse-data:/root/.lighthouse
       - ./geth/config:/config
     ports:
       - "5052:5052"   # HTTP API
@@ -77,10 +78,10 @@ services:
       - "9000:9000/udp" # P2P UDP
     command: >
       lighthouse bn
-      --network sepolia
+      --network hoodi
       --execution-endpoint http://geth:8551
       --execution-jwt /config/jwt.hex
-      --checkpoint-sync-url https://sepolia.beaconstate.info
+      --checkpoint-sync-url https://checkpoint-sync.hoodi.ethpandaops.io
       --http
       --http-address 0.0.0.0
       --http-port 5052
