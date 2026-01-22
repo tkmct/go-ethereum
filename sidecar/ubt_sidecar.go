@@ -17,10 +17,12 @@
 package sidecar
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"runtime"
+	"sort"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -225,19 +227,22 @@ func (sc *UBTSidecar) ConvertFromMPT(stateRoot common.Hash, blockNum uint64, blo
 	if mptDB == nil {
 		return errors.New("missing MPT trie database")
 	}
+	sc.queueMu.Lock()
 	sc.mu.Lock()
 	if !sc.enabled {
 		sc.mu.Unlock()
+		sc.queueMu.Unlock()
 		return errors.New("ubt sidecar disabled")
 	}
 	sc.stale = false
 	sc.ready = false
 	sc.converting = true
 	sc.mu.Unlock()
-
-	if err := sc.resetQueue(); err != nil {
+	if err := sc.resetQueueLocked(); err != nil {
+		sc.queueMu.Unlock()
 		return sc.fail("reset queue", err)
 	}
+	sc.queueMu.Unlock()
 	rawdb.WriteUBTConversionProgress(sc.chainDB, &rawdb.UBTConversionProgress{
 		Root:      stateRoot,
 		Block:     blockNum,
@@ -403,41 +408,6 @@ func (sc *UBTSidecar) ApplyStateUpdate(block *types.Block, update *state.StateUp
 	return nil
 }
 
-// EnqueueUpdate stores the update for replay while converting.
-func (sc *UBTSidecar) EnqueueUpdate(block *types.Block, update *state.StateUpdate) error {
-	if block == nil || update == nil {
-		return nil
-	}
-	if !sc.Converting() {
-		return nil
-	}
-	ubtUpdate := NewUBTUpdate(block, update)
-	blob, err := rlp.EncodeToBytes(ubtUpdate)
-	if err != nil {
-		return sc.fail("encode update", err)
-	}
-	sc.queueMu.Lock()
-	defer sc.queueMu.Unlock()
-	rawdb.WriteUBTUpdateQueueEntry(sc.chainDB, ubtUpdate.BlockNum, ubtUpdate.BlockHash, blob)
-	meta := rawdb.ReadUBTUpdateQueueMeta(sc.chainDB)
-	if meta == nil {
-		meta = &rawdb.UBTUpdateQueueMeta{}
-	}
-	meta.Count++
-	if meta.Oldest == 0 || ubtUpdate.BlockNum < meta.Oldest {
-		meta.Oldest = ubtUpdate.BlockNum
-	}
-	if ubtUpdate.BlockNum > meta.Newest {
-		meta.Newest = ubtUpdate.BlockNum
-	}
-	rawdb.WriteUBTUpdateQueueMeta(sc.chainDB, meta)
-
-	if sc.queueLimit > 0 && meta.Count > sc.queueLimit {
-		return sc.fail("update queue overflow", fmt.Errorf("queued=%d limit=%d", meta.Count, sc.queueLimit))
-	}
-	return nil
-}
-
 func (sc *UBTSidecar) applyUBTUpdate(update *UBTUpdate) error {
 	if update == nil {
 		return nil
@@ -450,12 +420,29 @@ func (sc *UBTSidecar) applyUBTUpdate(update *UBTUpdate) error {
 	if err != nil {
 		return err
 	}
-	for addr, _ := range update.AccountsOrigin {
+	addrs := make([]common.Address, 0, len(update.AccountsOrigin))
+	for addr := range update.AccountsOrigin {
+		addrs = append(addrs, addr)
+	}
+	sort.Slice(addrs, func(i, j int) bool {
+		return bytes.Compare(addrs[i][:], addrs[j][:]) < 0
+	})
+	deletions := make([]common.Address, 0, len(addrs))
+	updates := make([]common.Address, 0, len(addrs))
+	for _, addr := range addrs {
 		addrHash := crypto.Keccak256Hash(addr.Bytes())
 		data, ok := update.Accounts[addrHash]
 		if !ok {
 			return fmt.Errorf("account %x not found in update", addr)
 		}
+		if data == nil {
+			deletions = append(deletions, addr)
+		} else {
+			updates = append(updates, addr)
+		}
+	}
+	for _, addr := range deletions {
+		addrHash := crypto.Keccak256Hash(addr.Bytes())
 		var rawKeyMap map[common.Hash]common.Hash
 		if update.RawStorageKey {
 			if originSlots, ok := update.StoragesOrigin[addr]; ok {
@@ -465,31 +452,48 @@ func (sc *UBTSidecar) applyUBTUpdate(update *UBTUpdate) error {
 				}
 			}
 		}
-		if data == nil {
-			if slots, ok := update.Storages[addrHash]; ok {
-				for slotHash := range slots {
-					rawKey, err := resolveStorageKey(update.RawStorageKey, rawKeyMap, slotHash, sc.chainDB)
-					if err != nil {
-						return err
-					}
-					if err := bt.DeleteStorage(addr, rawKey.Bytes()); err != nil {
-						return err
-					}
+		if slots, ok := update.Storages[addrHash]; ok {
+			slotHashes := make([]common.Hash, 0, len(slots))
+			for slotHash := range slots {
+				slotHashes = append(slotHashes, slotHash)
+			}
+			sort.Slice(slotHashes, func(i, j int) bool {
+				return bytes.Compare(slotHashes[i][:], slotHashes[j][:]) < 0
+			})
+			for _, slotHash := range slotHashes {
+				rawKey, err := resolveStorageKey(update.RawStorageKey, rawKeyMap, slotHash, sc.chainDB)
+				if err != nil {
+					return err
 				}
-			}
-			codeSize, err := readCodeSize(bt, addr)
-			if err != nil {
-				return err
-			}
-			if codeSize > 0 {
-				if err := bt.DeleteContractCode(addr, int(codeSize)); err != nil {
+				if err := bt.DeleteStorage(addr, rawKey.Bytes()); err != nil {
 					return err
 				}
 			}
-			if err := bt.MarkAccountDeleted(addr); err != nil {
+		}
+		codeSize, err := readCodeSize(bt, addr)
+		if err != nil {
+			return err
+		}
+		if codeSize > 0 {
+			if err := bt.DeleteContractCode(addr, int(codeSize)); err != nil {
 				return err
 			}
-			continue
+		}
+		if err := bt.MarkAccountDeleted(addr); err != nil {
+			return err
+		}
+	}
+	for _, addr := range updates {
+		addrHash := crypto.Keccak256Hash(addr.Bytes())
+		data := update.Accounts[addrHash]
+		var rawKeyMap map[common.Hash]common.Hash
+		if update.RawStorageKey {
+			if originSlots, ok := update.StoragesOrigin[addr]; ok {
+				rawKeyMap = make(map[common.Hash]common.Hash, len(originSlots))
+				for rawKey := range originSlots {
+					rawKeyMap[crypto.Keccak256Hash(rawKey.Bytes())] = rawKey
+				}
+			}
 		}
 		account, err := types.FullAccount(data)
 		if err != nil {
@@ -509,7 +513,15 @@ func (sc *UBTSidecar) applyUBTUpdate(update *UBTUpdate) error {
 			}
 		}
 		if slots, ok := update.Storages[addrHash]; ok {
-			for slotHash, encVal := range slots {
+			slotHashes := make([]common.Hash, 0, len(slots))
+			for slotHash := range slots {
+				slotHashes = append(slotHashes, slotHash)
+			}
+			sort.Slice(slotHashes, func(i, j int) bool {
+				return bytes.Compare(slotHashes[i][:], slotHashes[j][:]) < 0
+			})
+			for _, slotHash := range slotHashes {
+				encVal := slots[slotHash]
 				rawKey, err := resolveStorageKey(update.RawStorageKey, rawKeyMap, slotHash, sc.chainDB)
 				if err != nil {
 					return err
@@ -545,95 +557,6 @@ func (sc *UBTSidecar) applyUBTUpdate(update *UBTUpdate) error {
 	sc.currentBlock = update.BlockNum
 	sc.currentHash = update.BlockHash
 	sc.mu.Unlock()
-	return nil
-}
-
-func (sc *UBTSidecar) replayQueuedUpdates() error {
-	for {
-		iter := rawdb.IterateUBTUpdateQueue(sc.chainDB)
-		var (
-			err        error
-			appliedAny bool
-		)
-		for iter.Next() {
-			key := iter.Key()
-			blockNum, blockHash, ok := rawdb.ParseUBTUpdateQueueKey(key)
-			if !ok {
-				continue
-			}
-			data := iter.Value()
-			var update UBTUpdate
-			if err = rlp.DecodeBytes(data, &update); err != nil {
-				iter.Release()
-				return err
-			}
-			canonical := rawdb.ReadCanonicalHash(sc.chainDB, blockNum)
-			if canonical != blockHash {
-				sc.deleteQueueEntry(blockNum, blockHash)
-				continue
-			}
-			sc.mu.RLock()
-			parentHash := sc.currentHash
-			sc.mu.RUnlock()
-			if update.ParentHash != parentHash {
-				iter.Release()
-				return sc.fail("queue parent mismatch", fmt.Errorf("block %d", blockNum))
-			}
-			if err = sc.applyUBTUpdate(&update); err != nil {
-				iter.Release()
-				return err
-			}
-			sc.deleteQueueEntry(blockNum, blockHash)
-			appliedAny = true
-		}
-		iter.Release()
-		if err := iter.Error(); err != nil {
-			return err
-		}
-		meta := rawdb.ReadUBTUpdateQueueMeta(sc.chainDB)
-		if meta == nil || meta.Count == 0 {
-			return nil
-		}
-		if !appliedAny {
-			return sc.fail("queue stalled", errors.New("no applicable updates"))
-		}
-	}
-}
-
-func (sc *UBTSidecar) deleteQueueEntry(blockNum uint64, blockHash common.Hash) {
-	sc.queueMu.Lock()
-	defer sc.queueMu.Unlock()
-	rawdb.DeleteUBTUpdateQueueEntry(sc.chainDB, blockNum, blockHash)
-	meta := rawdb.ReadUBTUpdateQueueMeta(sc.chainDB)
-	if meta == nil {
-		return
-	}
-	if meta.Count > 0 {
-		meta.Count--
-	}
-	if meta.Count == 0 {
-		meta.Oldest = 0
-		meta.Newest = 0
-	}
-	rawdb.WriteUBTUpdateQueueMeta(sc.chainDB, meta)
-}
-
-func (sc *UBTSidecar) resetQueue() error {
-	sc.queueMu.Lock()
-	defer sc.queueMu.Unlock()
-	iter := rawdb.IterateUBTUpdateQueue(sc.chainDB)
-	for iter.Next() {
-		key := iter.Key()
-		blockNum, blockHash, ok := rawdb.ParseUBTUpdateQueueKey(key)
-		if ok {
-			rawdb.DeleteUBTUpdateQueueEntry(sc.chainDB, blockNum, blockHash)
-		}
-	}
-	iter.Release()
-	if err := iter.Error(); err != nil {
-		return err
-	}
-	rawdb.DeleteUBTUpdateQueueMeta(sc.chainDB)
 	return nil
 }
 

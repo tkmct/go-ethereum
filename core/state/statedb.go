@@ -884,7 +884,7 @@ func (s *StateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
 			// (handled in MPT-specific code below)
 		}
 		if len(witness) > 0 {
-			s.witness.AddState(witness)
+			s.witness.AddStatePaths(witness)
 		}
 	}
 	// For MPT mode, collect witness from storage tries

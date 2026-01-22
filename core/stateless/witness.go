@@ -93,8 +93,7 @@ func (w *Witness) AddCode(code []byte) {
 }
 
 // AddState inserts a batch of MPT trie nodes into the witness.
-// For UBT/PathScheme, the map keys are paths and values are node blobs.
-// For MPT/HashScheme, the map keys are paths but we only store blobs.
+// The map keys are paths but we only store blobs.
 func (w *Witness) AddState(nodes map[string][]byte) {
 	if len(nodes) == 0 {
 		return
@@ -102,33 +101,27 @@ func (w *Witness) AddState(nodes map[string][]byte) {
 	w.lock.Lock()
 	defer w.lock.Unlock()
 
-	// Check if this looks like UBT nodes (paths are binary trie paths)
-	// For UBT, preserve paths; for MPT, only store blobs
-	isUBT := false
-	for path := range nodes {
-		// UBT paths are typically shorter binary paths (0-248 bits = 0-31 bytes)
-		// MPT paths are hex-encoded (longer). This is a heuristic.
-		if len(path) <= 32 {
-			isUBT = true
-			break
-		}
+	for _, value := range nodes {
+		w.State[string(value)] = struct{}{}
 	}
+}
 
-	if isUBT {
-		// For UBT, preserve path -> blob mapping
-		if w.StatePaths == nil {
-			w.StatePaths = make(map[string][]byte)
-		}
-		for path, blob := range nodes {
-			w.StatePaths[path] = blob
-			// Also add to State for backward compatibility
-			w.State[string(blob)] = struct{}{}
-		}
-	} else {
-		// For MPT, only store blobs (original behavior)
-		for _, value := range nodes {
-			w.State[string(value)] = struct{}{}
-		}
+// AddStatePaths inserts a batch of UBT trie nodes into the witness.
+// The map keys are paths and values are node blobs.
+func (w *Witness) AddStatePaths(nodes map[string][]byte) {
+	if len(nodes) == 0 {
+		return
+	}
+	w.lock.Lock()
+	defer w.lock.Unlock()
+
+	if w.StatePaths == nil {
+		w.StatePaths = make(map[string][]byte)
+	}
+	for path, blob := range nodes {
+		w.StatePaths[path] = blob
+		// Keep blob set for backward compatibility.
+		w.State[string(blob)] = struct{}{}
 	}
 }
 
