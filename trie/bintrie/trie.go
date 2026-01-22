@@ -301,6 +301,20 @@ func (t *BinaryTrie) DeleteAccount(addr common.Address) error {
 	return nil
 }
 
+// MarkAccountDeleted writes an explicit delete marker for an account.
+// This sets the basic data and code hash leaves to zero and marks suffix 10 as present.
+func (t *BinaryTrie) MarkAccountDeleted(addr common.Address) error {
+	var (
+		zero   [HashSize]byte
+		values = make([][]byte, StemNodeWidth)
+		stem   = GetBinaryTreeKey(addr, zero[:])
+	)
+	values[BasicDataLeafKey] = zero[:]
+	values[CodeHashLeafKey] = zero[:]
+	values[10] = zero[:1]
+	return t.UpdateStem(stem[:StemSize], values)
+}
+
 // DeleteStorage removes any existing value for key from the trie. If a node was not
 // found in the database, a trie.MissingNodeError is returned.
 func (t *BinaryTrie) DeleteStorage(addr common.Address, key []byte) error {
@@ -397,6 +411,38 @@ func (t *BinaryTrie) UpdateContractCode(addr common.Address, codeHash common.Has
 
 			if err != nil {
 				return fmt.Errorf("UpdateContractCode (addr=%x) error: %w", addr[:], err)
+			}
+		}
+	}
+	return nil
+}
+
+// DeleteContractCode removes contract code chunks for the given address.
+func (t *BinaryTrie) DeleteContractCode(addr common.Address, codeSize int) error {
+	if codeSize <= 0 {
+		return nil
+	}
+	var (
+		values [][]byte
+		key    []byte
+		zero   [HashSize]byte
+	)
+	chunkCount := codeSize / StemSize
+	if codeSize%StemSize != 0 {
+		chunkCount++
+	}
+	for chunknr := 0; chunknr < chunkCount; chunknr++ {
+		groupOffset := (chunknr + 128) % StemNodeWidth
+		if groupOffset == 0 || chunknr == 0 {
+			values = make([][]byte, StemNodeWidth)
+			var offset [HashSize]byte
+			binary.LittleEndian.PutUint64(offset[24:], uint64(chunknr)+128)
+			key = GetBinaryTreeKey(addr, offset[:])
+		}
+		values[groupOffset] = zero[:]
+		if groupOffset == StemNodeWidth-1 || chunknr == chunkCount-1 {
+			if err := t.UpdateStem(key[:StemSize], values); err != nil {
+				return fmt.Errorf("DeleteContractCode (addr=%x) error: %w", addr[:], err)
 			}
 		}
 	}

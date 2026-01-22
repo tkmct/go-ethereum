@@ -1,13 +1,13 @@
 #!/bin/bash
-# Validate UBT conversion completeness
-# Runs a series of checks to verify the conversion was successful
+# Validate UBT sidecar conversion completeness
+# Runs a series of checks to verify the sidecar conversion was successful
 
 set -e
 
 GETH_RPC="${GETH_RPC:-http://localhost:8545}"
 
 echo "=========================================="
-echo "UBT Conversion Validation"
+echo "UBT Sidecar Conversion Validation"
 echo "=========================================="
 echo ""
 
@@ -44,8 +44,34 @@ else
 fi
 echo ""
 
-# Check 3: Get latest block
-echo "3. Getting latest block info..."
+# Check 3: Verify UBT sidecar RPCs
+echo "3. Checking UBT sidecar RPCs..."
+BLOCK_TAG="finalized"
+RESULT=$(rpc_call "debug_getUBTProof" "[\"0x0000000000000000000000000000000000000000\", [], \"${BLOCK_TAG}\"]")
+ERROR=$(echo "$RESULT" | jq -r '.error.message // empty')
+UBT_ROOT=$(echo "$RESULT" | jq -r '.result.ubtRoot // empty')
+
+if [ -n "$ERROR" ]; then
+    echo "   FAILED: debug_getUBTProof error: $ERROR"
+    exit 1
+fi
+if [ -z "$UBT_ROOT" ] || [ "$UBT_ROOT" = "0x0000000000000000000000000000000000000000000000000000000000000000" ]; then
+    echo "   FAILED: UBT root missing or zero (sidecar not ready?)"
+    exit 1
+fi
+echo "   OK: UBT root available ($UBT_ROOT)"
+
+RESULT=$(rpc_call "debug_getUBTState" "[\"0x0000000000000000000000000000000000000000\", [], \"${BLOCK_TAG}\"]")
+ERROR=$(echo "$RESULT" | jq -r '.error.message // empty')
+if [ -n "$ERROR" ]; then
+    echo "   FAILED: debug_getUBTState error: $ERROR"
+    exit 1
+fi
+echo "   OK: debug_getUBTState works"
+echo ""
+
+# Check 4: Get latest block
+echo "4. Getting latest block info..."
 RESULT=$(rpc_call "eth_getBlockByNumber" "[\"latest\", false]")
 BLOCK_NUM=$(echo "$RESULT" | jq -r '.result.number // "0x0"')
 BLOCK_HASH=$(echo "$RESULT" | jq -r '.result.hash // "unknown"')
@@ -55,9 +81,9 @@ echo "   Block Hash: $BLOCK_HASH"
 echo "   State Root: $STATE_ROOT"
 echo ""
 
-# Check 4: Sample account reads
-echo "4. Sampling account reads..."
-# Test with well-known addresses (Sepolia faucet, etc.)
+# Check 5: Sample account reads
+echo "5. Sampling account reads..."
+# Test with well-known addresses (common testnet/mainnet placeholders)
 TEST_ADDRESSES=(
     "0x0000000000000000000000000000000000000000"  # Zero address
     "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"  # ETH placeholder
@@ -76,8 +102,8 @@ for ADDR in "${TEST_ADDRESSES[@]}"; do
 done
 echo ""
 
-# Check 5: Check storage read (for a contract)
-echo "5. Testing storage reads..."
+# Check 6: Check storage read (for a contract)
+echo "6. Testing storage reads..."
 # Use a well-known contract address (can be adjusted based on network)
 # For now, just verify the call works
 RESULT=$(rpc_call "eth_getStorageAt" "[\"0x0000000000000000000000000000000000000000\", \"0x0\", \"latest\"]")
@@ -90,8 +116,8 @@ else
 fi
 echo ""
 
-# Check 6: Verify node info
-echo "6. Checking node info..."
+# Check 7: Verify node info
+echo "7. Checking node info..."
 RESULT=$(rpc_call "admin_nodeInfo" "[]")
 PROTOCOLS=$(echo "$RESULT" | jq -r '.result.protocols | keys | join(", ") // "error"')
 echo "   Protocols: $PROTOCOLS"

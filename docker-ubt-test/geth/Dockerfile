@@ -22,8 +22,8 @@ RUN cd /go-ethereum && go mod download
 COPY . /go-ethereum
 WORKDIR /go-ethereum
 
-# Build geth with static linking
-RUN go run build/ci.go install -static ./cmd/geth
+# Build geth (sidecar-enabled, pure Go)
+RUN CGO_ENABLED=0 go build -tags urfave_cli_no_docs -o /go-ethereum/build/bin/geth ./cmd/geth
 
 # Final image
 FROM alpine:latest

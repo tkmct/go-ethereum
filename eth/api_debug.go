@@ -17,9 +17,11 @@
 package eth
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -34,6 +36,7 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/trie"
+	"github.com/ethereum/go-ethereum/trie/bintrie"
 )
 
 // DebugAPI is the collection of Ethereum full node APIs for debugging the
@@ -525,4 +528,247 @@ func (api *DebugAPI) ExecutionWitnessByHash(hash common.Hash) (*stateless.ExtWit
 		return nil, err
 	}
 	return result.Witness().ToExtWitness(), nil
+}
+
+// UBTStorageProof represents a storage proof for UBT.
+type UBTStorageProof struct {
+	Key   common.Hash     `json:"key"`
+	Value hexutil.Bytes   `json:"value"`
+	Proof []hexutil.Bytes `json:"proof"`
+}
+
+// UBTProofResult is the response type for debug_getUBTProof.
+type UBTProofResult struct {
+	Address      common.Address    `json:"address"`
+	AccountProof []hexutil.Bytes   `json:"accountProof"`
+	Balance      *hexutil.Big      `json:"balance"`
+	CodeHash     common.Hash       `json:"codeHash"`
+	Nonce        hexutil.Uint64    `json:"nonce"`
+	StorageHash  common.Hash       `json:"storageHash"`
+	StorageProof []UBTStorageProof `json:"storageProof"`
+	StateRoot    common.Hash       `json:"stateRoot"`
+	UbtRoot      common.Hash       `json:"ubtRoot"`
+}
+
+// UBTStateResult is the response type for debug_getUBTState.
+type UBTStateResult struct {
+	Address   common.Address                `json:"address"`
+	Balance   *hexutil.Big                  `json:"balance"`
+	Nonce     hexutil.Uint64                `json:"nonce"`
+	CodeHash  common.Hash                   `json:"codeHash"`
+	CodeSize  hexutil.Uint64                `json:"codeSize"`
+	Storage   map[common.Hash]hexutil.Bytes `json:"storage"`
+	StateRoot common.Hash                   `json:"stateRoot"`
+	UbtRoot   common.Hash                   `json:"ubtRoot"`
+}
+
+// GetUBTProof returns the binary trie proof for a given account and storage keys.
+func (api *DebugAPI) GetUBTProof(ctx context.Context, address common.Address, storageKeys []string, blockNrOrHash rpc.BlockNumberOrHash) (*UBTProofResult, error) {
+	statedb, header, err := api.eth.APIBackend.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
+	if err != nil {
+		return nil, err
+	}
+	if statedb == nil || header == nil {
+		return nil, fmt.Errorf("state not available for %s", blockNrOrHash)
+	}
+
+	balance := statedb.GetBalance(address)
+	nonce := statedb.GetNonce(address)
+	codeHash := statedb.GetCodeHash(address)
+
+	var ubtRoot common.Hash
+	if sc := api.eth.blockchain.UBTSidecar(); sc != nil {
+		if !sc.Ready() {
+			return nil, errors.New("ubt sidecar not ready")
+		}
+		root, ok := sc.GetUBTRoot(header.Hash())
+		if !ok {
+			return nil, fmt.Errorf("ubt root not found for block %x", header.Hash())
+		}
+		ubtRoot = root
+	} else {
+		ubtRoot = header.Root
+	}
+	bt, err := api.openBinaryTrie(ubtRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open binary trie: %w", err)
+	}
+
+	accountKey := bintrie.GetBinaryTreeKeyBasicData(address)
+	accountProof, err := generateProofFromBinaryTrie(bt, accountKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate account proof: %w", err)
+	}
+
+	storageProofs := make([]UBTStorageProof, len(storageKeys))
+	for i, keyHex := range storageKeys {
+		key, err := parseStorageKey(keyHex)
+		if err != nil {
+			return nil, err
+		}
+		value := statedb.GetState(address, key)
+		ubtKey := bintrie.GetBinaryTreeKeyStorageSlot(address, key.Bytes())
+		proof, err := generateProofFromBinaryTrie(bt, ubtKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate storage proof for %s: %w", keyHex, err)
+		}
+		storageProofs[i] = UBTStorageProof{
+			Key:   key,
+			Value: value.Bytes(),
+			Proof: proof,
+		}
+	}
+
+	return &UBTProofResult{
+		Address:      address,
+		AccountProof: accountProof,
+		Balance:      (*hexutil.Big)(balance.ToBig()),
+		CodeHash:     codeHash,
+		Nonce:        hexutil.Uint64(nonce),
+		StorageHash:  common.Hash{},
+		StorageProof: storageProofs,
+		StateRoot:    header.Root,
+		UbtRoot:      ubtRoot,
+	}, nil
+}
+
+// GetUBTState returns account and storage data read from the UBT sidecar.
+func (api *DebugAPI) GetUBTState(ctx context.Context, address common.Address, storageKeys []string, blockNrOrHash rpc.BlockNumberOrHash) (*UBTStateResult, error) {
+	sc := api.eth.blockchain.UBTSidecar()
+	if sc == nil || !sc.Ready() {
+		return nil, errors.New("ubt sidecar not ready")
+	}
+	header, err := api.eth.APIBackend.HeaderByNumberOrHash(ctx, blockNrOrHash)
+	if err != nil {
+		return nil, err
+	}
+	if header == nil {
+		return nil, fmt.Errorf("block %v not found", blockNrOrHash)
+	}
+	ubtRoot, ok := sc.GetUBTRoot(header.Hash())
+	if !ok {
+		return nil, fmt.Errorf("ubt root not found for block %x", header.Hash())
+	}
+	acc, err := sc.ReadAccount(ubtRoot, address)
+	if err != nil {
+		return nil, err
+	}
+	result := &UBTStateResult{
+		Address:   address,
+		StateRoot: header.Root,
+		UbtRoot:   ubtRoot,
+		Storage:   make(map[common.Hash]hexutil.Bytes, len(storageKeys)),
+	}
+	if acc != nil {
+		result.Balance = (*hexutil.Big)(acc.Balance.ToBig())
+		result.Nonce = hexutil.Uint64(acc.Nonce)
+		result.CodeHash = acc.CodeHash
+		result.CodeSize = hexutil.Uint64(acc.CodeSize)
+	} else {
+		result.Balance = (*hexutil.Big)(new(big.Int))
+	}
+	for _, keyHex := range storageKeys {
+		key, err := parseStorageKey(keyHex)
+		if err != nil {
+			return nil, err
+		}
+		value, err := sc.ReadStorage(ubtRoot, address, key)
+		if err != nil {
+			return nil, err
+		}
+		result.Storage[key] = value.Bytes()
+	}
+	return result, nil
+}
+
+// ExecutionWitnessUBT returns a path-aware witness for UBT nodes.
+func (api *DebugAPI) ExecutionWitnessUBT(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (*stateless.ExtUBTWitness, error) {
+	bc := api.eth.blockchain
+	block, err := api.eth.APIBackend.BlockByNumberOrHash(ctx, blockNrOrHash)
+	if err != nil {
+		return nil, err
+	}
+	if block == nil {
+		return nil, fmt.Errorf("block %v not found", blockNrOrHash)
+	}
+	parent := bc.GetHeader(block.ParentHash(), block.NumberU64()-1)
+	if parent == nil {
+		return nil, fmt.Errorf("block %v found, but parent missing", blockNrOrHash)
+	}
+	result, err := bc.ProcessBlock(parent.Root, block, false, true)
+	if err != nil {
+		return nil, err
+	}
+	witness := result.Witness()
+	if witness == nil {
+		return nil, errors.New("no witness generated")
+	}
+	if len(witness.StatePaths) == 0 {
+		return nil, errors.New("witness has no state paths")
+	}
+	ext := &stateless.ExtUBTWitness{
+		Headers: witness.Headers,
+	}
+	ext.Codes = make([]hexutil.Bytes, 0, len(witness.Codes))
+	for code := range witness.Codes {
+		ext.Codes = append(ext.Codes, []byte(code))
+	}
+	ext.StatePaths = make([]stateless.PathNode, 0, len(witness.StatePaths))
+	for path, node := range witness.StatePaths {
+		ext.StatePaths = append(ext.StatePaths, stateless.PathNode{Path: []byte(path), Node: node})
+	}
+	return ext, nil
+}
+
+func (api *DebugAPI) openBinaryTrie(root common.Hash) (*bintrie.BinaryTrie, error) {
+	if sc := api.eth.blockchain.UBTSidecar(); sc != nil {
+		if !sc.Ready() {
+			return nil, errors.New("ubt sidecar not ready")
+		}
+		return sc.OpenBinaryTrie(root)
+	}
+	trieDB := api.eth.BlockChain().TrieDB()
+	if !trieDB.IsVerkle() {
+		return nil, errors.New("ubt is not enabled")
+	}
+	return bintrie.NewBinaryTrie(root, trieDB)
+}
+
+func generateProofFromBinaryTrie(bt *bintrie.BinaryTrie, targetKey []byte) ([]hexutil.Bytes, error) {
+	it, err := bt.NodeIterator(nil)
+	if err != nil {
+		return nil, err
+	}
+	found := false
+	for it.Next(true) {
+		if it.Leaf() && bytes.Equal(it.LeafKey(), targetKey) {
+			found = true
+			break
+		}
+	}
+	if it.Error() != nil {
+		return nil, it.Error()
+	}
+	if !found {
+		return nil, fmt.Errorf("key not found in trie: %x", targetKey)
+	}
+	proofBytes := it.LeafProof()
+	result := make([]hexutil.Bytes, len(proofBytes))
+	for i, p := range proofBytes {
+		result[i] = hexutil.Bytes(p)
+	}
+	return result, nil
+}
+
+func parseStorageKey(keyHex string) (common.Hash, error) {
+	raw, err := hexutil.Decode(keyHex)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	if len(raw) > 32 {
+		return common.Hash{}, fmt.Errorf("storage key too long: %d", len(raw))
+	}
+	var key common.Hash
+	copy(key[32-len(raw):], raw)
+	return key, nil
 }

@@ -22,7 +22,6 @@ fi
 # Parse arguments
 NETWORK="hoodi"
 BUILD_ONLY=false
-SYNC_MODE="snap"
 DATA_DIR="/mnt/q/ubt-sync"
 UBT_LOG_INTERVAL=1000
 
@@ -32,10 +31,6 @@ while [[ $# -gt 0 ]]; do
             NETWORK="mainnet"
             shift
             ;;
-        --sepolia)
-            NETWORK="sepolia"
-            shift
-            ;;
         --hoodi)
             NETWORK="hoodi"
             shift
@@ -43,14 +38,6 @@ while [[ $# -gt 0 ]]; do
         --build-only)
             BUILD_ONLY=true
             shift
-            ;;
-        --full-sync)
-            SYNC_MODE="full"
-            shift
-            ;;
-        --syncmode)
-            SYNC_MODE="$2"
-            shift 2
             ;;
         --data-dir)
             DATA_DIR="$2"
@@ -67,7 +54,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "Network: $NETWORK"
-echo "Sync Mode: $SYNC_MODE"
 echo "Data Dir: $DATA_DIR"
 echo "UBT Log Interval: $UBT_LOG_INTERVAL"
 
@@ -76,14 +62,11 @@ case "$NETWORK" in
     mainnet)
         CHECKPOINT_URL="https://beaconstate.ethstaker.cc"
         ;;
-    sepolia)
-        CHECKPOINT_URL="https://sepolia.beaconstate.info"
-        ;;
     hoodi)
         CHECKPOINT_URL="https://checkpoint-sync.hoodi.ethpandaops.io"
         ;;
     *)
-        CHECKPOINT_URL="https://sepolia.beaconstate.info"
+        CHECKPOINT_URL="https://checkpoint-sync.hoodi.ethpandaops.io"
         ;;
 esac
 
@@ -102,9 +85,10 @@ services:
       - ./geth/config:/config
     command: >
       --${NETWORK}
-      --syncmode ${SYNC_MODE}
+      --syncmode full
       --state.scheme path
-      --state.ubt
+      --ubt.sidecar
+      --ubt.sidecar.autoconvert
       --cache.preimages
       --ubt.log-interval ${UBT_LOG_INTERVAL}
       --datadir /root/.ethereum
@@ -168,7 +152,7 @@ echo "UBT Test Environment Started"
 echo "=========================================="
 echo ""
 echo "Network: $NETWORK"
-echo "UBT Enabled: Yes (--state.ubt)"
+echo "UBT Sidecar Enabled: Yes (--ubt.sidecar)"
 echo ""
 echo "Services:"
 echo "  Geth RPC:      http://localhost:8545"

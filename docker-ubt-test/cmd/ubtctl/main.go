@@ -181,7 +181,6 @@ type gethStatus struct {
 	SyncDetails bool
 }
 
-
 func fetchGethStatus(ctx context.Context, url string) gethStatus {
 	status := gethStatus{}
 
@@ -221,7 +220,6 @@ func fetchGethStatus(ctx context.Context, url string) gethStatus {
 	return status
 }
 
-
 func printGethStatus(status gethStatus) {
 	fmt.Println("Geth:")
 	if status.RPCError != "" {
@@ -251,7 +249,6 @@ func printGethStatus(status gethStatus) {
 	fmt.Printf("  Peers: %d\n", status.PeerCount)
 }
 
-
 // -------------------------
 // Log summary + filtering
 // -------------------------
@@ -271,11 +268,11 @@ func summarizeLogs(container string, tail int, recent int) (logSummary, error) {
 		return logSummary{}, err
 	}
 
-	startedRe := regexp.MustCompile(`(?i)Started background UBT conversion`)
-	completedRe := regexp.MustCompile(`(?i)UBT conversion completed`)
-	failedRe := regexp.MustCompile(`(?i)UBT conversion failed`)
-	batchRe := regexp.MustCompile(`(?i)UBT conversion batch committed`)
-	ubtRe := regexp.MustCompile(`(?i)(ubt|binary.?trie|conversion)`)
+	startedRe := regexp.MustCompile(`(?i)Starting UBT sidecar conversion`)
+	completedRe := regexp.MustCompile(`(?i)UBT sidecar conversion complete`)
+	failedRe := regexp.MustCompile(`(?i)UBT sidecar conversion failed`)
+	batchRe := regexp.MustCompile(`(?i)UBT sidecar (conversion|replay|queue|update)`)
+	ubtRe := regexp.MustCompile(`(?i)(ubt|binary.?trie|sidecar|conversion)`)
 
 	summary := logSummary{}
 	ring := make([]string, 0, recent)
@@ -327,12 +324,12 @@ func printLogSummary(summary logSummary) {
 	}
 
 	if summary.BatchCount > 0 {
-		fmt.Printf("  Batch commits: %d\n", summary.BatchCount)
+		fmt.Printf("  Progress lines: %d\n", summary.BatchCount)
 		if summary.LatestBatch != "" {
-			fmt.Printf("  Latest batch: %s\n", summary.LatestBatch)
+			fmt.Printf("  Latest progress: %s\n", summary.LatestBatch)
 		}
 	} else {
-		fmt.Println("  Batch commits: 0")
+		fmt.Println("  Progress lines: 0")
 	}
 
 	if len(summary.RecentLines) > 0 {
@@ -347,11 +344,11 @@ func printLogSummary(summary logSummary) {
 func logFilter(mode string) (*regexp.Regexp, error) {
 	switch mode {
 	case "tail", "all":
-		return regexp.MustCompile(`(?i)(ubt|binary.?trie|conversion)`), nil
+		return regexp.MustCompile(`(?i)(ubt|binary.?trie|sidecar|conversion)`), nil
 	case "errors":
-		return regexp.MustCompile(`(?i)(ubt|binary.?trie|conversion).*(error|fail|panic)`), nil
+		return regexp.MustCompile(`(?i)(ubt|binary.?trie|sidecar|conversion).*(error|fail|panic)`), nil
 	case "progress":
-		return regexp.MustCompile(`(?i)ubt.*(progress|account|slot|batch|commit)`), nil
+		return regexp.MustCompile(`(?i)ubt.*(sidecar|conversion|queue|replay|progress|account|slot|commit)`), nil
 	default:
 		return nil, fmt.Errorf("Unknown mode: %s (use tail|all|errors|progress)", mode)
 	}
@@ -555,5 +552,3 @@ func splitLines(s string) []string {
 	}
 	return strings.Split(s, "\n")
 }
-
-

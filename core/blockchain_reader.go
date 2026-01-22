@@ -32,6 +32,7 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/sidecar"
 	"github.com/ethereum/go-ethereum/triedb"
 )
 
@@ -490,6 +491,11 @@ func (bc *BlockChain) HistoryPruningCutoff() (uint64, common.Hash) {
 // TrieDB retrieves the low level trie database used for data storage.
 func (bc *BlockChain) TrieDB() *triedb.Database {
 	return bc.triedb
+}
+
+// UBTSidecar returns the configured UBT sidecar, if any.
+func (bc *BlockChain) UBTSidecar() *sidecar.UBTSidecar {
+	return bc.ubtSidecar
 }
 
 // HeaderChain returns the underlying header chain.

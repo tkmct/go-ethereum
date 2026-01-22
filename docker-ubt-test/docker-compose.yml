@@ -4,7 +4,7 @@
 # Usage:
 #   docker-compose up -d              # Start both services
 #   docker-compose logs -f geth       # Follow Geth logs
-#   ./scripts/monitor-ubt-progress.sh # Monitor UBT conversion
+#   go run ./docker-ubt-test/cmd/ubtctl monitor # Monitor sync + sidecar conversion
 #   docker-compose down               # Stop services
 
 services:
@@ -27,7 +27,8 @@ services:
       --hoodi
       --syncmode full
       --state.scheme path
-      --state.ubt
+      --ubt.sidecar
+      --ubt.sidecar.autoconvert
       --cache.preimages
       --datadir /root/.ethereum
       --authrpc.addr 0.0.0.0

@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Build from the go-ethereum root to resolve imports
-GETH_ROOT="$(cd ../.. && pwd)"
+GETH_ROOT="$(cd ../../.. && pwd)"
 
 echo "Building ubt-validate..."
 cd "$GETH_ROOT"

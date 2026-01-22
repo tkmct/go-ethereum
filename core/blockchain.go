@@ -52,6 +52,7 @@ import (
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/sidecar"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/ethereum/go-ethereum/triedb/hashdb"
 	"github.com/ethereum/go-ethereum/triedb/pathdb"
@@ -192,8 +193,9 @@ type BlockChainConfig struct {
 	VmConfig   vm.Config       // Config options for the EVM Interpreter
 
 	// Experimental options
-	UseUBT         bool   // Force using UBT/BinaryTrie as the state backend (path scheme only)
-	UBTLogInterval uint64 // Log UBT state progress every N blocks (0 = disable)
+	UseUBT                  bool   // Force using UBT/BinaryTrie as the state backend (path scheme only)
+	UBTSidecar              bool   // Enable UBT sidecar (shadow UBT state)
+	UBTSidecarAutoConvert   bool   // Auto convert after full sync
 	SkipStateRootValidation bool   // Skip validating header stateRoot against computed root (dangerous)
 	CommitStateRootToHeader bool   // Persist state under the canonical header.Root instead of computed root
 
@@ -223,7 +225,6 @@ func DefaultConfig() *BlockChainConfig {
 		SnapshotLimit:    256,
 		SnapshotWait:     true,
 		ChainHistoryMode: history.KeepAll,
-		UBTLogInterval:   0,
 		// Transaction indexing is disabled by default.
 		// This is appropriate for most unit tests.
 		TxLookupLimit: -1,
@@ -351,6 +352,8 @@ type BlockChain struct {
 	logger     *tracing.Hooks
 	stateSizer *state.SizeTracker // State size tracking
 
+	ubtSidecar *sidecar.UBTSidecar
+
 	lastForkReadyAlert time.Time     // Last time there was a fork readiness print out
 	slowBlockThreshold time.Duration // Block execution time threshold beyond which detailed statistics will be logged
 }
@@ -418,6 +421,13 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 	bc.validator = NewBlockValidator(chainConfig, bc)
 	bc.prefetcher = newStatePrefetcher(chainConfig, bc.hc)
 	bc.processor = NewStateProcessor(bc.hc)
+	if cfg.UBTSidecar {
+		sc, err := sidecar.NewUBTSidecar(db, cfg.triedbConfig(true))
+		if err != nil {
+			return nil, err
+		}
+		bc.ubtSidecar = sc
+	}
 
 	genesisHeader := bc.GetHeaderByNumber(0)
 	if genesisHeader == nil {
@@ -442,6 +452,11 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 	// Load blockchain states from disk
 	if err := bc.loadLastState(); err != nil {
 		return nil, err
+	}
+	if bc.ubtSidecar != nil {
+		if err := bc.ubtSidecar.InitFromDB(); err != nil {
+			return nil, err
+		}
 	}
 	// Make sure the state associated with the block is available, or log out
 	// if there is no available state, waiting for state sync.
@@ -1381,6 +1396,11 @@ func (bc *BlockChain) Stop() {
 	if bc.logger != nil && bc.logger.OnClose != nil {
 		bc.logger.OnClose()
 	}
+	if bc.ubtSidecar != nil {
+		if err := bc.ubtSidecar.Close(); err != nil {
+			log.Error("Failed to close UBT sidecar trie database", "err", err)
+		}
+	}
 	// Close the trie database, release all the held resources as the last step.
 	if err := bc.triedb.Close(); err != nil {
 		log.Error("Failed to close trie database", "err", err)
@@ -1661,11 +1681,11 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		isCancun      = bc.chainConfig.IsCancun(block.Number(), block.Time())
 		hasStateHook  = bc.logger != nil && bc.logger.OnStateUpdate != nil
 		hasStateSizer = bc.stateSizer != nil
-		ubtLogEnabled = bc.cfg.UseUBT && bc.cfg.UBTLogInterval > 0 && bc.triedb.Scheme() == rawdb.PathScheme
+		sidecarActive = bc.ubtSidecar != nil && (bc.ubtSidecar.Ready() || bc.ubtSidecar.Converting())
 		update        *state.StateUpdate
 	)
-	needUpdate := hasStateHook || hasStateSizer || ubtLogEnabled
-	needDeriveCode := hasStateHook || hasStateSizer
+	needUpdate := hasStateHook || hasStateSizer || sidecarActive
+	needDeriveCode := hasStateHook || hasStateSizer || sidecarActive
 	if needUpdate {
 		if bc.cfg.CommitStateRootToHeader {
 			if needDeriveCode {
@@ -1693,6 +1713,17 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		if hasStateSizer {
 			bc.stateSizer.Notify(update)
 		}
+		if bc.ubtSidecar != nil && update != nil {
+			if bc.ubtSidecar.Ready() {
+				if err := bc.ubtSidecar.ApplyStateUpdate(block, update, bc.db); err != nil {
+					log.Error("Failed to apply UBT sidecar update", "block", block.NumberU64(), "hash", block.Hash(), "err", err)
+				}
+			} else if bc.ubtSidecar.Converting() {
+				if err := bc.ubtSidecar.EnqueueUpdate(block, update); err != nil {
+					log.Error("Failed to enqueue UBT sidecar update", "block", block.NumberU64(), "hash", block.Hash(), "err", err)
+				}
+			}
+		}
 	} else {
 		if bc.cfg.CommitStateRootToHeader {
 			root, err = statedb.CommitWithRoot(block.NumberU64(), isEIP158, isCancun, block.Root())
@@ -1702,14 +1733,6 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		if err != nil {
 			return err
 		}
-	}
-	if ubtLogEnabled && update != nil && bc.cfg.UBTLogInterval > 0 && block.NumberU64()%bc.cfg.UBTLogInterval == 0 {
-		ubtRoot := update.ComputedRoot()
-		log.Info("UBT state progress",
-			"number", block.NumberU64(),
-			"ubtRoot", ubtRoot,
-			"accounts", update.AccountChanges(),
-			"slots", update.StorageSlotChanges())
 	}
 	// If node is running in path mode, skip explicit gc operation
 	// which is unnecessary in this mode.
@@ -2568,6 +2591,11 @@ func (bc *BlockChain) reorg(oldHead *types.Header, newHead *types.Header) error 
 		// len(newChain) == 0 && len(oldChain) > 0
 		// rewind the canonical chain to a lower point.
 		log.Error("Impossible reorg, please file an issue", "oldnum", oldHead.Number, "oldhash", oldHead.Hash(), "oldblocks", len(oldChain), "newnum", newHead.Number, "newhash", newHead.Hash(), "newblocks", len(newChain))
+	}
+	if bc.ubtSidecar != nil && bc.ubtSidecar.Ready() {
+		if err := bc.ubtSidecar.HandleReorg(commonBlock.Hash(), commonBlock.Number.Uint64()); err != nil {
+			log.Error("Failed to recover UBT sidecar during reorg", "number", commonBlock.Number, "hash", commonBlock.Hash(), "err", err)
+		}
 	}
 	// Acquire the tx-lookup lock before mutation. This step is essential
 	// as the txlookups should be changed atomically, and all subsequent

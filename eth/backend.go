@@ -233,8 +233,9 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 			StateScheme:             scheme,
 			ChainHistoryMode:        config.HistoryMode,
 			TxLookupLimit:           int64(min(config.TransactionHistory, math.MaxInt64)),
-			UseUBT:         config.StateUseUBT,
-			UBTLogInterval: config.UBTLogInterval,
+			UseUBT:                  config.StateUseUBT,
+			UBTSidecar:              config.UBTSidecar,
+			UBTSidecarAutoConvert:   config.UBTSidecarAutoConvert,
 			SkipStateRootValidation: config.SkipStateRootValidation,
 			CommitStateRootToHeader: config.StateUseUBT,
 			VmConfig: vm.Config{
@@ -461,7 +462,51 @@ func (s *Ethereum) Start() error {
 	// start log indexer
 	s.filterMaps.Start()
 	go s.updateFilterMapsHeads()
+	s.startUBTSidecarAutoConvert()
 	return nil
+}
+
+func (s *Ethereum) startUBTSidecarAutoConvert() {
+	if !s.config.UBTSidecar || !s.config.UBTSidecarAutoConvert {
+		return
+	}
+	go func() {
+		if s.Synced() {
+			s.triggerUBTSidecarConversion()
+			return
+		}
+		sub := s.eventMux.Subscribe(downloader.DoneEvent{})
+		defer sub.Unsubscribe()
+		for {
+			select {
+			case _, ok := <-sub.Chan():
+				if !ok {
+					return
+				}
+				s.triggerUBTSidecarConversion()
+				return
+			}
+		}
+	}()
+}
+
+func (s *Ethereum) triggerUBTSidecarConversion() {
+	sc := s.blockchain.UBTSidecar()
+	if sc == nil || sc.Ready() || sc.Converting() {
+		return
+	}
+	head := s.blockchain.CurrentBlock()
+	if head == nil {
+		return
+	}
+	log.Info("Starting UBT sidecar conversion", "block", head.Number.Uint64(), "hash", head.Hash(), "root", head.Root)
+	go func(root common.Hash, num uint64, hash common.Hash) {
+		if err := sc.ConvertFromMPT(root, num, hash, s.blockchain.TrieDB()); err != nil {
+			log.Error("UBT sidecar conversion failed", "block", num, "hash", hash, "err", err)
+		} else {
+			log.Info("UBT sidecar conversion complete", "block", num, "hash", hash, "ubtRoot", sc.CurrentRoot())
+		}
+	}(head.Root, head.Number.Uint64(), head.Hash())
 }
 
 func (s *Ethereum) newChainView(head *types.Header) *filtermaps.ChainView {

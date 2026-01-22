@@ -1,6 +1,6 @@
 #!/bin/bash
-# Comprehensive UBT Conversion Validation
-# This script validates that MPT to UBT conversion completed successfully
+# Comprehensive UBT Sidecar Conversion Validation
+# This script validates that MPT to UBT sidecar conversion completed successfully
 # and that the node is functioning correctly with the converted state.
 
 set -e
@@ -41,7 +41,7 @@ check_warn() {
 }
 
 echo "=========================================="
-echo "UBT Conversion Complete Validation"
+echo "UBT Sidecar Conversion Complete Validation"
 echo "=========================================="
 echo ""
 echo "Geth RPC: $GETH_RPC"
@@ -81,15 +81,49 @@ else
     HIGHEST=$(echo "$SYNCING" | jq -r '.highestBlock // "?"')
     check_warn "Node is still syncing: $CURRENT / $HIGHEST"
     echo ""
-    echo "UBT conversion may not be complete yet."
+    echo "UBT sidecar conversion may not be complete yet."
     echo "Wait for sync to complete before running validation."
 fi
 echo ""
 
 # ===========================================
-# Phase 3: State Reads
+# Phase 3: Sidecar RPCs
 # ===========================================
-echo "=== Phase 3: State Reads ==="
+echo "=== Phase 3: Sidecar RPCs ==="
+
+BLOCK_TAG="finalized"
+
+RESULT=$(rpc_call "debug_getUBTProof" "[\"0x0000000000000000000000000000000000000000\", [], \"${BLOCK_TAG}\"]" 2>/dev/null || echo '{"error":{"message":"method not found"}}')
+ERROR=$(echo "$RESULT" | jq -r '.error.message // empty')
+UBT_ROOT=$(echo "$RESULT" | jq -r '.result.ubtRoot // empty')
+if [ -n "$ERROR" ]; then
+    check_fail "debug_getUBTProof error: $ERROR"
+else
+    if [ -z "$UBT_ROOT" ] || [ "$UBT_ROOT" = "0x0000000000000000000000000000000000000000000000000000000000000000" ]; then
+        check_fail "debug_getUBTProof returned empty UBT root (sidecar not ready?)"
+    else
+        check_pass "debug_getUBTProof works (ubtRoot: $UBT_ROOT)"
+    fi
+fi
+
+RESULT=$(rpc_call "debug_getUBTState" "[\"0x0000000000000000000000000000000000000000\", [], \"${BLOCK_TAG}\"]" 2>/dev/null || echo '{"error":{"message":"method not found"}}')
+ERROR=$(echo "$RESULT" | jq -r '.error.message // empty')
+BALANCE=$(echo "$RESULT" | jq -r '.result.balance // empty')
+if [ -n "$ERROR" ]; then
+    check_fail "debug_getUBTState error: $ERROR"
+else
+    if [ -n "$BALANCE" ]; then
+        check_pass "debug_getUBTState works (zero address balance: $BALANCE)"
+    else
+        check_warn "debug_getUBTState returned empty result"
+    fi
+fi
+echo ""
+
+# ===========================================
+# Phase 4: State Reads
+# ===========================================
+echo "=== Phase 4: State Reads ==="
 
 # Test balance read on zero address
 RESULT=$(rpc_call "eth_getBalance" "[\"0x0000000000000000000000000000000000000000\", \"latest\"]")
@@ -126,9 +160,9 @@ fi
 echo ""
 
 # ===========================================
-# Phase 4: Block Execution
+# Phase 5: Block Execution
 # ===========================================
-echo "=== Phase 4: Block Execution ==="
+echo "=== Phase 5: Block Execution ==="
 
 # Get current block
 RESULT1=$(rpc_call "eth_blockNumber" "[]")
@@ -169,9 +203,9 @@ fi
 echo ""
 
 # ===========================================
-# Phase 5: Witness Generation (Optional)
+# Phase 6: Witness Generation (Optional)
 # ===========================================
-echo "=== Phase 5: Witness Generation ==="
+echo "=== Phase 6: Witness Generation ==="
 
 # Try to generate witness for a recent block
 WITNESS_BLOCK=$((BLOCK2_DEC - 5))
@@ -179,16 +213,16 @@ if [ "$WITNESS_BLOCK" -lt 0 ]; then
     WITNESS_BLOCK=0
 fi
 
-RESULT=$(rpc_call "debug_executionWitness" "[$WITNESS_BLOCK]" 2>/dev/null || echo '{"error":"method not found"}')
+RESULT=$(rpc_call "debug_executionWitnessUBT" "[\"0x$(printf "%x" "$WITNESS_BLOCK")\"]" 2>/dev/null || echo '{"error":{"message":"method not found"}}')
 ERROR=$(echo "$RESULT" | jq -r '.error.message // empty')
 WITNESS=$(echo "$RESULT" | jq -r '.result // empty')
 
 if [ -n "$ERROR" ]; then
-    check_warn "Witness generation: $ERROR"
+    check_warn "UBT witness generation: $ERROR"
 elif [ -n "$WITNESS" ] && [ "$WITNESS" != "null" ]; then
-    check_pass "Witness generation works for block $WITNESS_BLOCK"
+    check_pass "UBT witness generation works for block $WITNESS_BLOCK"
 else
-    check_warn "Witness generation returned empty result"
+    check_warn "UBT witness generation returned empty result"
 fi
 echo ""
 
@@ -206,7 +240,7 @@ echo ""
 
 if [ "$FAIL" -eq 0 ]; then
     if [ "$WARN" -eq 0 ]; then
-        echo -e "${GREEN}All checks passed! UBT conversion validation successful.${NC}"
+        echo -e "${GREEN}All checks passed! UBT sidecar conversion validation successful.${NC}"
     else
         echo -e "${YELLOW}Validation passed with warnings. Check details above.${NC}"
     fi

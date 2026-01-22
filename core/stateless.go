@@ -42,6 +42,11 @@ import (
 //
 // TODO(karalabe): Would be nice to resolve both issues above somehow and move it.
 func ExecuteStateless(config *params.ChainConfig, vmconfig vm.Config, block *types.Block, witness *stateless.Witness) (common.Hash, common.Hash, error) {
+	return ExecuteStatelessWithPathDB(config, vmconfig, block, witness, false)
+}
+
+// ExecuteStatelessWithPathDB runs a stateless execution and optionally forces pathdb usage.
+func ExecuteStatelessWithPathDB(config *params.ChainConfig, vmconfig vm.Config, block *types.Block, witness *stateless.Witness, usePathDB bool) (common.Hash, common.Hash, error) {
 	// Sanity check if the supplied block accidentally contains a set root or
 	// receipt hash. If so, be very loud, but still continue.
 	if block.Root() != (common.Hash{}) {
@@ -52,7 +57,7 @@ func ExecuteStateless(config *params.ChainConfig, vmconfig vm.Config, block *typ
 	}
 	// Create and populate the state database to serve as the stateless backend
 	// Check if UBT/Verkle is enabled for this block
-	isVerkle := config.IsVerkle(block.Number(), block.Time())
+	isVerkle := config.IsVerkle(block.Number(), block.Time()) || usePathDB
 	var memdb ethdb.Database
 	var triedbConfig *triedb.Config
 	if isVerkle {

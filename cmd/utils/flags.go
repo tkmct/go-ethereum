@@ -291,10 +291,14 @@ var (
 		Usage:    "Store state in UBT/BinaryTrie (experimental; intended for shadow state, requires --state.scheme=path and typically --state.skiproot)",
 		Category: flags.StateCategory,
 	}
-	UBTLogIntervalFlag = &cli.Uint64Flag{
-		Name:     "ubt.log-interval",
-		Usage:    "Log UBT state progress every N blocks (0 = disable)",
-		Value:    ethconfig.Defaults.UBTLogInterval,
+	UBTSidecarFlag = &cli.BoolFlag{
+		Name:     "ubt.sidecar",
+		Usage:    "Enable UBT sidecar (shadow UBT state) while keeping MPT as consensus state",
+		Category: flags.StateCategory,
+	}
+	UBTSidecarAutoConvertFlag = &cli.BoolFlag{
+		Name:     "ubt.sidecar.autoconvert",
+		Usage:    "Automatically convert MPT state to UBT sidecar after full sync completes",
 		Category: flags.StateCategory,
 	}
 	SkipStateRootValidationFlag = &cli.BoolFlag{
@@ -1064,7 +1068,8 @@ var (
 		DBEngineFlag,
 		StateSchemeFlag,
 		StateUBTFlag,
-		UBTLogIntervalFlag,
+		UBTSidecarFlag,
+		UBTSidecarAutoConvertFlag,
 		SkipStateRootValidationFlag,
 		HttpHeaderFlag,
 	}
@@ -1727,11 +1732,14 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	if ctx.IsSet(StateUBTFlag.Name) {
 		cfg.StateUseUBT = ctx.Bool(StateUBTFlag.Name)
 	}
+	if ctx.IsSet(UBTSidecarFlag.Name) {
+		cfg.UBTSidecar = ctx.Bool(UBTSidecarFlag.Name)
+	}
+	if ctx.IsSet(UBTSidecarAutoConvertFlag.Name) {
+		cfg.UBTSidecarAutoConvert = ctx.Bool(UBTSidecarAutoConvertFlag.Name)
+	}
 	if ctx.IsSet(SkipStateRootValidationFlag.Name) {
 		cfg.SkipStateRootValidation = ctx.Bool(SkipStateRootValidationFlag.Name)
-	}
-	if ctx.IsSet(UBTLogIntervalFlag.Name) {
-		cfg.UBTLogInterval = ctx.Uint64(UBTLogIntervalFlag.Name)
 	}
 	// UBT mode requires the path-based state scheme.
 	if cfg.StateUseUBT && cfg.StateScheme != "" && cfg.StateScheme != rawdb.PathScheme {
@@ -1747,6 +1755,30 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	// UBT mode requires full sync to avoid MPT/snap state without preimages.
 	if cfg.StateUseUBT && cfg.SyncMode != ethconfig.FullSync {
 		Fatalf("--%s requires --%s=full", StateUBTFlag.Name, SyncModeFlag.Name)
+	}
+	// UBT sidecar auto-convert implies sidecar enabled.
+	if cfg.UBTSidecarAutoConvert && !cfg.UBTSidecar {
+		cfg.UBTSidecar = true
+		log.Warn("Enabling --ubt.sidecar automatically because --ubt.sidecar.autoconvert is set")
+	}
+	// Sidecar mode requires full sync, path scheme and preimages.
+	if cfg.UBTSidecar {
+		if cfg.StateUseUBT {
+			Fatalf("--%s cannot be used together with --%s", UBTSidecarFlag.Name, StateUBTFlag.Name)
+		}
+		if cfg.SyncMode != ethconfig.FullSync {
+			Fatalf("--%s requires --%s=full", UBTSidecarFlag.Name, SyncModeFlag.Name)
+		}
+		if cfg.StateScheme != "" && cfg.StateScheme != rawdb.PathScheme {
+			Fatalf("--%s requires --%s=%s", UBTSidecarFlag.Name, StateSchemeFlag.Name, rawdb.PathScheme)
+		}
+		if cfg.StateScheme == "" {
+			cfg.StateScheme = rawdb.PathScheme
+		}
+		if !cfg.Preimages {
+			cfg.Preimages = true
+			log.Warn("Enabling --cache.preimages automatically because --ubt.sidecar is set")
+		}
 	}
 	// Parse transaction history flag, if user is still using legacy config
 	// file with 'TxLookupLimit' configured, copy the value to 'TransactionHistory'.

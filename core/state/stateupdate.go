@@ -206,6 +206,53 @@ func (sc *stateUpdate) ComputedRoot() common.Hash {
 	return sc.computedRoot
 }
 
+// Accounts returns the mutated accounts in slim-RLP encoding.
+// The returned map must not be mutated by the caller.
+func (sc *stateUpdate) Accounts() map[common.Hash][]byte {
+	return sc.accounts
+}
+
+// AccountsOrigin returns the original values of mutated accounts in slim-RLP encoding.
+// The returned map must not be mutated by the caller.
+func (sc *stateUpdate) AccountsOrigin() map[common.Address][]byte {
+	return sc.accountsOrigin
+}
+
+// Storages returns the mutated storage slots in prefix-zero-trimmed RLP format.
+// The returned map must not be mutated by the caller.
+func (sc *stateUpdate) Storages() map[common.Hash]map[common.Hash][]byte {
+	return sc.storages
+}
+
+// StoragesOrigin returns the original values of mutated storage slots.
+// The returned map must not be mutated by the caller.
+func (sc *stateUpdate) StoragesOrigin() map[common.Address]map[common.Hash][]byte {
+	return sc.storagesOrigin
+}
+
+// RawStorageKey returns true if StoragesOrigin is keyed by raw storage slot keys.
+func (sc *stateUpdate) RawStorageKey() bool {
+	return sc.rawStorageKey
+}
+
+// Codes returns the updated contract code blobs keyed by address.
+func (sc *stateUpdate) Codes() map[common.Address][]byte {
+	if len(sc.codes) == 0 {
+		return nil
+	}
+	codes := make(map[common.Address][]byte, len(sc.codes))
+	for addr, code := range sc.codes {
+		codes[addr] = code.blob
+	}
+	return codes
+}
+
+// StateSet returns a triedb.StateSet for the state update.
+// The returned maps must not be mutated by the caller.
+func (sc *stateUpdate) StateSet() *triedb.StateSet {
+	return sc.stateSet()
+}
+
 // AccountChanges returns the number of account updates/deletes in this update.
 func (sc *stateUpdate) AccountChanges() uint64 {
 	return sc.accountChanges
