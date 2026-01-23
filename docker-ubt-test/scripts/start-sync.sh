@@ -24,6 +24,13 @@ NETWORK="hoodi"
 BUILD_ONLY=false
 DATA_DIR="/mnt/q/ubt-sync"
 UBT_LOG_INTERVAL=1000
+METRICS_PORT=6061
+PPROF_PORT=6060
+CACHE_MB=""
+HISTORY_STATE=""
+HISTORY_TX=""
+HISTORY_LOGS_DISABLE=false
+MAXPEERS=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -47,6 +54,34 @@ while [[ $# -gt 0 ]]; do
             UBT_LOG_INTERVAL="$2"
             shift 2
             ;;
+        --metrics-port)
+            METRICS_PORT="$2"
+            shift 2
+            ;;
+        --pprof-port)
+            PPROF_PORT="$2"
+            shift 2
+            ;;
+        --cache)
+            CACHE_MB="$2"
+            shift 2
+            ;;
+        --history-state)
+            HISTORY_STATE="$2"
+            shift 2
+            ;;
+        --history-transactions)
+            HISTORY_TX="$2"
+            shift 2
+            ;;
+        --history-logs-disable)
+            HISTORY_LOGS_DISABLE=true
+            shift
+            ;;
+        --maxpeers)
+            MAXPEERS="$2"
+            shift 2
+            ;;
         *)
             shift
             ;;
@@ -56,6 +91,33 @@ done
 echo "Network: $NETWORK"
 echo "Data Dir: $DATA_DIR"
 echo "UBT Log Interval: $UBT_LOG_INTERVAL"
+echo "Metrics Port: $METRICS_PORT"
+echo "Pprof Port: $PPROF_PORT"
+
+CACHE_FLAG=""
+if [ -n "$CACHE_MB" ]; then
+    CACHE_FLAG="--cache ${CACHE_MB}"
+fi
+
+HISTORY_STATE_FLAG=""
+if [ -n "$HISTORY_STATE" ]; then
+    HISTORY_STATE_FLAG="--history.state ${HISTORY_STATE}"
+fi
+
+HISTORY_TX_FLAG=""
+if [ -n "$HISTORY_TX" ]; then
+    HISTORY_TX_FLAG="--history.transactions ${HISTORY_TX}"
+fi
+
+HISTORY_LOGS_DISABLE_FLAG=""
+if [ "$HISTORY_LOGS_DISABLE" = true ]; then
+    HISTORY_LOGS_DISABLE_FLAG="--history.logs.disable"
+fi
+
+MAXPEERS_FLAG=""
+if [ -n "$MAXPEERS" ]; then
+    MAXPEERS_FLAG="--maxpeers ${MAXPEERS}"
+fi
 
 # Determine checkpoint sync URL based on network
 case "$NETWORK" in
@@ -90,6 +152,11 @@ services:
       --ubt.sidecar
       --ubt.sidecar.autoconvert
       --cache.preimages
+      ${CACHE_FLAG}
+      ${HISTORY_STATE_FLAG}
+      ${HISTORY_TX_FLAG}
+      ${HISTORY_LOGS_DISABLE_FLAG}
+      ${MAXPEERS_FLAG}
       --ubt.log-interval ${UBT_LOG_INTERVAL}
       --datadir /root/.ethereum
       --authrpc.addr 0.0.0.0
@@ -110,10 +177,11 @@ services:
       --ws.api eth,net,web3,debug
       --metrics
       --metrics.addr 0.0.0.0
-      --metrics.port 6060
+      --metrics.port ${METRICS_PORT}
       --pprof
       --pprof.addr 0.0.0.0
-      --log.json
+      --pprof.port ${PPROF_PORT}
+      --log.format json
       --verbosity 4
   lighthouse:
     volumes:

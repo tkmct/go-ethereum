@@ -22,7 +22,8 @@ services:
       - "30303:30303" # P2P TCP
       - "30303:30303/udp" # P2P UDP
       - "8551:8551"   # Engine API (for consensus)
-      - "6060:6060"   # Metrics/pprof
+      - "6060:6060"   # Pprof
+      - "6061:6061"   # Metrics
     command: >
       --hoodi
       --syncmode full
@@ -49,14 +50,19 @@ services:
       --ws.api eth,net,web3,debug
       --metrics
       --metrics.addr 0.0.0.0
-      --metrics.port 6060
+      --metrics.port 6061
       --pprof
       --pprof.addr 0.0.0.0
-      --log.json
+      --pprof.port 6060
+      --log.format json
       --verbosity 4
     networks:
       - eth-network
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8545"]
       interval: 10s
