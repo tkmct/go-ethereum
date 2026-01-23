@@ -23,7 +23,6 @@ fi
 NETWORK="hoodi"
 BUILD_ONLY=false
 DATA_DIR="/mnt/q/ubt-sync"
-UBT_LOG_INTERVAL=1000
 METRICS_PORT=6061
 PPROF_PORT=6060
 CACHE_MB=""
@@ -48,10 +47,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --data-dir)
             DATA_DIR="$2"
-            shift 2
-            ;;
-        --ubt-log-interval)
-            UBT_LOG_INTERVAL="$2"
             shift 2
             ;;
         --metrics-port)
@@ -90,7 +85,6 @@ done
 
 echo "Network: $NETWORK"
 echo "Data Dir: $DATA_DIR"
-echo "UBT Log Interval: $UBT_LOG_INTERVAL"
 echo "Metrics Port: $METRICS_PORT"
 echo "Pprof Port: $PPROF_PORT"
 
@@ -157,7 +151,6 @@ services:
       ${HISTORY_TX_FLAG}
       ${HISTORY_LOGS_DISABLE_FLAG}
       ${MAXPEERS_FLAG}
-      --ubt.log-interval ${UBT_LOG_INTERVAL}
       --datadir /root/.ethereum
       --authrpc.addr 0.0.0.0
       --authrpc.port 8551
