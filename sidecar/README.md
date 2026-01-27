@@ -2,50 +2,32 @@
 
 This module hosts the self-contained UBT sidecar implementation. Existing
 packages should only call into the sidecar through a small interface; all UBT
-conversion, update queueing, and state access live here.
+state access and updates live here.
 
-## Dataflow: Conversion Phase
+## Dataflow: Genesis Seed
 
 ```
 ┌────────────────────────────┐
-│   Canonical Block Import   │
+│     Genesis Initialization  │
+│ (alloc + canonical hash 0)  │
 └────────────────────────────┘
                │
                ▼
 ┌────────────────────────────┐
-│     MPT State Execution     │
-│   CommitWithUpdate* (MPT)   │
+│  sidecar/UBTSidecar         │
+│  Build from genesis alloc   │
 └────────────────────────────┘
-         │                    │
-         │ (enqueue updates)  │
-         ▼                    ▼
-┌────────────────────────────┐   ┌──────────────────────────────────┐
-│  sidecar/UBTSidecar         │   │   sidecar Update Queue           │
-│  Converting (MPT→UBT)       │   │  (StateUpdate snapshots)         │
-└────────────────────────────┘   └──────────────────────────────────┘
-         │
-         ▼
-┌────────────────────────────┐
-│  Iterate MPT + Preimages    │
-│  Build UBT nodes + root     │
-└────────────────────────────┘
-         │
-         ▼
+               │
+               ▼
 ┌────────────────────────────┐
 │  Sidecar triedb (UBT nodes) │
 │  PathScheme + IsVerkle=true │
 └────────────────────────────┘
-         │
-         ▼
-┌────────────────────────────┐
-│  Replay queued updates      │
-│  until head, then Ready     │
-└────────────────────────────┘
 ```
 
 Notes:
-- Missing preimages are a hard error (conversion fails, sidecar becomes stale).
-- During conversion, UBT RPCs must return “sidecar not ready”.
+- Missing genesis state spec is a hard error (sidecar becomes stale).
+- UBT RPCs are available once the genesis seed is complete.
 
 ## Dataflow: Steady State
 

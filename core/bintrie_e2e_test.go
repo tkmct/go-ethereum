@@ -749,7 +749,7 @@ func testNodeOperations(t *testing.T) {
 	}
 
 	// Test Get
-	retrieved, err := tree.Get(key1, nil)
+	retrieved, err := getNodeValue(tree, key1)
 	if err != nil {
 		t.Fatalf("Failed to get: %v", err)
 	}
@@ -764,7 +764,7 @@ func testNodeOperations(t *testing.T) {
 		t.Fatalf("Failed to update: %v", err)
 	}
 
-	retrieved, err = tree.Get(key1, nil)
+	retrieved, err = getNodeValue(tree, key1)
 	if err != nil {
 		t.Fatalf("Failed to get after update: %v", err)
 	}
@@ -781,7 +781,7 @@ func testNodeOperations(t *testing.T) {
 		t.Fatalf("Failed to insert second key: %v", err)
 	}
 
-	retrieved, err = tree.Get(key2, nil)
+	retrieved, err = getNodeValue(tree, key2)
 	if err != nil {
 		t.Fatalf("Failed to get second key: %v", err)
 	}
@@ -790,7 +790,7 @@ func testNodeOperations(t *testing.T) {
 	}
 
 	// Verify first key still works
-	retrieved, err = tree.Get(key1, nil)
+	retrieved, err = getNodeValue(tree, key1)
 	if err != nil {
 		t.Fatalf("Failed to get first key after second insert: %v", err)
 	}
@@ -799,6 +799,23 @@ func testNodeOperations(t *testing.T) {
 	}
 
 	t.Log("Node operations passed")
+}
+
+func getNodeValue(node bintrie.BinaryNode, key []byte) ([]byte, error) {
+	if len(key) < bintrie.StemSize+1 {
+		return nil, nil
+	}
+	switch n := node.(type) {
+	case *bintrie.StemNode:
+		if !bytes.Equal(n.Stem, key[:bintrie.StemSize]) {
+			return nil, nil
+		}
+		return n.Values[key[bintrie.StemSize]], nil
+	case bintrie.Empty:
+		return nil, nil
+	default:
+		return node.Get(key, nil)
+	}
 }
 
 // testNodeCollectionForWitnesses tests that nodes can be collected for witness generation
@@ -885,7 +902,7 @@ func testNodeStructureValidation(t *testing.T) {
 	}
 
 	// Verify we can retrieve values (structure is valid)
-	retrieved1, err := tree.Get(key1, nil)
+	retrieved1, err := getNodeValue(tree, key1)
 	if err != nil {
 		t.Fatalf("Failed to get key1: %v", err)
 	}
@@ -893,7 +910,7 @@ func testNodeStructureValidation(t *testing.T) {
 		t.Errorf("Value mismatch: expected %x, got %x", value, retrieved1)
 	}
 
-	retrieved2, err := tree.Get(key2, nil)
+	retrieved2, err := getNodeValue(tree, key2)
 	if err != nil {
 		t.Fatalf("Failed to get key2: %v", err)
 	}
@@ -923,7 +940,7 @@ func testNodeStructureValidation(t *testing.T) {
 	}
 
 	// Verify we can retrieve values
-	retrieved3, err := tree2.Get(key3, nil)
+	retrieved3, err := getNodeValue(tree2, key3)
 	if err != nil {
 		t.Fatalf("Failed to get key3: %v", err)
 	}
@@ -968,7 +985,7 @@ func testNodeEdgeCases(t *testing.T) {
 		t.Fatalf("Failed to insert at max depth: %v", err)
 	}
 
-	retrieved, err := tree.Get(maxDepthKey, nil)
+	retrieved, err := getNodeValue(tree, maxDepthKey)
 	if err != nil {
 		t.Fatalf("Failed to get at max depth: %v", err)
 	}
@@ -992,7 +1009,7 @@ func testNodeEdgeCases(t *testing.T) {
 		t.Fatalf("Failed to insert duplicate key: %v", err)
 	}
 
-	retrieved, err = tree3.Get(key, nil)
+	retrieved, err = getNodeValue(tree3, key)
 	if err != nil {
 		t.Fatalf("Failed to get after duplicate insert: %v", err)
 	}

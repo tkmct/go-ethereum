@@ -193,11 +193,11 @@ type BlockChainConfig struct {
 	VmConfig   vm.Config       // Config options for the EVM Interpreter
 
 	// Experimental options
-	UseUBT                  bool   // Force using UBT/BinaryTrie as the state backend (path scheme only)
-	UBTSidecar              bool   // Enable UBT sidecar (shadow UBT state)
-	UBTSidecarAutoConvert   bool   // Auto convert after full sync
-	SkipStateRootValidation bool   // Skip validating header stateRoot against computed root (dangerous)
-	CommitStateRootToHeader bool   // Persist state under the canonical header.Root instead of computed root
+	UseUBT                  bool // Force using UBT/BinaryTrie as the state backend (path scheme only)
+	UBTSidecar              bool // Enable UBT sidecar (shadow UBT state)
+	UBTSanityCheck          bool // Enable per-block UBT vs MPT sanity check (debug)
+	SkipStateRootValidation bool // Skip validating header stateRoot against computed root (dangerous)
+	CommitStateRootToHeader bool // Persist state under the canonical header.Root instead of computed root
 
 	// TxLookupLimit specifies the maximum number of blocks from head for which
 	// transaction hashes will be indexed.
@@ -1681,7 +1681,7 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		isCancun      = bc.chainConfig.IsCancun(block.Number(), block.Time())
 		hasStateHook  = bc.logger != nil && bc.logger.OnStateUpdate != nil
 		hasStateSizer = bc.stateSizer != nil
-		sidecarActive = bc.ubtSidecar != nil && (bc.ubtSidecar.Ready() || bc.ubtSidecar.Converting())
+		sidecarActive = bc.ubtSidecar != nil && bc.ubtSidecar.Enabled()
 		update        *state.StateUpdate
 	)
 	needUpdate := hasStateHook || hasStateSizer || sidecarActive
@@ -1713,15 +1713,11 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		if hasStateSizer {
 			bc.stateSizer.Notify(update)
 		}
-		if bc.ubtSidecar != nil && update != nil {
-			if bc.ubtSidecar.Ready() {
-				if err := bc.ubtSidecar.ApplyStateUpdate(block, update, bc.db); err != nil {
-					log.Error("Failed to apply UBT sidecar update", "block", block.NumberU64(), "hash", block.Hash(), "err", err)
-				}
-			} else if bc.ubtSidecar.Converting() {
-				if err := bc.ubtSidecar.EnqueueUpdate(block, update); err != nil {
-					log.Error("Failed to enqueue UBT sidecar update", "block", block.NumberU64(), "hash", block.Hash(), "err", err)
-				}
+		if bc.ubtSidecar != nil && update != nil && bc.ubtSidecar.Ready() {
+			if err := bc.ubtSidecar.ApplyStateUpdate(block, update, bc.db); err != nil {
+				log.Error("Failed to apply UBT sidecar update", "block", block.NumberU64(), "hash", block.Hash(), "err", err)
+			} else if bc.cfg.UBTSanityCheck {
+				bc.ubtSidecar.SanityCheck(block, update, statedb)
 			}
 		}
 	} else {

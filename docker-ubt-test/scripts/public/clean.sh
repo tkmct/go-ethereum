@@ -5,7 +5,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOCKER_DIR="$(dirname "$SCRIPT_DIR")"
+DOCKER_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DATA_DIR="/mnt/q/ubt-sync"
 
 cd "$DOCKER_DIR"
@@ -57,5 +57,5 @@ rm -f docker-compose.override.yml
 echo "Done. Data cleared."
 echo ""
 echo "To start fresh:"
-echo "  ./scripts/start-sync.sh --data-dir ${DATA_DIR}"
+echo "  ./scripts/public/start-sync.sh --data-dir ${DATA_DIR}"
 echo ""

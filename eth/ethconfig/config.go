@@ -169,8 +169,8 @@ type Config struct {
 
 	// UBTSidecar enables the UBT sidecar (shadow UBT state) while keeping MPT consensus state.
 	UBTSidecar bool `toml:",omitempty"`
-	// UBTSidecarAutoConvert triggers conversion after full sync completes.
-	UBTSidecarAutoConvert bool `toml:",omitempty"`
+	// UBTSanityCheck enables per-block sanity checking between MPT and UBT.
+	UBTSanityCheck bool `toml:",omitempty"`
 
 	// SkipStateRootValidation disables validating the header stateRoot against the
 	// locally computed one (dangerous; required for StateUseUBT on non-Verkle chains).

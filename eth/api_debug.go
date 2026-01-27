@@ -17,7 +17,6 @@
 package eth
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -569,7 +568,7 @@ func (api *DebugAPI) GetUBTProof(ctx context.Context, address common.Address, st
 		return nil, err
 	}
 	if statedb == nil || header == nil {
-		return nil, fmt.Errorf("state not available for %s", blockNrOrHash)
+		return nil, fmt.Errorf("state not available for %v", blockNrOrHash)
 	}
 
 	balance := statedb.GetBalance(address)
@@ -735,24 +734,10 @@ func (api *DebugAPI) openBinaryTrie(root common.Hash) (*bintrie.BinaryTrie, erro
 }
 
 func generateProofFromBinaryTrie(bt *bintrie.BinaryTrie, targetKey []byte) ([]hexutil.Bytes, error) {
-	it, err := bt.NodeIterator(nil)
+	proofBytes, err := bt.Proof(targetKey)
 	if err != nil {
 		return nil, err
 	}
-	found := false
-	for it.Next(true) {
-		if it.Leaf() && bytes.Equal(it.LeafKey(), targetKey) {
-			found = true
-			break
-		}
-	}
-	if it.Error() != nil {
-		return nil, it.Error()
-	}
-	if !found {
-		return nil, fmt.Errorf("key not found in trie: %x", targetKey)
-	}
-	proofBytes := it.LeafProof()
 	result := make([]hexutil.Bytes, len(proofBytes))
 	for i, p := range proofBytes {
 		result[i] = hexutil.Bytes(p)

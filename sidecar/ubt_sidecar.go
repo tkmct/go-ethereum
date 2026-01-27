@@ -21,7 +21,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"runtime"
 	"sort"
 	"sync"
 
@@ -39,11 +38,6 @@ import (
 	"github.com/holiman/uint256"
 )
 
-const (
-	defaultQueueLimit = uint64(100_000)
-	yieldEvery        = 50_000
-)
-
 // UBTAccount represents a decoded account from the UBT sidecar.
 type UBTAccount struct {
 	Balance  *uint256.Int
@@ -54,21 +48,18 @@ type UBTAccount struct {
 
 // UBTSidecar maintains a shadow UBT state alongside the canonical MPT state.
 type UBTSidecar struct {
-	mu      sync.RWMutex
-	queueMu sync.Mutex
+	mu sync.RWMutex
 
-	enabled    bool
-	converting bool
-	ready      bool
-	stale      bool
+	enabled bool
+	ready   bool
+	stale   bool
 
 	currentRoot  common.Hash
 	currentBlock uint64
 	currentHash  common.Hash
 
-	triedb     *triedb.Database
-	chainDB    ethdb.Database
-	queueLimit uint64
+	triedb  *triedb.Database
+	chainDB ethdb.Database
 }
 
 // NewUBTSidecar initializes the sidecar with a dedicated verkle namespace.
@@ -81,10 +72,9 @@ func NewUBTSidecar(db ethdb.Database, base *triedb.Config) (*UBTSidecar, error) 
 	cfg.IsVerkle = true
 
 	sc := &UBTSidecar{
-		enabled:    true,
-		triedb:     triedb.NewDatabase(db, &cfg),
-		chainDB:    db,
-		queueLimit: defaultQueueLimit,
+		enabled: true,
+		triedb:  triedb.NewDatabase(db, &cfg),
+		chainDB: db,
 	}
 	return sc, nil
 }
@@ -98,10 +88,9 @@ func NewUBTSidecarWithTrieDB(db ethdb.Database, tdb *triedb.Database) (*UBTSidec
 		return nil, errors.New("ubt sidecar requires verkle/path scheme")
 	}
 	sc := &UBTSidecar{
-		enabled:    true,
-		triedb:     tdb,
-		chainDB:    db,
-		queueLimit: defaultQueueLimit,
+		enabled: true,
+		triedb:  tdb,
+		chainDB: db,
 	}
 	return sc, nil
 }
@@ -118,13 +107,6 @@ func (sc *UBTSidecar) Ready() bool {
 	sc.mu.RLock()
 	defer sc.mu.RUnlock()
 	return sc.enabled && sc.ready && !sc.stale
-}
-
-// Converting returns whether the sidecar is converting MPT to UBT.
-func (sc *UBTSidecar) Converting() bool {
-	sc.mu.RLock()
-	defer sc.mu.RUnlock()
-	return sc.enabled && sc.converting && !sc.stale
 }
 
 // CurrentRoot returns the current UBT root.
@@ -150,15 +132,8 @@ func (sc *UBTSidecar) Close() error {
 // InitFromDB initializes sidecar state from database metadata.
 func (sc *UBTSidecar) InitFromDB() error {
 	sc.mu.Lock()
-	defer sc.mu.Unlock()
 	if !sc.enabled {
-		return nil
-	}
-	if progress := rawdb.ReadUBTConversionProgress(sc.chainDB); progress != nil {
-		sc.stale = true
-		sc.ready = false
-		sc.converting = false
-		log.Warn("UBT sidecar conversion progress found; marking stale", "block", progress.Block, "hash", progress.BlockHash)
+		sc.mu.Unlock()
 		return nil
 	}
 	root, block, hash, ok := rawdb.ReadUBTCurrentRoot(sc.chainDB)
@@ -167,6 +142,23 @@ func (sc *UBTSidecar) InitFromDB() error {
 		sc.currentBlock = block
 		sc.currentHash = hash
 		sc.ready = true
+		sc.mu.Unlock()
+		return nil
+	}
+	sc.mu.Unlock()
+
+	genesisHash := rawdb.ReadCanonicalHash(sc.chainDB, 0)
+	if genesisHash == (common.Hash{}) {
+		_ = sc.fail("genesis hash", errors.New("missing genesis hash"))
+		return nil
+	}
+	alloc, err := readGenesisAlloc(sc.chainDB, genesisHash)
+	if err != nil {
+		_ = sc.fail("genesis alloc", err)
+		return nil
+	}
+	if err := sc.buildFromGenesis(genesisHash, alloc); err != nil {
+		return nil
 	}
 	return nil
 }
@@ -222,148 +214,87 @@ func (sc *UBTSidecar) ReadStorage(root common.Hash, address common.Address, key 
 	return common.BytesToHash(value), nil
 }
 
-// ConvertFromMPT converts the canonical MPT state to the UBT sidecar.
-func (sc *UBTSidecar) ConvertFromMPT(stateRoot common.Hash, blockNum uint64, blockHash common.Hash, mptDB *triedb.Database) error {
-	if mptDB == nil {
-		return errors.New("missing MPT trie database")
+func readGenesisAlloc(db ethdb.KeyValueReader, genesisHash common.Hash) (types.GenesisAlloc, error) {
+	blob := rawdb.ReadGenesisStateSpec(db, genesisHash)
+	if len(blob) == 0 {
+		return nil, errors.New("genesis state missing from db")
 	}
-	sc.queueMu.Lock()
-	sc.mu.Lock()
-	if !sc.enabled {
-		sc.mu.Unlock()
-		sc.queueMu.Unlock()
-		return errors.New("ubt sidecar disabled")
+	var alloc types.GenesisAlloc
+	if err := alloc.UnmarshalJSON(blob); err != nil {
+		return nil, fmt.Errorf("decode genesis alloc: %w", err)
 	}
-	sc.stale = false
-	sc.ready = false
-	sc.converting = true
-	sc.mu.Unlock()
-	if err := sc.resetQueueLocked(); err != nil {
-		sc.queueMu.Unlock()
-		return sc.fail("reset queue", err)
-	}
-	sc.queueMu.Unlock()
-	rawdb.WriteUBTConversionProgress(sc.chainDB, &rawdb.UBTConversionProgress{
-		Root:      stateRoot,
-		Block:     blockNum,
-		BlockHash: blockHash,
-	})
+	return alloc, nil
+}
 
+func (sc *UBTSidecar) buildFromGenesis(genesisHash common.Hash, alloc types.GenesisAlloc) error {
 	bt, err := bintrie.NewBinaryTrie(types.EmptyBinaryHash, sc.triedb)
 	if err != nil {
 		return sc.fail("open ubt trie", err)
 	}
-	accIt, err := mptDB.AccountIterator(stateRoot, common.Hash{})
-	if err != nil {
-		return sc.fail("account iterator", err)
-	}
-	defer accIt.Release()
-
-	var processed uint64
-	for accIt.Next() {
-		accHash := accIt.Hash()
-		addrBytes := rawdb.ReadPreimage(sc.chainDB, accHash)
-		if len(addrBytes) == 0 {
-			return sc.fail("missing account preimage", fmt.Errorf("account %x", accHash))
+	for addr, account := range alloc {
+		balance := uint256.NewInt(0)
+		if account.Balance != nil {
+			balance = uint256.MustFromBig(account.Balance)
 		}
-		if len(addrBytes) != common.AddressLength {
-			return sc.fail("invalid account preimage", fmt.Errorf("account %x", accHash))
+		codeLen := len(account.Code)
+		codeHash := types.EmptyCodeHash
+		if codeLen > 0 {
+			codeHash = crypto.Keccak256Hash(account.Code)
 		}
-		var addr common.Address
-		copy(addr[:], addrBytes)
-
-		accData := accIt.Account()
-		if len(accData) == 0 {
-			continue
+		stateAcc := &types.StateAccount{
+			Nonce:    account.Nonce,
+			Balance:  balance,
+			Root:     types.EmptyRootHash,
+			CodeHash: codeHash.Bytes(),
 		}
-		account, err := types.FullAccount(accData)
-		if err != nil {
-			return sc.fail("decode account", err)
-		}
-		codeLen := 0
-		var code []byte
-		codeHash := codeHashFromBytes(account.CodeHash)
-		if codeHash != types.EmptyCodeHash {
-			code = rawdb.ReadCode(sc.chainDB, codeHash)
-			if len(code) == 0 {
-				return sc.fail("missing code", fmt.Errorf("codehash %x", codeHash))
-			}
-			codeLen = len(code)
-		}
-		if err := bt.UpdateAccount(addr, account, codeLen); err != nil {
+		if err := bt.UpdateAccount(addr, stateAcc, codeLen); err != nil {
 			return sc.fail("update account", err)
 		}
-		if len(code) > 0 {
-			if err := bt.UpdateContractCode(addr, codeHash, code); err != nil {
+		if codeLen > 0 {
+			if err := bt.UpdateContractCode(addr, codeHash, account.Code); err != nil {
 				return sc.fail("update code", err)
 			}
 		}
-
-		if account.Root != types.EmptyRootHash {
-			stIt, err := mptDB.StorageIterator(stateRoot, accHash, common.Hash{})
-			if err != nil {
-				return sc.fail("storage iterator", err)
+		for key, value := range account.Storage {
+			if value == (common.Hash{}) {
+				continue
 			}
-			for stIt.Next() {
-				slotHash := stIt.Hash()
-				slotPreimage := rawdb.ReadPreimage(sc.chainDB, slotHash)
-				if len(slotPreimage) == 0 {
-					stIt.Release()
-					return sc.fail("missing storage preimage", fmt.Errorf("slot %x", slotHash))
-				}
-				if len(slotPreimage) != common.HashLength {
-					stIt.Release()
-					return sc.fail("invalid storage preimage", fmt.Errorf("slot %x", slotHash))
-				}
-				var slotKey common.Hash
-				copy(slotKey[:], slotPreimage)
-				_, val, _, err := rlp.Split(stIt.Slot())
-				if err != nil {
-					stIt.Release()
-					return sc.fail("decode storage value", err)
-				}
-				if err := bt.UpdateStorage(addr, slotKey.Bytes(), val); err != nil {
-					stIt.Release()
-					return sc.fail("update storage", err)
-				}
+			raw := value.Bytes()
+			raw = bytes.TrimLeft(raw, "\x00")
+			if len(raw) == 0 {
+				continue
 			}
-			if err := stIt.Error(); err != nil {
-				stIt.Release()
-				return sc.fail("storage iterator error", err)
+			if err := bt.UpdateStorage(addr, key.Bytes(), raw); err != nil {
+				return sc.fail("update storage", err)
 			}
-			stIt.Release()
-		}
-		processed++
-		if processed%yieldEvery == 0 {
-			runtime.Gosched()
 		}
 	}
-	if err := accIt.Error(); err != nil {
-		return sc.fail("account iterator error", err)
-	}
-
 	root, nodeset := bt.Commit(false)
+	if root == types.EmptyBinaryHash {
+		rawdb.WriteUBTCurrentRoot(sc.chainDB, root, 0, genesisHash)
+		rawdb.WriteUBTBlockRoot(sc.chainDB, genesisHash, root)
+		sc.mu.Lock()
+		sc.currentRoot = root
+		sc.currentBlock = 0
+		sc.currentHash = genesisHash
+		sc.ready = true
+		sc.stale = false
+		sc.mu.Unlock()
+		return nil
+	}
 	merged := trienode.NewWithNodeSet(nodeset)
-	if err := sc.triedb.Update(root, types.EmptyBinaryHash, blockNum, merged, nil); err != nil {
+	if err := sc.triedb.Update(root, types.EmptyBinaryHash, 0, merged, triedb.NewStateSet()); err != nil {
 		return sc.fail("triedb update", err)
 	}
-	rawdb.WriteUBTCurrentRoot(sc.chainDB, root, blockNum, blockHash)
-	rawdb.WriteUBTBlockRoot(sc.chainDB, blockHash, root)
-	rawdb.DeleteUBTConversionProgress(sc.chainDB)
+	rawdb.WriteUBTCurrentRoot(sc.chainDB, root, 0, genesisHash)
+	rawdb.WriteUBTBlockRoot(sc.chainDB, genesisHash, root)
 
 	sc.mu.Lock()
 	sc.currentRoot = root
-	sc.currentBlock = blockNum
-	sc.currentHash = blockHash
-	sc.mu.Unlock()
-
-	if err := sc.replayQueuedUpdates(); err != nil {
-		return sc.fail("replay updates", err)
-	}
-
-	sc.mu.Lock()
-	sc.converting = false
+	sc.currentBlock = 0
+	sc.currentHash = genesisHash
 	sc.ready = true
+	sc.stale = false
 	sc.mu.Unlock()
 	return nil
 }
@@ -398,6 +329,9 @@ func (sc *UBTSidecar) HandleReorg(ancestorHash common.Hash, ancestorNum uint64) 
 
 // ApplyStateUpdate applies a StateUpdate to the sidecar.
 func (sc *UBTSidecar) ApplyStateUpdate(block *types.Block, update *state.StateUpdate, db ethdb.Database) error {
+	if !sc.Ready() {
+		return errors.New("ubt sidecar not ready")
+	}
 	ubtUpdate := NewUBTUpdate(block, update)
 	if ubtUpdate == nil {
 		return nil
@@ -564,7 +498,6 @@ func (sc *UBTSidecar) fail(stage string, err error) error {
 	sc.mu.Lock()
 	sc.stale = true
 	sc.ready = false
-	sc.converting = false
 	sc.mu.Unlock()
 	log.Error("UBT sidecar failed", "stage", stage, "err", err)
 	return err

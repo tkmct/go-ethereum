@@ -55,7 +55,7 @@ func (c Config) MarshalTOML() (interface{}, error) {
 		StatelessSelfValidation bool
 		StateUseUBT             bool
 		UBTSidecar              bool
-		UBTSidecarAutoConvert   bool
+		UBTSanityCheck          bool
 		SkipStateRootValidation bool
 		EnableStateSizeTracking bool
 		VMTrace                 string
@@ -109,7 +109,7 @@ func (c Config) MarshalTOML() (interface{}, error) {
 	enc.StatelessSelfValidation = c.StatelessSelfValidation
 	enc.StateUseUBT = c.StateUseUBT
 	enc.UBTSidecar = c.UBTSidecar
-	enc.UBTSidecarAutoConvert = c.UBTSidecarAutoConvert
+	enc.UBTSanityCheck = c.UBTSanityCheck
 	enc.SkipStateRootValidation = c.SkipStateRootValidation
 	enc.EnableStateSizeTracking = c.EnableStateSizeTracking
 	enc.VMTrace = c.VMTrace
@@ -167,7 +167,7 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 		StatelessSelfValidation *bool
 		StateUseUBT             *bool
 		UBTSidecar              *bool
-		UBTSidecarAutoConvert   *bool
+		UBTSanityCheck          *bool
 		SkipStateRootValidation *bool
 		EnableStateSizeTracking *bool
 		VMTrace                 *string
@@ -300,8 +300,8 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	if dec.UBTSidecar != nil {
 		c.UBTSidecar = *dec.UBTSidecar
 	}
-	if dec.UBTSidecarAutoConvert != nil {
-		c.UBTSidecarAutoConvert = *dec.UBTSidecarAutoConvert
+	if dec.UBTSanityCheck != nil {
+		c.UBTSanityCheck = *dec.UBTSanityCheck
 	}
 	if dec.SkipStateRootValidation != nil {
 		c.SkipStateRootValidation = *dec.SkipStateRootValidation

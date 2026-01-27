@@ -5,7 +5,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOCKER_DIR="$(dirname "$SCRIPT_DIR")"
+DOCKER_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 cd "$DOCKER_DIR"
 
@@ -30,6 +30,7 @@ HISTORY_STATE=""
 HISTORY_TX=""
 HISTORY_LOGS_DISABLE=false
 MAXPEERS=""
+UBT_SANITY=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -77,6 +78,10 @@ while [[ $# -gt 0 ]]; do
             MAXPEERS="$2"
             shift 2
             ;;
+        --ubt-sanity)
+            UBT_SANITY=true
+            shift
+            ;;
         *)
             shift
             ;;
@@ -113,6 +118,11 @@ if [ -n "$MAXPEERS" ]; then
     MAXPEERS_FLAG="--maxpeers ${MAXPEERS}"
 fi
 
+UBT_SANITY_FLAG=""
+if [ "$UBT_SANITY" = true ]; then
+    UBT_SANITY_FLAG="--ubt.sanity"
+fi
+
 # Determine checkpoint sync URL based on network
 case "$NETWORK" in
     mainnet)
@@ -144,7 +154,7 @@ services:
       --syncmode full
       --state.scheme path
       --ubt.sidecar
-      --ubt.sidecar.autoconvert
+      ${UBT_SANITY_FLAG}
       --cache.preimages
       ${CACHE_FLAG}
       ${HISTORY_STATE_FLAG}
@@ -225,6 +235,6 @@ echo ""
 echo "Useful commands:"
 echo "  docker-compose logs -f geth       # Follow Geth logs"
 echo "  docker-compose logs -f lighthouse # Follow Lighthouse logs"
-echo "  go run ./docker-ubt-test/cmd/ubtctl monitor  # Monitor sync progress"
+echo "  go run ./cmd/ubtctl monitor  # Monitor sync progress"
 echo "  docker-compose down               # Stop everything"
 echo ""

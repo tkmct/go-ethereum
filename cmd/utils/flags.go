@@ -296,9 +296,9 @@ var (
 		Usage:    "Enable UBT sidecar (shadow UBT state) while keeping MPT as consensus state",
 		Category: flags.StateCategory,
 	}
-	UBTSidecarAutoConvertFlag = &cli.BoolFlag{
-		Name:     "ubt.sidecar.autoconvert",
-		Usage:    "Automatically convert MPT state to UBT sidecar after full sync completes",
+	UBTSanityFlag = &cli.BoolFlag{
+		Name:     "ubt.sanity",
+		Usage:    "Enable per-block UBT vs MPT sanity check (debug; requires --ubt.sidecar)",
 		Category: flags.StateCategory,
 	}
 	SkipStateRootValidationFlag = &cli.BoolFlag{
@@ -1069,7 +1069,7 @@ var (
 		StateSchemeFlag,
 		StateUBTFlag,
 		UBTSidecarFlag,
-		UBTSidecarAutoConvertFlag,
+		UBTSanityFlag,
 		SkipStateRootValidationFlag,
 		HttpHeaderFlag,
 	}
@@ -1735,8 +1735,8 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	if ctx.IsSet(UBTSidecarFlag.Name) {
 		cfg.UBTSidecar = ctx.Bool(UBTSidecarFlag.Name)
 	}
-	if ctx.IsSet(UBTSidecarAutoConvertFlag.Name) {
-		cfg.UBTSidecarAutoConvert = ctx.Bool(UBTSidecarAutoConvertFlag.Name)
+	if ctx.IsSet(UBTSanityFlag.Name) {
+		cfg.UBTSanityCheck = ctx.Bool(UBTSanityFlag.Name)
 	}
 	if ctx.IsSet(SkipStateRootValidationFlag.Name) {
 		cfg.SkipStateRootValidation = ctx.Bool(SkipStateRootValidationFlag.Name)
@@ -1756,11 +1756,6 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	if cfg.StateUseUBT && cfg.SyncMode != ethconfig.FullSync {
 		Fatalf("--%s requires --%s=full", StateUBTFlag.Name, SyncModeFlag.Name)
 	}
-	// UBT sidecar auto-convert implies sidecar enabled.
-	if cfg.UBTSidecarAutoConvert && !cfg.UBTSidecar {
-		cfg.UBTSidecar = true
-		log.Warn("Enabling --ubt.sidecar automatically because --ubt.sidecar.autoconvert is set")
-	}
 	// Sidecar mode requires full sync, path scheme and preimages.
 	if cfg.UBTSidecar {
 		if cfg.StateUseUBT {
@@ -1779,6 +1774,9 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 			cfg.Preimages = true
 			log.Warn("Enabling --cache.preimages automatically because --ubt.sidecar is set")
 		}
+	}
+	if cfg.UBTSanityCheck && !cfg.UBTSidecar {
+		Fatalf("--%s requires --%s", UBTSanityFlag.Name, UBTSidecarFlag.Name)
 	}
 	// Parse transaction history flag, if user is still using legacy config
 	// file with 'TxLookupLimit' configured, copy the value to 'TransactionHistory'.

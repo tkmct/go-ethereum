@@ -17,21 +17,11 @@
 package rawdb
 
 import (
-	"bytes"
-	"encoding/binary"
-
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rlp"
 )
-
-// UBTConversionProgress represents persistent conversion metadata.
-type UBTConversionProgress struct {
-	Root      common.Hash
-	Block     uint64
-	BlockHash common.Hash
-}
 
 type ubtCurrentRoot struct {
 	Root      common.Hash
@@ -39,33 +29,9 @@ type ubtCurrentRoot struct {
 	BlockHash common.Hash
 }
 
-// UBTUpdateQueueMeta tracks the update queue bounds.
-type UBTUpdateQueueMeta struct {
-	Count  uint64
-	Oldest uint64
-	Newest uint64
-}
-
 // ubtBlockRootKey is the prefix for block hash -> UBT root lookup.
 func ubtBlockRootKey(blockHash common.Hash) []byte {
 	return append(UBTBlockRootPrefix, blockHash.Bytes()...)
-}
-
-// ubtUpdateQueueKey constructs the key for a queued update.
-func ubtUpdateQueueKey(blockNum uint64, blockHash common.Hash) []byte {
-	return append(append(UBTUpdateQueuePrefix, encodeBlockNumber(blockNum)...), blockHash.Bytes()...)
-}
-
-// ParseUBTUpdateQueueKey parses a queued update key into block number and hash.
-func ParseUBTUpdateQueueKey(key []byte) (uint64, common.Hash, bool) {
-	keyLen := len(UBTUpdateQueuePrefix) + 8 + common.HashLength
-	if len(key) != keyLen || !bytes.HasPrefix(key, UBTUpdateQueuePrefix) {
-		return 0, common.Hash{}, false
-	}
-	num := binary.BigEndian.Uint64(key[len(UBTUpdateQueuePrefix) : len(UBTUpdateQueuePrefix)+8])
-	var hash common.Hash
-	copy(hash[:], key[len(UBTUpdateQueuePrefix)+8:])
-	return num, hash, true
 }
 
 // ReadUBTCurrentRoot retrieves the current UBT root and block info.
@@ -106,91 +72,4 @@ func WriteUBTBlockRoot(db ethdb.KeyValueWriter, blockHash common.Hash, root comm
 	if err := db.Put(ubtBlockRootKey(blockHash), root.Bytes()); err != nil {
 		log.Crit("Failed to store UBT block root", "err", err)
 	}
-}
-
-// WriteUBTConversionProgress stores conversion progress metadata.
-func WriteUBTConversionProgress(db ethdb.KeyValueWriter, p *UBTConversionProgress) {
-	blob, err := rlp.EncodeToBytes(p)
-	if err != nil {
-		log.Crit("Failed to encode UBT conversion progress", "err", err)
-	}
-	if err := db.Put(UBTConversionProgressKey, blob); err != nil {
-		log.Crit("Failed to store UBT conversion progress", "err", err)
-	}
-}
-
-// ReadUBTConversionProgress retrieves conversion progress metadata.
-func ReadUBTConversionProgress(db ethdb.KeyValueReader) *UBTConversionProgress {
-	data, _ := db.Get(UBTConversionProgressKey)
-	if len(data) == 0 {
-		return nil
-	}
-	var p UBTConversionProgress
-	if err := rlp.DecodeBytes(data, &p); err != nil {
-		return nil
-	}
-	return &p
-}
-
-// DeleteUBTConversionProgress removes conversion progress metadata.
-func DeleteUBTConversionProgress(db ethdb.KeyValueWriter) {
-	if err := db.Delete(UBTConversionProgressKey); err != nil {
-		log.Crit("Failed to remove UBT conversion progress", "err", err)
-	}
-}
-
-// ReadUBTUpdateQueueMeta retrieves the update queue metadata.
-func ReadUBTUpdateQueueMeta(db ethdb.KeyValueReader) *UBTUpdateQueueMeta {
-	data, _ := db.Get(UBTUpdateQueueMetaKey)
-	if len(data) == 0 {
-		return nil
-	}
-	var meta UBTUpdateQueueMeta
-	if err := rlp.DecodeBytes(data, &meta); err != nil {
-		return nil
-	}
-	return &meta
-}
-
-// WriteUBTUpdateQueueMeta stores the update queue metadata.
-func WriteUBTUpdateQueueMeta(db ethdb.KeyValueWriter, meta *UBTUpdateQueueMeta) {
-	blob, err := rlp.EncodeToBytes(meta)
-	if err != nil {
-		log.Crit("Failed to encode UBT update queue meta", "err", err)
-	}
-	if err := db.Put(UBTUpdateQueueMetaKey, blob); err != nil {
-		log.Crit("Failed to store UBT update queue meta", "err", err)
-	}
-}
-
-// DeleteUBTUpdateQueueMeta removes the update queue metadata.
-func DeleteUBTUpdateQueueMeta(db ethdb.KeyValueWriter) {
-	if err := db.Delete(UBTUpdateQueueMetaKey); err != nil {
-		log.Crit("Failed to remove UBT update queue meta", "err", err)
-	}
-}
-
-// ReadUBTUpdateQueueEntry retrieves a queued update entry.
-func ReadUBTUpdateQueueEntry(db ethdb.KeyValueReader, blockNum uint64, blockHash common.Hash) []byte {
-	data, _ := db.Get(ubtUpdateQueueKey(blockNum, blockHash))
-	return data
-}
-
-// WriteUBTUpdateQueueEntry stores a queued update entry.
-func WriteUBTUpdateQueueEntry(db ethdb.KeyValueWriter, blockNum uint64, blockHash common.Hash, blob []byte) {
-	if err := db.Put(ubtUpdateQueueKey(blockNum, blockHash), blob); err != nil {
-		log.Crit("Failed to store UBT update queue entry", "err", err)
-	}
-}
-
-// DeleteUBTUpdateQueueEntry removes a queued update entry.
-func DeleteUBTUpdateQueueEntry(db ethdb.KeyValueWriter, blockNum uint64, blockHash common.Hash) {
-	if err := db.Delete(ubtUpdateQueueKey(blockNum, blockHash)); err != nil {
-		log.Crit("Failed to delete UBT update queue entry", "err", err)
-	}
-}
-
-// IterateUBTUpdateQueue returns an iterator over queued updates.
-func IterateUBTUpdateQueue(db ethdb.Iteratee) ethdb.Iterator {
-	return NewKeyLengthIterator(db.NewIterator(UBTUpdateQueuePrefix, nil), len(UBTUpdateQueuePrefix)+8+common.HashLength)
 }

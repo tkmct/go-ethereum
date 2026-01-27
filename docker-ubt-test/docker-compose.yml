@@ -29,7 +29,6 @@ services:
       --syncmode full
       --state.scheme path
       --ubt.sidecar
-      --ubt.sidecar.autoconvert
       --cache.preimages
       --datadir /root/.ethereum
       --authrpc.addr 0.0.0.0

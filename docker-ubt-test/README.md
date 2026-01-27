@@ -1,443 +1,254 @@
 # UBT Docker Test Environment
 
-Test environment for validating UBT (Universal Binary Trie) **sidecar** state using Geth with Lighthouse consensus client.
+Test environment for validating UBT (Universal Binary Trie) sidecar state using Geth with Lighthouse consensus client. The primary workflow is syncing against a public testnet.
 
-## Overview
+## Architecture
 
-This environment provides:
-- Geth built from source with UBT sidecar support (MPT remains consensus state)
-- Lighthouse for consensus layer (checkpoint sync)
-- Monitoring and validation scripts
-- Support for Hoodi and Mainnet
+### Mode A: Public Testnet (Hoodi / Mainnet)
 
-## Quick Start (Hoodi, Sidecar)
+Syncs a single Geth+Lighthouse pair from a public network using checkpoint sync.
+Geth runs with `--ubt.sidecar` so it builds a shadow UBT state alongside the
+canonical MPT state starting from genesis.
 
-```bash
-# If you previously synced without preimages or with --state.ubt, clean first:
-# ./scripts/clean.sh --data-dir /mnt/q/ubt-sync
-
-# Start Hoodi testnet (default; full sync + sidecar)
-./scripts/start-sync.sh --hoodi
-
-# Monitor sync + sidecar conversion progress
-go run ./docker-ubt-test/cmd/ubtctl monitor
-
-# Check UBT logs
-go run ./docker-ubt-test/cmd/ubtctl logs --mode tail
-
-# Quick sidecar sanity (finalized)
-curl -s -X POST http://localhost:8545 \
-  -H 'content-type: application/json' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"debug_getUBTProof","params":["0x0000000000000000000000000000000000000000",[], "finalized"]}'
+```
+                    Public Network
+                         |
+                   checkpoint-sync
+                         |
+              +----------+----------+
+              |                     |
+     +--------v--------+  +--------v--------+
+     | lighthouse       |  | geth             |
+     | (beacon node)    |  | (execution layer)|
+     | container:       |  | container:       |
+     |  lighthouse-     |  |  geth-ubt-test   |
+     |  ubt-test        |  |                  |
+     |                  |  | --ubt.sidecar    |
+     |  :5052 HTTP API  |  |                  |
+     |  :9000 P2P       |  |                  |
+     +--------+---------+  |                  |
+              |             |  :8545 RPC       |
+              +--Engine API-+  :8551 Engine    |
+                (jwt.hex)      :30303 P2P      |
+                            +------------------+
+                                    |
+                           /mnt/q/ubt-sync/
+                          (geth-data, lighthouse-data)
 ```
 
-After `eth_syncing` returns `false`, the sidecar auto-convert kicks in. Monitor conversion with:
+**Compose files:** `docker-compose.yml` + `docker-compose.override.yml`
+
+**Flow:**
+1. `scripts/public/start-sync.sh --hoodi` builds Geth from source, generates override, starts containers
+2. Lighthouse checkpoint-syncs the beacon chain, drives Geth via Engine API
+3. Geth full-syncs the execution layer (MPT state)
+4. UBT sidecar is seeded from genesis at startup and updated per block during sync
+5. UBT RPCs (`debug_getUBTProof`, `debug_getUBTState`) are available throughout sync
+
+## Quick Start
+
+### Public Testnet (Hoodi)
+
 ```bash
-go run ./docker-ubt-test/cmd/ubtctl logs --mode progress
+cd docker-ubt-test
+
+# Start (builds Geth from source + Lighthouse)
+./scripts/public/start-sync.sh --hoodi
+
+# Monitor
+go run ./cmd/ubtctl monitor
+
+# Validate after sync
+go run ./cmd/ubtcheck --mode quick
 ```
-When conversion completes, UBT RPCs like `debug_getUBTProof` and `debug_getUBTState` should return results.
+
+## Hoodi Checklist
+
+1) Start sync:
+
+```bash
+./scripts/public/start-sync.sh --hoodi
+```
+
+Optional: enable per-block UBT vs MPT sanity checks:
+
+```bash
+./scripts/public/start-sync.sh --hoodi --ubt-sanity
+```
+
+2) Watch progress:
+
+```bash
+go run ./cmd/ubtctl monitor
+```
+
+3) Confirm UBT is live during sync (use `latest`):
+
+```bash
+curl -s http://localhost:8545 -X POST -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"debug_getUBTProof","params":["0x0000000000000000000000000000000000000000",[],"latest"]}' \
+  | jq -r .result.ubtRoot
+```
+
+Expect a non-zero root.
+
+4) Run quick validator:
+
+```bash
+go run ./cmd/ubtcheck --mode quick --block-tag latest
+```
+
+5) (Optional) After sync, run full validator:
+
+```bash
+go run ./cmd/ubtcheck --mode full --block-tag latest
+```
+
+## Hoodi Automated Smoke Test
+
+Run a single command to wait for RPC, wait for a non-zero UBT root, then invoke
+`ubtcheck`.
+
+```bash
+go run ./cmd/hoodi-smoke --ubtcheck-mode quick --block-tag latest
+```
+
+Flags you may want to tune:
+
+- `--connect-timeout` (default: 2m)
+- `--ubt-timeout` (default: 5m)
+- `--poll-interval` (default: 5s)
+- `--ubtcheck-timeout` (default: 30m)
 
 ## Directory Structure
 
 ```
 docker-ubt-test/
-├── docker-compose.yml        # Main compose file
-├── docker-compose.override.yml  # Network-specific config (auto-generated)
+├── docker-compose.yml            # Public testnet compose
+├── docker-compose.override.yml   # Network-specific overrides (auto-generated)
 ├── cmd/
-│   ├── ubtctl/               # Go monitoring tool (status/monitor/logs)
-│   └── validate/             # Go validation tool
-│       ├── main.go           # CLI entry point
-│       ├── validator.go      # Core validation logic
-│       ├── results.go        # Result formatting
-│       └── build.sh          # Build script
+│   ├── ubtctl/                   # Go monitoring tool (status/monitor/logs)
+│   │   └── main.go
+│   ├── ubtcheck/                 # Go sidecar validation (quick/full)
+│   │   └── main.go
+│   ├── hoodi-smoke/              # Hoodi smoke test (auto)
+│   │   └── main.go
+│   └── validate/                 # Go validation tool (multi-phase)
+│       ├── main.go
+│       ├── validator.go
+│       ├── phase0_precondition.go
+│       ├── phase1_ubt_status.go
+│       ├── phase2_values.go
+│       ├── phase3_transition.go
+│       ├── phase4_witness.go
+│       ├── phase5_rpc.go
+│       ├── results.go
+│       └── types.go
 ├── geth/
-│   ├── Dockerfile            # Builds Geth from source
+│   ├── Dockerfile                # Builds Geth from source with UBT support
 │   └── config/
-│       └── jwt.hex           # JWT secret for Engine API
-├── lighthouse/
-│   └── config/               # Lighthouse configuration
+│       └── jwt.hex               # JWT secret for Engine API
 ├── scripts/
-│   ├── start-sync.sh         # Start the environment
-│   ├── clean.sh              # Clear data directories
-│   ├── validate-conversion.sh # Sidecar sanity (bash)
-│   └── validate-ubt-complete.sh # Full sidecar validation (bash)
-```
-
-Data directory (default):
-```
-/mnt/q/ubt-sync/
-├── geth-data/            # Geth chain data
-└── lighthouse-data/      # Lighthouse beacon data
-```
-
-## Network Options
-
-| Network | State Size | Sync Time | Conversion Time |
-|---------|------------|-----------|-----------------|
-| Hoodi (default) | ~10GB | ~2 hours | ~1 hour |
-| Mainnet | ~300GB | ~8 hours | ~6 hours |
-
-```bash
-# Hoodi (default)
-./scripts/start-sync.sh --hoodi
-
-# Mainnet (production validation)
-./scripts/start-sync.sh --mainnet
-```
-
-Times are rough estimates and will vary with hardware and network conditions.
-
-## Scripts
-
-### start-sync.sh
-
-Builds and starts the Docker environment.
-
-```bash
-./scripts/start-sync.sh [--hoodi|--mainnet] [--data-dir /path] [--ubt-log-interval N] [--build-only]
-
-Options:
-  --hoodi       Use Hoodi testnet (default)
-  --mainnet     Use Ethereum mainnet
-  --data-dir    Host data directory (default: /mnt/q/ubt-sync)
-  --ubt-log-interval  Log UBT state progress every N blocks (default: 1000)
-  --build-only  Build images only, don't start containers
-```
-
-### ubtctl (Go Monitoring Tool)
-
-Unified monitoring CLI for UBT sidecar conversion.
-
-```bash
-# One-shot status (includes UBT log summary)
-go run ./docker-ubt-test/cmd/ubtctl status
-
-# Live monitoring (sync + UBT progress)
-go run ./docker-ubt-test/cmd/ubtctl monitor
-
-# Log filtering (tail/all/errors/progress)
-go run ./docker-ubt-test/cmd/ubtctl logs --mode tail
-```
-
-### validate-conversion.sh (basic health check)
-
-Run basic RPC checks plus sidecar sanity (`debug_getUBTProof` / `debug_getUBTState`).
-
-```bash
-./scripts/validate-conversion.sh
-```
-
-### validate-ubt-complete.sh (sidecar health check)
-
-Comprehensive validation of UBT sidecar conversion completion (bash script). Runs multiple checks:
-
-```bash
-./scripts/validate-ubt-complete.sh
-
-Checks performed:
-  1. Connectivity - Verifies Geth is accessible
-  2. Sync Status - Confirms sync is complete
-  3. Sidecar RPCs - Tests debug_getUBTProof, debug_getUBTState
-  4. State Reads - Tests eth_getBalance, eth_getStorageAt
-  5. Block Execution - Verifies new blocks are being processed
-  6. Witness Generation - Tests debug_executionWitnessUBT
-```
-
-### Go Validation Tool (Recommended)
-
-A Go-based validation tool with better structure and type safety:
-
-```bash
-# Build the tool
-cd cmd/validate && ./build.sh
-
-# Run validation (requires a reference MPT node with debug APIs)
-./cmd/validate/ubt-validate \
-  --ubt-rpc http://localhost:8545 \
-  --reference-rpc http://<REF_NODE>:8545
-
-# Select phases (0..5) or all (default)
-./cmd/validate/ubt-validate --phases 0,1,2 --ubt-rpc http://localhost:8545 --reference-rpc http://<REF_NODE>:8545
-```
-
-Options:
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--ubt-rpc` | `http://localhost:8545` | UBT sidecar node RPC |
-| `--reference-rpc` | (required) | Reference MPT node RPC (debug APIs required) |
-| `--account-samples` | `30000` | Number of accounts to sample |
-| `--storage-samples` | `500` | Storage slots per contract |
-| `--phases` | `all` | Phases to run (0..5 or all) |
-
-**Note:** The current validator compares standard eth/debug outputs (MPT). It does not yet compare `debug_getUBTState` directly. For sidecar-specific checks, use the RPC snippets below.
-
-Example reference node (no sidecar, Hoodi):
-```bash
-geth --hoodi --syncmode=full --state.scheme=path --cache.preimages \
-  --http --http.addr 0.0.0.0 --http.port 8545 \
-  --http.api eth,net,web3,debug
-```
-
-### Sidecar RPC Checks (Direct)
-
-```bash
-# UBT root (finalized/safe recommended)
-curl -s -X POST http://localhost:8545 \
-  -H 'content-type: application/json' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"debug_getUBTProof","params":["0x0000000000000000000000000000000000000000",[], "finalized"]}'
-
-# UBT account/storage reads
-curl -s -X POST http://localhost:8545 \
-  -H 'content-type: application/json' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"debug_getUBTState","params":["0x0000000000000000000000000000000000000000",[], "finalized"]}'
-
-# UBT witness for latest block (uses sidecar)
-curl -s -X POST http://localhost:8545 \
-  -H 'content-type: application/json' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"debug_executionWitnessUBT","params":["latest"]}'
+│   └── public/                   # Public testnet helpers
+│       ├── start-sync.sh          # Start public testnet environment
+│       └── clean.sh               # Clear data directories
+└── data/                         # Data dir for public testnet sync (gitignored)
 ```
 
 ## Exposed Ports
+
+### Public Testnet
 
 | Port | Service | Description |
 |------|---------|-------------|
 | 8545 | Geth | HTTP RPC |
 | 8546 | Geth | WebSocket |
-| 8551 | Geth | Engine API (Auth RPC) |
-| 6060 | Geth | Metrics/pprof |
+| 8551 | Geth | Engine API |
+| 6060 | Geth | pprof |
+| 6061 | Geth | Metrics |
 | 30303 | Geth | P2P |
 | 5052 | Lighthouse | HTTP API |
 | 5054 | Lighthouse | Metrics |
 | 9000 | Lighthouse | P2P |
+| 8552 | geth-seed | Engine API (seed) |
+| 6061 | geth-ubt | Metrics (UBT) |
+| 6062 | geth-seed | Metrics (seed) |
+| 5052 | lighthouse-bn-ubt | HTTP API (UBT) |
+| 5053 | lighthouse-bn-seed | HTTP API (seed) |
+| 30303 | geth-ubt | P2P (UBT) |
+| 30305 | geth-seed | P2P (seed) |
+| 9000 | lighthouse-bn-ubt | P2P (UBT) |
+| 9001 | lighthouse-bn-seed | P2P (seed) |
 
-## Test Scenarios
+## Tools
 
-### 1. Fresh Sync with UBT Sidecar Conversion (Hoodi)
+### ubtctl
+
+Monitoring CLI for UBT sidecar status (public testnet mode).
 
 ```bash
-# Start fresh
-./scripts/start-sync.sh --hoodi
+go run ./cmd/ubtctl status    # One-shot status
+go run ./cmd/ubtctl monitor   # Live monitoring
+go run ./cmd/ubtctl logs --mode tail      # Follow logs
+go run ./cmd/ubtctl logs --mode progress  # Sidecar progress
+```
 
-# Monitor until sync completes (then sidecar auto-converts)
-go run ./docker-ubt-test/cmd/ubtctl monitor
+### ubtcheck
 
-# Validate basic health + sidecar sanity
-./scripts/validate-conversion.sh
+Quick sidecar validation (single node, no reference required).
 
-# Sidecar sanity (finalized)
+```bash
+go run ./cmd/ubtcheck --mode quick   # Fast checks
+go run ./cmd/ubtcheck --mode full    # Includes block progression + witness
+```
+
+### validate
+
+Multi-phase validation tool. Compares UBT sidecar node against a reference MPT node.
+
+```bash
+go run ./cmd/validate \
+  --ubt-rpc http://localhost:8545 \
+  --reference-rpc http://<REF_NODE>:8545 \
+  --phases all
+```
+
+Phases: 0 (preconditions), 1 (UBT status), 2 (values), 3 (transition), 4 (witness), 5 (RPC).
+
+### Sidecar RPC Checks
+
+```bash
+# UBT proof
 curl -s -X POST http://localhost:8545 \
   -H 'content-type: application/json' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"debug_getUBTProof","params":["0x0000000000000000000000000000000000000000",[], "finalized"]}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"debug_getUBTProof","params":["0x0000000000000000000000000000000000000000",[],"finalized"]}'
+
+# UBT state read
+curl -s -X POST http://localhost:8545 \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"debug_getUBTState","params":["0x0000000000000000000000000000000000000000",[],"finalized"]}'
+
+# UBT execution witness
+curl -s -X POST http://localhost:8545 \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"debug_executionWitnessUBT","params":["latest"]}'
 ```
 
-## End-to-End Test (Hoodi, Sidecar)
-
-This is the full, repeatable flow to get a Hoodi node syncing with UBT sidecar,
-validate conversion, and run the validator end-to-end.
-
-1. **Clean old data (optional but recommended)**
-   ```bash
-   ./scripts/clean.sh --data-dir /mnt/q/ubt-sync
-   ```
-
-2. **Start Hoodi (sidecar enabled by default)**
-   ```bash
-   ./scripts/start-sync.sh --hoodi
-   ```
-
-3. **Monitor sync + sidecar conversion**
-   ```bash
-   go run ./docker-ubt-test/cmd/ubtctl monitor
-   ```
-
-4. **Wait for sync completion**
-   ```bash
-   curl -s -X POST http://localhost:8545 \
-     -H 'content-type: application/json' \
-     --data '{"jsonrpc":"2.0","id":1,"method":"eth_syncing","params":[]}'
-   ```
-   When this returns `false`, full sync is complete and sidecar auto‑convert begins.
-
-5. **Wait for sidecar readiness**
-   ```bash
-   curl -s -X POST http://localhost:8545 \
-     -H 'content-type: application/json' \
-     --data '{"jsonrpc":"2.0","id":1,"method":"debug_getUBTProof","params":["0x0000000000000000000000000000000000000000",[], "finalized"]}'
-   ```
-   A non‑zero `ubtRoot` means sidecar conversion is ready.
-
-6. **Run local sanity checks**
-   ```bash
-   ./scripts/validate-conversion.sh
-   ./scripts/validate-ubt-complete.sh
-   ```
-
-7. **Run full validator (requires reference MPT node)**
-   Start a reference node on Hoodi (no sidecar):
-   ```bash
-   geth --hoodi --syncmode=full --state.scheme=path --cache.preimages \
-     --http --http.addr 0.0.0.0 --http.port 8545 \
-     --http.api eth,net,web3,debug
-   ```
-
-   Build + run the validator against both nodes:
-   ```bash
-   cd docker-ubt-test/cmd/validate && ./build.sh
-   ./cmd/validate/ubt-validate \
-     --ubt-rpc http://localhost:8545 \
-     --reference-rpc http://<REF_NODE>:8545
-   ```
-
-If any step fails, check logs:
-```bash
-docker-compose logs -f geth
-go run ./docker-ubt-test/cmd/ubtctl logs --mode progress
-```
-
-### 2. Interrupt and Resume
-
-```bash
-# Start sync
-./scripts/start-sync.sh --hoodi
-
-# Use status snapshots during conversion
-go run ./docker-ubt-test/cmd/ubtctl status
-```
-
-### 3. Crash Recovery
-
-```bash
-# Start sync
-./scripts/start-sync.sh --hoodi
-
-# Simulate crash
-docker kill geth-ubt-test
-
-# Restart and verify recovery
-docker-compose start geth
-go run ./docker-ubt-test/cmd/ubtctl logs --mode progress
-```
-
-### 4. Full Mainnet Validation
-
-```bash
-# Start mainnet sync (long running)
-./scripts/start-sync.sh --mainnet
-
-# Monitor in background
-go run ./docker-ubt-test/cmd/ubtctl monitor > sync.log 2>&1 &
-
-# After completion (~12 hours)
-./scripts/validate-conversion.sh
-```
-
-## Useful Commands
-
-```bash
-# View Geth logs
-docker-compose logs -f geth
-
-# View Lighthouse logs
-docker-compose logs -f lighthouse
-
-# Enter Geth container
-docker exec -it geth-ubt-test sh
-
-# Attach to Geth console
-docker exec -it geth-ubt-test geth attach /tmp/geth.ipc
-
-# Stop everything
-docker-compose down
-
-# Clean all data and start fresh
-docker-compose down -v
-./scripts/clean.sh --data-dir /mnt/q/ubt-sync
-./scripts/start-sync.sh --data-dir /mnt/q/ubt-sync
-```
-
-## RPC Methods
-
-### Standard Ethereum Methods
-- `eth_syncing` - Check sync status
-- `eth_blockNumber` - Get current block
-- `eth_getBalance` - Get account balance
-- `eth_getStorageAt` - Get storage value
-
-### Debug Methods
-- `debug_executionWitness` - Generate execution witness for a block
-- `debug_executionWitnessUBT` - Generate UBT witness for a block (sidecar)
-- `debug_getUBTProof` - Get UBT proof for account/storage (sidecar)
-- `debug_getUBTState` - Read account/storage from UBT sidecar
-
-## Hardware Requirements
-
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| CPU | 4 cores | 8+ cores |
-| RAM | 16GB | 32GB |
-| Disk | 1TB SSD | 2TB NVMe |
-| Network | 100 Mbps | 1 Gbps |
-
-## Troubleshooting
-
-### Geth not starting
-
-Check logs:
-```bash
-docker-compose logs geth
-```
-
-Common issues:
-- Port already in use: Change ports in docker-compose.yml
-- Out of disk space: Clear data directory
-
-### Lighthouse can't connect to Geth
-
-1. Verify JWT secret matches:
-   ```bash
-   cat geth/config/jwt.hex
-   ```
-
-2. Check Engine API is accessible:
-   ```bash
-   curl -X POST http://localhost:8551 \
-     -H "Content-Type: application/json" \
-     -d '{"jsonrpc":"2.0","method":"engine_exchangeCapabilities","params":[[]],"id":1}'
-   ```
-
-### Sync stuck
-
-1. Check peer count:
-   ```bash
-   curl -X POST http://localhost:8545 \
-     -H "Content-Type: application/json" \
-     -d '{"jsonrpc":"2.0","method":"net_peerCount","id":1}'
-   ```
-
-2. Restart with fresh peers:
-   ```bash
-   docker-compose restart geth
-   ```
-
-## Validation Checklist
-
-- [ ] Full sync completes successfully with UBT enabled
-- [ ] UBT state is built correctly during sync
-- [ ] Account/storage data is accessible via RPC
-- [ ] Block execution works with UBT state
-- [ ] Witness generation produces valid proofs
-
-## UBT Flags
+## UBT Geth Flags
 
 | Flag | Description |
 |------|-------------|
 | `--ubt.sidecar` | Enable UBT sidecar (shadow UBT state; MPT remains consensus) |
-| `--ubt.sidecar.autoconvert` | Auto-convert after full sync completes |
 | `--ubt.log-interval N` | Log UBT state progress every N blocks (0 = disable) |
 | `--state.scheme path` | Required: use PathDB state scheme |
 | `--cache.preimages` | Required: enable preimage storage |
 
-## Notes
+## Troubleshooting
 
-- UBT sidecar is experimental and requires `--state.scheme=path` + `--cache.preimages`
-- Sidecar RPC uses `debug_getUBTProof` and `debug_getUBTState`
+**Geth not starting:** `docker compose logs geth` -- common causes are port conflicts or disk full.
+
+**Lighthouse can't reach Geth:** Verify the JWT secret matches on both sides (`cat geth/config/jwt.hex`).
+
+**Sync stuck:** Check peer count with `net_peerCount` RPC, restart with `docker compose restart geth`.
+
+**Devnet genesis fails:** The genesis generator image may have changed its internal paths. The orchestrator tries three known locations for `defaults.env`; if all fail it logs the image name so you can inspect it with `docker run --rm -it <image> sh`.
