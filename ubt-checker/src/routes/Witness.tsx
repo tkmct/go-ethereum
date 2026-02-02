@@ -17,6 +17,7 @@ const defaultBlock: BlockSelection = {
 };
 
 const MAX_SCAN_DEPTH = 20;
+const MAX_UBT_FALLBACK = 20;
 
 type RpcBlock = {
   number?: string;
@@ -38,6 +39,11 @@ type WitnessCallPlan = {
 
 function hasTransactions(block: RpcBlock | null | undefined): boolean {
   return !!block && Array.isArray(block.transactions) && block.transactions.length > 0;
+}
+
+function isNoStatePathsError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.toLowerCase().includes('no state paths');
 }
 
 function parseBlockNumber(value?: string): bigint | null {
@@ -74,6 +80,34 @@ function normalizeHexHash(value: string): string {
   return `0x${value}`;
 }
 
+async function findUbtWitnessFallback(
+  client: ReturnType<typeof createRpcClient>,
+  startNumberHex: string
+): Promise<{ witness: unknown; blockNumber: string }> {
+  const start = parseBlockNumber(startNumberHex);
+  if (start === null) {
+    throw new Error('Could not parse resolved block number for UBT fallback');
+  }
+  for (let i = 1; i <= MAX_UBT_FALLBACK; i += 1) {
+    const n = start - BigInt(i);
+    if (n < 0n) {
+      break;
+    }
+    const numberHex = `0x${n.toString(16)}`;
+    try {
+      const witness = await client.call<unknown>('debug_executionWitnessUBT', [numberHex]);
+      if (witness != null) {
+        return { witness, blockNumber: numberHex };
+      }
+    } catch (err) {
+      if (!isNoStatePathsError(err)) {
+        throw err;
+      }
+    }
+  }
+  throw new Error(`UBT witness has no state paths within ${MAX_UBT_FALLBACK} blocks of ${startNumberHex}`);
+}
+
 async function resolveWitnessPlan(endpoint: RpcEndpoint, selection: BlockSelection): Promise<WitnessCallPlan> {
   if (selection.mode === 'number') {
     if (!selection.value) {
@@ -92,11 +126,19 @@ async function resolveWitnessPlan(endpoint: RpcEndpoint, selection: BlockSelecti
       throw new Error('Block hash is required');
     }
     const hash = normalizeHexHash(selection.value);
+    let numberHex: string | undefined;
+    try {
+      const client = createRpcClient(endpoint);
+      const block = await client.call<RpcBlock>('eth_getBlockByHash', [hash, false]);
+      numberHex = block?.number;
+    } catch {
+      numberHex = undefined;
+    }
     return {
       mptMethod: 'debug_executionWitnessByHash',
       mptParam: hash,
       ubtParam: { blockHash: hash, requireCanonical: false },
-      resolved: { hash },
+      resolved: { hash, number: numberHex },
     };
   }
 
@@ -162,6 +204,7 @@ export default function Witness() {
   const [standardWitness, setStandardWitness] = useState<unknown>(null);
   const [ubtWitness, setUbtWitness] = useState<unknown>(null);
   const [resolvedBlock, setResolvedBlock] = useState<ResolvedBlock | null>(null);
+  const [ubtResolvedBlock, setUbtResolvedBlock] = useState<ResolvedBlock | null>(null);
 
   const handleFetch = async () => {
     try {
@@ -172,6 +215,7 @@ export default function Witness() {
       setStandardWitness(null);
       setUbtWitness(null);
       setResolvedBlock(null);
+      setUbtResolvedBlock(null);
 
       const mptClient = createRpcClient({ name: 'MPT', url: endpoints.mptUrl });
       const ubtClient = createRpcClient({ name: 'UBT', url: endpoints.ubtUrl });
@@ -210,7 +254,18 @@ export default function Witness() {
           ubtResult.status === 'fulfilled'
             ? new Error('RPC debug_executionWitnessUBT returned empty result')
             : ubtResult.reason;
-        setUbtError(formatWitnessError(reason));
+        if (isNoStatePathsError(reason) && plan.resolved?.number) {
+          try {
+            const fallback = await findUbtWitnessFallback(ubtClient, plan.resolved.number);
+            setUbtWitness(fallback.witness);
+            setUbtResolvedBlock({ number: fallback.blockNumber });
+            ubtOk = true;
+          } catch (fallbackErr) {
+            setUbtError(formatWitnessError(fallbackErr));
+          }
+        } else {
+          setUbtError(formatWitnessError(reason));
+        }
       }
 
       if (mptOk || ubtOk) {
@@ -253,6 +308,9 @@ export default function Witness() {
             <div className="mono">
               Resolved block: {resolvedBlock.number ?? 'unknown'} {resolvedBlock.hash ?? ''}
             </div>
+          )}
+          {ubtResolvedBlock && (
+            <div className="mono">UBT witness block: {ubtResolvedBlock.number ?? 'unknown'}</div>
           )}
           <div className={`badge ${mptError ? 'rose' : standardWitness ? 'teal' : ''}`}>
             MPT witness:{' '}
