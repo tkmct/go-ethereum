@@ -30,11 +30,23 @@ type ResolvedBlock = {
   hash?: string;
 };
 
+type VerifyParam = string | { blockHash: string; requireCanonical?: boolean } | { blockNumber: string };
+
 type WitnessCallPlan = {
   mptMethod: 'debug_executionWitness' | 'debug_executionWitnessByHash';
   mptParam: unknown;
   ubtParam: unknown;
+  blockParam: VerifyParam;
   resolved?: ResolvedBlock;
+};
+
+type WitnessVerification = {
+  ok: boolean;
+  stateRoot: string;
+  receiptRoot: string;
+  expectedStateRoot: string;
+  expectedReceiptRoot: string;
+  errors?: string[];
 };
 
 function hasTransactions(block: RpcBlock | null | undefined): boolean {
@@ -118,6 +130,7 @@ async function resolveWitnessPlan(endpoint: RpcEndpoint, selection: BlockSelecti
       mptMethod: 'debug_executionWitness',
       mptParam: numberHex,
       ubtParam: numberHex,
+      blockParam: numberHex,
       resolved: { number: numberHex },
     };
   }
@@ -138,6 +151,7 @@ async function resolveWitnessPlan(endpoint: RpcEndpoint, selection: BlockSelecti
       mptMethod: 'debug_executionWitnessByHash',
       mptParam: hash,
       ubtParam: { blockHash: hash, requireCanonical: false },
+      blockParam: { blockHash: hash, requireCanonical: false },
       resolved: { hash, number: numberHex },
     };
   }
@@ -155,6 +169,7 @@ async function resolveWitnessPlan(endpoint: RpcEndpoint, selection: BlockSelecti
       mptMethod: 'debug_executionWitness',
       mptParam: tagBlock.number,
       ubtParam: tagBlock.number,
+      blockParam: tagBlock.number,
       resolved: { number: tagBlock.number, hash: tagBlock.hash },
     };
   }
@@ -186,6 +201,7 @@ async function resolveWitnessPlan(endpoint: RpcEndpoint, selection: BlockSelecti
         mptMethod: 'debug_executionWitness',
         mptParam: block.number,
         ubtParam: block.number,
+        blockParam: block.number,
         resolved: { number: block.number, hash: block.hash },
       };
     }
@@ -205,6 +221,14 @@ export default function Witness() {
   const [ubtWitness, setUbtWitness] = useState<unknown>(null);
   const [resolvedBlock, setResolvedBlock] = useState<ResolvedBlock | null>(null);
   const [ubtResolvedBlock, setUbtResolvedBlock] = useState<ResolvedBlock | null>(null);
+  const [mptVerifyParam, setMptVerifyParam] = useState<VerifyParam | null>(null);
+  const [ubtVerifyParam, setUbtVerifyParam] = useState<VerifyParam | null>(null);
+  const [verificationStatus, setVerificationStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [verificationError, setVerificationError] = useState<string | undefined>(undefined);
+  const [mptVerifyError, setMptVerifyError] = useState<string | undefined>(undefined);
+  const [ubtVerifyError, setUbtVerifyError] = useState<string | undefined>(undefined);
+  const [mptVerification, setMptVerification] = useState<WitnessVerification | null>(null);
+  const [ubtVerification, setUbtVerification] = useState<WitnessVerification | null>(null);
 
   const handleFetch = async () => {
     try {
@@ -216,6 +240,14 @@ export default function Witness() {
       setUbtWitness(null);
       setResolvedBlock(null);
       setUbtResolvedBlock(null);
+      setMptVerifyParam(null);
+      setUbtVerifyParam(null);
+      setVerificationStatus('idle');
+      setVerificationError(undefined);
+      setMptVerifyError(undefined);
+      setUbtVerifyError(undefined);
+      setMptVerification(null);
+      setUbtVerification(null);
 
       const mptClient = createRpcClient({ name: 'MPT', url: endpoints.mptUrl });
       const ubtClient = createRpcClient({ name: 'UBT', url: endpoints.ubtUrl });
@@ -226,6 +258,8 @@ export default function Witness() {
 
       const plan = await resolveWitnessPlan(resolveEndpoint, blockSelection);
       setResolvedBlock(plan.resolved ?? null);
+      setMptVerifyParam(plan.blockParam);
+      setUbtVerifyParam(plan.blockParam);
 
       const [stdResult, ubtResult] = await Promise.allSettled([
         mptClient.call<unknown>(plan.mptMethod, [plan.mptParam]),
@@ -259,6 +293,7 @@ export default function Witness() {
             const fallback = await findUbtWitnessFallback(ubtClient, plan.resolved.number);
             setUbtWitness(fallback.witness);
             setUbtResolvedBlock({ number: fallback.blockNumber });
+            setUbtVerifyParam(fallback.blockNumber);
             ubtOk = true;
           } catch (fallbackErr) {
             setUbtError(formatWitnessError(fallbackErr));
@@ -281,12 +316,74 @@ export default function Witness() {
     }
   };
 
+  const handleVerify = async () => {
+    try {
+      setVerificationStatus('loading');
+      setVerificationError(undefined);
+      setMptVerifyError(undefined);
+      setUbtVerifyError(undefined);
+      setMptVerification(null);
+      setUbtVerification(null);
+
+      const mptClient = createRpcClient({ name: 'MPT', url: endpoints.mptUrl });
+      const ubtClient = createRpcClient({ name: 'UBT', url: endpoints.ubtUrl });
+
+      const requests: { label: 'mpt' | 'ubt'; promise: Promise<WitnessVerification> }[] = [];
+      if (standardWitness && mptVerifyParam) {
+        requests.push({
+          label: 'mpt',
+          promise: mptClient.call<WitnessVerification>('debug_verifyExecutionWitness', [mptVerifyParam, standardWitness]),
+        });
+      }
+      if (ubtWitness && ubtVerifyParam) {
+        requests.push({
+          label: 'ubt',
+          promise: ubtClient.call<WitnessVerification>('debug_verifyExecutionWitnessUBT', [ubtVerifyParam, ubtWitness]),
+        });
+      }
+      if (requests.length === 0) {
+        throw new Error('Fetch witnesses before verifying');
+      }
+
+      const results = await Promise.allSettled(requests.map((req) => req.promise));
+      let anySuccess = false;
+      results.forEach((result, index) => {
+        const label = requests[index].label;
+        if (result.status === 'fulfilled') {
+          anySuccess = true;
+          if (label === 'mpt') {
+            setMptVerification(result.value);
+          } else {
+            setUbtVerification(result.value);
+          }
+        } else {
+          const message = formatWitnessError(result.reason);
+          if (label === 'mpt') {
+            setMptVerifyError(message);
+          } else {
+            setUbtVerifyError(message);
+          }
+        }
+      });
+
+      if (anySuccess) {
+        setVerificationStatus('success');
+      } else {
+        setVerificationStatus('error');
+        setVerificationError('Both verification RPCs failed.');
+      }
+    } catch (err) {
+      setVerificationStatus('error');
+      setVerificationError(formatWitnessError(err));
+    }
+  };
+
   return (
     <div className="page">
       <div className="page-header">
         <div>
           <h1>Execution Witness</h1>
-          <p>Fetch execution witnesses. Verification is not implemented yet.</p>
+          <p>Fetch execution witnesses and verify via stateless execution.</p>
         </div>
         <span className="badge">RPC only</span>
       </div>
@@ -297,13 +394,19 @@ export default function Witness() {
       <div className="card">
         <div className="button-row">
           <button type="button" onClick={handleFetch}>Fetch Witness</button>
-          <button type="button" className="secondary">Verification TODO</button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={handleVerify}
+            disabled={status === 'loading' || verificationStatus === 'loading' || (!standardWitness && !ubtWitness)}
+          >
+            Verify Witness
+          </button>
         </div>
       </div>
 
       <ResultPanel title="Witness Results" status={status} error={error}>
         <div className="diff">
-          <div className="badge rose">Verification not implemented yet.</div>
           {resolvedBlock && (
             <div className="mono">
               Resolved block: {resolvedBlock.number ?? 'unknown'} {resolvedBlock.hash ?? ''}
@@ -322,6 +425,60 @@ export default function Witness() {
             {ubtError ? 'error' : ubtWitness ? 'ok' : status === 'loading' ? 'loading' : 'idle'}
           </div>
           {ubtError && <div className="mono">{ubtError}</div>}
+        </div>
+      </ResultPanel>
+
+      <ResultPanel title="Verification" status={verificationStatus} error={verificationError}>
+        <div className="diff">
+          <div className={`badge ${mptVerifyError ? 'rose' : mptVerification ? (mptVerification.ok ? 'teal' : 'rose') : ''}`}>
+            MPT verify:{' '}
+            {mptVerifyError
+              ? 'error'
+              : mptVerification
+              ? mptVerification.ok
+                ? 'ok'
+                : 'mismatch'
+              : verificationStatus === 'loading'
+              ? 'loading'
+              : 'idle'}
+          </div>
+          {mptVerifyError && <div className="mono">{mptVerifyError}</div>}
+          {mptVerification && (
+            <div className="mono mono-stack">
+              <div>stateRoot: {mptVerification.stateRoot}</div>
+              <div>expected: {mptVerification.expectedStateRoot}</div>
+              <div>receiptRoot: {mptVerification.receiptRoot}</div>
+              <div>expected: {mptVerification.expectedReceiptRoot}</div>
+              {mptVerification.errors && mptVerification.errors.length > 0 && (
+                <div>{mptVerification.errors.join(' | ')}</div>
+              )}
+            </div>
+          )}
+
+          <div className={`badge ${ubtVerifyError ? 'rose' : ubtVerification ? (ubtVerification.ok ? 'teal' : 'rose') : ''}`}>
+            UBT verify:{' '}
+            {ubtVerifyError
+              ? 'error'
+              : ubtVerification
+              ? ubtVerification.ok
+                ? 'ok'
+                : 'mismatch'
+              : verificationStatus === 'loading'
+              ? 'loading'
+              : 'idle'}
+          </div>
+          {ubtVerifyError && <div className="mono">{ubtVerifyError}</div>}
+          {ubtVerification && (
+            <div className="mono mono-stack">
+              <div>ubtRoot: {ubtVerification.stateRoot}</div>
+              <div>expected: {ubtVerification.expectedStateRoot}</div>
+              <div>receiptRoot: {ubtVerification.receiptRoot}</div>
+              <div>expected: {ubtVerification.expectedReceiptRoot}</div>
+              {ubtVerification.errors && ubtVerification.errors.length > 0 && (
+                <div>{ubtVerification.errors.join(' | ')}</div>
+              )}
+            </div>
+          )}
         </div>
       </ResultPanel>
 

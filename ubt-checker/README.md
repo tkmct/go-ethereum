@@ -19,13 +19,13 @@ Open the app and configure:
 - **Compare**: balance/code/storage via `eth_getBalance`, `eth_getCode`, `eth_getStorageAt` vs `debug_getUBTState`.
 - **MPT Proof**: `eth_getProof` verified against the block state root.
 - **UBT Proof**: `debug_getUBTProof` verified against the UBT root.
-- **Witness**: `debug_executionWitness` and `debug_executionWitnessUBT` (verification pending).
+- **Witness**: `debug_executionWitness`, `debug_executionWitnessUBT`, plus `debug_verifyExecutionWitness` / `debug_verifyExecutionWitnessUBT` for stateless verification.
 
 ## Notes
 
 - `eth_getProof` verification uses `@ethereumjs/trie`.
 - `debug_getUBTProof` verification implements the binary trie proof format used by UBT.
-- Witness verification is **not implemented** yet.
+- Witness verification uses stateless execution on the RPC node; the debug RPCs must be enabled.
 
 ## Test
 

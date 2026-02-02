@@ -27,10 +27,12 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/stateless"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/log"
@@ -531,6 +533,64 @@ func (api *DebugAPI) ExecutionWitnessByHash(hash common.Hash) (*stateless.ExtWit
 	return result.Witness().ToExtWitness(), nil
 }
 
+// ExecutionWitnessVerification is the response type for debug_verifyExecutionWitness.
+type ExecutionWitnessVerification struct {
+	Ok                  bool        `json:"ok"`
+	StateRoot           common.Hash `json:"stateRoot"`
+	ReceiptRoot         common.Hash `json:"receiptRoot"`
+	ExpectedStateRoot   common.Hash `json:"expectedStateRoot"`
+	ExpectedReceiptRoot common.Hash `json:"expectedReceiptRoot"`
+	Errors              []string    `json:"errors,omitempty"`
+}
+
+// VerifyExecutionWitness runs stateless execution against a provided MPT witness.
+func (api *DebugAPI) VerifyExecutionWitness(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash, ext *stateless.ExtWitness) (*ExecutionWitnessVerification, error) {
+	if ext == nil {
+		return nil, errors.New("witness is required")
+	}
+	witness, err := stateless.NewWitnessFromExtWitness(ext)
+	if err != nil {
+		return nil, err
+	}
+	if witness == nil {
+		return nil, errors.New("empty witness")
+	}
+	block, err := api.eth.APIBackend.BlockByNumberOrHash(ctx, blockNrOrHash)
+	if err != nil {
+		return nil, err
+	}
+	if block == nil {
+		return nil, fmt.Errorf("block %v not found", blockNrOrHash)
+	}
+	expectedStateRoot := block.Root()
+	expectedReceiptRoot := block.ReceiptHash()
+
+	context := types.CopyHeader(block.Header())
+	context.Root = common.Hash{}
+	context.ReceiptHash = common.Hash{}
+	task := types.NewBlockWithHeader(context).WithBody(*block.Body())
+
+	stateRoot, receiptRoot, err := core.ExecuteStatelessWithPathDB(api.eth.blockchain.Config(), vm.Config{}, task, witness, false)
+	if err != nil {
+		return nil, err
+	}
+	errorsList := []string{}
+	if stateRoot != expectedStateRoot {
+		errorsList = append(errorsList, fmt.Sprintf("state root mismatch: computed=%s header=%s", stateRoot, expectedStateRoot))
+	}
+	if receiptRoot != expectedReceiptRoot {
+		errorsList = append(errorsList, fmt.Sprintf("receipt root mismatch: computed=%s header=%s", receiptRoot, expectedReceiptRoot))
+	}
+	return &ExecutionWitnessVerification{
+		Ok:                  len(errorsList) == 0,
+		StateRoot:           stateRoot,
+		ReceiptRoot:         receiptRoot,
+		ExpectedStateRoot:   expectedStateRoot,
+		ExpectedReceiptRoot: expectedReceiptRoot,
+		Errors:              errorsList,
+	}, nil
+}
+
 // UBTStorageProof represents a storage proof for UBT.
 type UBTStorageProof struct {
 	Key       common.Hash     `json:"key"`
@@ -775,6 +835,62 @@ func (api *DebugAPI) ExecutionWitnessUBT(ctx context.Context, blockNrOrHash rpc.
 		ext.StatePaths = append(ext.StatePaths, stateless.PathNode{Path: []byte(path), Node: node})
 	}
 	return ext, nil
+}
+
+// VerifyExecutionWitnessUBT runs stateless execution against a provided UBT witness.
+func (api *DebugAPI) VerifyExecutionWitnessUBT(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash, ext *stateless.ExtUBTWitness) (*ExecutionWitnessVerification, error) {
+	if ext == nil {
+		return nil, errors.New("witness is required")
+	}
+	witness, err := stateless.NewWitnessFromUBTWitness(ext)
+	if err != nil {
+		return nil, err
+	}
+	if witness == nil {
+		return nil, errors.New("empty witness")
+	}
+	block, err := api.eth.APIBackend.BlockByNumberOrHash(ctx, blockNrOrHash)
+	if err != nil {
+		return nil, err
+	}
+	if block == nil {
+		return nil, fmt.Errorf("block %v not found", blockNrOrHash)
+	}
+	sc := api.eth.blockchain.UBTSidecar()
+	if sc == nil || !sc.Ready() {
+		return nil, errors.New("ubt sidecar not ready")
+	}
+	ubtRoot, ok := sc.GetUBTRoot(block.Hash())
+	if !ok {
+		return nil, fmt.Errorf("ubt root not found for block %x", block.Hash())
+	}
+	expectedStateRoot := ubtRoot
+	expectedReceiptRoot := block.ReceiptHash()
+
+	context := types.CopyHeader(block.Header())
+	context.Root = common.Hash{}
+	context.ReceiptHash = common.Hash{}
+	task := types.NewBlockWithHeader(context).WithBody(*block.Body())
+
+	stateRoot, receiptRoot, err := core.ExecuteStatelessWithPathDB(api.eth.blockchain.Config(), vm.Config{}, task, witness, true)
+	if err != nil {
+		return nil, err
+	}
+	errorsList := []string{}
+	if stateRoot != expectedStateRoot {
+		errorsList = append(errorsList, fmt.Sprintf("ubt root mismatch: computed=%s expected=%s", stateRoot, expectedStateRoot))
+	}
+	if receiptRoot != expectedReceiptRoot {
+		errorsList = append(errorsList, fmt.Sprintf("receipt root mismatch: computed=%s header=%s", receiptRoot, expectedReceiptRoot))
+	}
+	return &ExecutionWitnessVerification{
+		Ok:                  len(errorsList) == 0,
+		StateRoot:           stateRoot,
+		ReceiptRoot:         receiptRoot,
+		ExpectedStateRoot:   expectedStateRoot,
+		ExpectedReceiptRoot: expectedReceiptRoot,
+		Errors:              errorsList,
+	}, nil
 }
 
 func (api *DebugAPI) openBinaryTrie(root common.Hash) (*bintrie.BinaryTrie, error) {
