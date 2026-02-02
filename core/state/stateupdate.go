@@ -74,9 +74,10 @@ type accountUpdate struct {
 // execution. It contains information about mutated contract codes, accounts,
 // and storage slots, along with their original values.
 type stateUpdate struct {
-	originRoot  common.Hash // hash of the state before applying mutation
-	root        common.Hash // hash of the state after applying mutation
-	blockNumber uint64      // Associated block number
+	originRoot   common.Hash // hash of the state before applying mutation
+	root         common.Hash // hash of the state after applying mutation
+	blockNumber  uint64      // Associated block number
+	computedRoot common.Hash // hash computed from the trie before any root override
 
 	accounts       map[common.Hash][]byte    // accounts stores mutated accounts in 'slim RLP' encoding
 	accountsOrigin map[common.Address][]byte // accountsOrigin stores the original values of mutated accounts in 'slim RLP' encoding
@@ -94,7 +95,14 @@ type stateUpdate struct {
 
 	codes map[common.Address]*contractCode // codes contains the set of dirty codes
 	nodes *trienode.MergedNodeSet          // Aggregated dirty nodes caused by state changes
+
+	accountChanges     uint64 // number of mutated accounts in this update
+	storageSlotChanges uint64 // number of mutated storage slots in this update
 }
+
+// StateUpdate is an exported alias for stateUpdate, allowing external packages
+// to receive state update information from commit operations.
+type StateUpdate = stateUpdate
 
 // empty returns a flag indicating the state transition is empty or not.
 func (sc *stateUpdate) empty() bool {
@@ -173,18 +181,86 @@ func newStateUpdate(rawStorageKey bool, originRoot common.Hash, root common.Hash
 			}
 		}
 	}
-	return &stateUpdate{
-		originRoot:     originRoot,
-		root:           root,
-		blockNumber:    blockNumber,
-		accounts:       accounts,
-		accountsOrigin: accountsOrigin,
-		storages:       storages,
-		storagesOrigin: storagesOrigin,
-		rawStorageKey:  rawStorageKey,
-		codes:          codes,
-		nodes:          nodes,
+	var storageSlots uint64
+	for _, slots := range storages {
+		storageSlots += uint64(len(slots))
 	}
+	return &stateUpdate{
+		originRoot:         originRoot,
+		root:               root,
+		blockNumber:        blockNumber,
+		accounts:           accounts,
+		accountsOrigin:     accountsOrigin,
+		storages:           storages,
+		storagesOrigin:     storagesOrigin,
+		rawStorageKey:      rawStorageKey,
+		codes:              codes,
+		nodes:              nodes,
+		accountChanges:     uint64(len(accounts)),
+		storageSlotChanges: storageSlots,
+	}
+}
+
+// ComputedRoot returns the trie root computed before any commit root override.
+func (sc *stateUpdate) ComputedRoot() common.Hash {
+	return sc.computedRoot
+}
+
+// Accounts returns the mutated accounts in slim-RLP encoding.
+// The returned map must not be mutated by the caller.
+func (sc *stateUpdate) Accounts() map[common.Hash][]byte {
+	return sc.accounts
+}
+
+// AccountsOrigin returns the original values of mutated accounts in slim-RLP encoding.
+// The returned map must not be mutated by the caller.
+func (sc *stateUpdate) AccountsOrigin() map[common.Address][]byte {
+	return sc.accountsOrigin
+}
+
+// Storages returns the mutated storage slots in prefix-zero-trimmed RLP format.
+// The returned map must not be mutated by the caller.
+func (sc *stateUpdate) Storages() map[common.Hash]map[common.Hash][]byte {
+	return sc.storages
+}
+
+// StoragesOrigin returns the original values of mutated storage slots.
+// The returned map must not be mutated by the caller.
+func (sc *stateUpdate) StoragesOrigin() map[common.Address]map[common.Hash][]byte {
+	return sc.storagesOrigin
+}
+
+// RawStorageKey returns true if StoragesOrigin is keyed by raw storage slot keys.
+func (sc *stateUpdate) RawStorageKey() bool {
+	return sc.rawStorageKey
+}
+
+// Codes returns the updated contract code blobs keyed by address.
+func (sc *stateUpdate) Codes() map[common.Address][]byte {
+	if len(sc.codes) == 0 {
+		return nil
+	}
+	codes := make(map[common.Address][]byte, len(sc.codes))
+	for addr, code := range sc.codes {
+		codes[addr] = code.blob
+	}
+	return codes
+}
+
+// StateSet returns a triedb.StateSet for the state update.
+// The returned maps must not be mutated by the caller.
+func (sc *stateUpdate) StateSet() *triedb.StateSet {
+	return sc.stateSet()
+}
+
+// AccountChanges returns the number of account updates/deletes in this update.
+func (sc *stateUpdate) AccountChanges() uint64 {
+	return sc.accountChanges
+}
+
+// StorageSlotChanges returns the number of storage slot updates/deletes in this update.
+func (sc *stateUpdate) StorageSlotChanges() uint64 {
+	return sc.storageSlotChanges
 }
 
 // stateSet converts the current stateUpdate object into a triedb.StateSet

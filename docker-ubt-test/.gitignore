@@ -1,0 +1,13 @@
+# Data directories (large, should not be committed)
+data/
+bin/
+
+# Generated files
+docker-compose.override.yml
+
+# Keep the JWT secret template but not actual secrets
+# (jwt.hex is generated per deployment)
+geth/config/jwt.hex
+
+# Logs
+*.log

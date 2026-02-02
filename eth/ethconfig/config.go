@@ -162,6 +162,20 @@ type Config struct {
 	// Generate execution witnesses and self-check against them (testing purpose)
 	StatelessSelfValidation bool
 
+	// StateUseUBT forces storing state in the UBT/BinaryTrie backend (experimental).
+	// This does not change the chain configuration, so on non-Verkle networks the
+	// computed root will not match the header's stateRoot.
+	StateUseUBT bool
+
+	// UBTSidecar enables the UBT sidecar (shadow UBT state) while keeping MPT consensus state.
+	UBTSidecar bool `toml:",omitempty"`
+	// UBTSanityCheck enables per-block sanity checking between MPT and UBT.
+	UBTSanityCheck bool `toml:",omitempty"`
+
+	// SkipStateRootValidation disables validating the header stateRoot against the
+	// locally computed one (dangerous; required for StateUseUBT on non-Verkle chains).
+	SkipStateRootValidation bool
+
 	// Enables tracking of state size
 	EnableStateSizeTracking bool
 

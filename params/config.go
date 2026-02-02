@@ -873,16 +873,14 @@ func (c *ChainConfig) IsVerkle(num *big.Int, time uint64) bool {
 
 // IsVerkleGenesis checks whether the verkle fork is activated at the genesis block.
 //
-// Verkle mode is considered enabled if the verkle fork time is configured,
-// regardless of whether the local time has surpassed the fork activation time.
-// This is a temporary workaround for verkle devnet testing, where verkle is
-// activated at genesis, and the configured activation date has already passed.
-//
-// In production networks (mainnet and public testnets), verkle activation
-// always occurs after the genesis block, making this function irrelevant in
-// those cases.
+// For devnet testing, verkle-at-genesis can be expressed either by the explicit
+// boolean flag, or by setting the Verkle fork timestamp to 0 (meaning "already
+// on verkle" from genesis).
 func (c *ChainConfig) IsVerkleGenesis() bool {
-	return c.EnableVerkleAtGenesis
+	if c.EnableVerkleAtGenesis {
+		return true
+	}
+	return c.VerkleTime != nil && *c.VerkleTime == 0
 }
 
 // IsEIP4762 returns whether eip 4762 has been activated at given block.

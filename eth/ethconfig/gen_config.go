@@ -53,6 +53,10 @@ func (c Config) MarshalTOML() (interface{}, error) {
 		EnablePreimageRecording bool
 		EnableWitnessStats      bool
 		StatelessSelfValidation bool
+		StateUseUBT             bool
+		UBTSidecar              bool
+		UBTSanityCheck          bool
+		SkipStateRootValidation bool
 		EnableStateSizeTracking bool
 		VMTrace                 string
 		VMTraceJsonConfig       string
@@ -103,6 +107,10 @@ func (c Config) MarshalTOML() (interface{}, error) {
 	enc.EnablePreimageRecording = c.EnablePreimageRecording
 	enc.EnableWitnessStats = c.EnableWitnessStats
 	enc.StatelessSelfValidation = c.StatelessSelfValidation
+	enc.StateUseUBT = c.StateUseUBT
+	enc.UBTSidecar = c.UBTSidecar
+	enc.UBTSanityCheck = c.UBTSanityCheck
+	enc.SkipStateRootValidation = c.SkipStateRootValidation
 	enc.EnableStateSizeTracking = c.EnableStateSizeTracking
 	enc.VMTrace = c.VMTrace
 	enc.VMTraceJsonConfig = c.VMTraceJsonConfig
@@ -157,6 +165,10 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 		EnablePreimageRecording *bool
 		EnableWitnessStats      *bool
 		StatelessSelfValidation *bool
+		StateUseUBT             *bool
+		UBTSidecar              *bool
+		UBTSanityCheck          *bool
+		SkipStateRootValidation *bool
 		EnableStateSizeTracking *bool
 		VMTrace                 *string
 		VMTraceJsonConfig       *string
@@ -281,6 +293,18 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	}
 	if dec.StatelessSelfValidation != nil {
 		c.StatelessSelfValidation = *dec.StatelessSelfValidation
+	}
+	if dec.StateUseUBT != nil {
+		c.StateUseUBT = *dec.StateUseUBT
+	}
+	if dec.UBTSidecar != nil {
+		c.UBTSidecar = *dec.UBTSidecar
+	}
+	if dec.UBTSanityCheck != nil {
+		c.UBTSanityCheck = *dec.UBTSanityCheck
+	}
+	if dec.SkipStateRootValidation != nil {
+		c.SkipStateRootValidation = *dec.SkipStateRootValidation
 	}
 	if dec.EnableStateSizeTracking != nil {
 		c.EnableStateSizeTracking = *dec.EnableStateSizeTracking

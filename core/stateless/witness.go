@@ -41,6 +41,10 @@ type Witness struct {
 	Headers []*types.Header     // Past headers in reverse order (0=parent, 1=parent's-parent, etc). First *must* be set.
 	Codes   map[string]struct{} // Set of bytecodes ran or accessed
 	State   map[string]struct{} // Set of MPT state trie nodes (account and storage together)
+	// StatePaths stores path -> blob mappings for UBT/PathScheme nodes.
+	// For MPT nodes, this will be empty and State is used instead.
+	// For UBT nodes, this preserves the path information needed for PathDB.
+	StatePaths map[string][]byte `rlp:"-"` // Not RLP encoded, populated on demand
 
 	chain HeaderReader // Chain reader to convert block hash ops to header proofs
 	lock  sync.Mutex   // Lock to allow concurrent state insertions
@@ -60,11 +64,12 @@ func NewWitness(context *types.Header, chain HeaderReader) (*Witness, error) {
 	}
 	// Create the witness with a reconstructed gutted out block
 	return &Witness{
-		context: context,
-		Headers: headers,
-		Codes:   make(map[string]struct{}),
-		State:   make(map[string]struct{}),
-		chain:   chain,
+		context:    context,
+		Headers:    headers,
+		Codes:      make(map[string]struct{}),
+		State:      make(map[string]struct{}),
+		StatePaths: make(map[string][]byte),
+		chain:      chain,
 	}, nil
 }
 
@@ -88,6 +93,7 @@ func (w *Witness) AddCode(code []byte) {
 }
 
 // AddState inserts a batch of MPT trie nodes into the witness.
+// The map keys are paths but we only store blobs.
 func (w *Witness) AddState(nodes map[string][]byte) {
 	if len(nodes) == 0 {
 		return
@@ -100,6 +106,25 @@ func (w *Witness) AddState(nodes map[string][]byte) {
 	}
 }
 
+// AddStatePaths inserts a batch of UBT trie nodes into the witness.
+// The map keys are paths and values are node blobs.
+func (w *Witness) AddStatePaths(nodes map[string][]byte) {
+	if len(nodes) == 0 {
+		return
+	}
+	w.lock.Lock()
+	defer w.lock.Unlock()
+
+	if w.StatePaths == nil {
+		w.StatePaths = make(map[string][]byte)
+	}
+	for path, blob := range nodes {
+		w.StatePaths[path] = blob
+		// Keep blob set for backward compatibility.
+		w.State[string(blob)] = struct{}{}
+	}
+}
+
 func (w *Witness) AddKey() {
 	panic("not yet implemented")
 }
@@ -108,10 +133,11 @@ func (w *Witness) AddKey() {
 // is never mutated by Witness
 func (w *Witness) Copy() *Witness {
 	cpy := &Witness{
-		Headers: slices.Clone(w.Headers),
-		Codes:   maps.Clone(w.Codes),
-		State:   maps.Clone(w.State),
-		chain:   w.chain,
+		Headers:    slices.Clone(w.Headers),
+		Codes:      maps.Clone(w.Codes),
+		State:      maps.Clone(w.State),
+		StatePaths: maps.Clone(w.StatePaths),
+		chain:      w.chain,
 	}
 	if w.context != nil {
 		cpy.context = types.CopyHeader(w.context)

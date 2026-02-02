@@ -52,6 +52,7 @@ import (
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/sidecar"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/ethereum/go-ethereum/triedb/hashdb"
 	"github.com/ethereum/go-ethereum/triedb/pathdb"
@@ -190,6 +191,13 @@ type BlockChainConfig struct {
 	NoPrefetch bool            // Whether to disable heuristic state prefetching when processing blocks
 	Overrides  *ChainOverrides // Optional chain config overrides
 	VmConfig   vm.Config       // Config options for the EVM Interpreter
+
+	// Experimental options
+	UseUBT                  bool // Force using UBT/BinaryTrie as the state backend (path scheme only)
+	UBTSidecar              bool // Enable UBT sidecar (shadow UBT state)
+	UBTSanityCheck          bool // Enable per-block UBT vs MPT sanity check (debug)
+	SkipStateRootValidation bool // Skip validating header stateRoot against computed root (dangerous)
+	CommitStateRootToHeader bool // Persist state under the canonical header.Root instead of computed root
 
 	// TxLookupLimit specifies the maximum number of blocks from head for which
 	// transaction hashes will be indexed.
@@ -344,6 +352,8 @@ type BlockChain struct {
 	logger     *tracing.Hooks
 	stateSizer *state.SizeTracker // State size tracking
 
+	ubtSidecar *sidecar.UBTSidecar
+
 	lastForkReadyAlert time.Time     // Last time there was a fork readiness print out
 	slowBlockThreshold time.Duration // Block execution time threshold beyond which detailed statistics will be logged
 }
@@ -357,11 +367,18 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 	}
 
 	// Open trie database with provided config
-	enableVerkle, err := EnableVerkleAtGenesis(db, genesis)
+	enableVerkle, err := EnableVerkleAtGenesisWithOverride(db, genesis, cfg.Overrides)
 	if err != nil {
 		return nil, err
 	}
-	triedb := triedb.NewDatabase(db, cfg.triedbConfig(enableVerkle))
+	// Enable verkle/UBT mode if:
+	// 1. Chain config enables verkle (enableVerkle), or
+	// 2. UseUBT flag is set (for full sync with UBT state backend)
+	//
+	// Note: UseUBT requires full sync mode (--syncmode full) because snap sync
+	// doesn't provide preimages needed for UBT key computation.
+	trieIsVerkle := enableVerkle || cfg.UseUBT
+	triedb := triedb.NewDatabase(db, cfg.triedbConfig(trieIsVerkle))
 
 	// Write the supplied genesis to the database if it has not been initialized
 	// yet. The corresponding chain config will be returned, either from the
@@ -404,6 +421,13 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 	bc.validator = NewBlockValidator(chainConfig, bc)
 	bc.prefetcher = newStatePrefetcher(chainConfig, bc.hc)
 	bc.processor = NewStateProcessor(bc.hc)
+	if cfg.UBTSidecar {
+		sc, err := sidecar.NewUBTSidecar(db, cfg.triedbConfig(true))
+		if err != nil {
+			return nil, err
+		}
+		bc.ubtSidecar = sc
+	}
 
 	genesisHeader := bc.GetHeaderByNumber(0)
 	if genesisHeader == nil {
@@ -428,6 +452,11 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 	// Load blockchain states from disk
 	if err := bc.loadLastState(); err != nil {
 		return nil, err
+	}
+	if bc.ubtSidecar != nil {
+		if err := bc.ubtSidecar.InitFromDB(); err != nil {
+			return nil, err
+		}
 	}
 	// Make sure the state associated with the block is available, or log out
 	// if there is no available state, waiting for state sync.
@@ -470,6 +499,7 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 			}
 		}
 	}
+	_ = bc.HasState(head.Root) // Placeholder for future state checks if needed
 	// Ensure that a previous crash in SetHead doesn't leave extra ancients
 	if frozen, err := bc.db.Ancients(); err == nil && frozen > 0 {
 		var (
@@ -1166,11 +1196,9 @@ func (bc *BlockChain) SnapSyncComplete(hash common.Hash) error {
 	if bc.snaps != nil {
 		bc.snaps.Rebuild(root)
 	}
-
 	// If all checks out, manually set the head block.
 	bc.currentBlock.Store(block.Header())
 	headBlockGauge.Update(int64(block.NumberU64()))
-
 	log.Info("Committed new head block", "number", block.Number(), "hash", hash)
 	return nil
 }
@@ -1367,6 +1395,11 @@ func (bc *BlockChain) Stop() {
 	// Allow tracers to clean-up and release resources.
 	if bc.logger != nil && bc.logger.OnClose != nil {
 		bc.logger.OnClose()
+	}
+	if bc.ubtSidecar != nil {
+		if err := bc.ubtSidecar.Close(); err != nil {
+			log.Error("Failed to close UBT sidecar trie database", "err", err)
+		}
 	}
 	// Close the trie database, release all the held resources as the last step.
 	if err := bc.triedb.Close(); err != nil {
@@ -1648,9 +1681,25 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		isCancun      = bc.chainConfig.IsCancun(block.Number(), block.Time())
 		hasStateHook  = bc.logger != nil && bc.logger.OnStateUpdate != nil
 		hasStateSizer = bc.stateSizer != nil
+		sidecarActive = bc.ubtSidecar != nil && bc.ubtSidecar.Enabled()
+		update        *state.StateUpdate
 	)
-	if hasStateHook || hasStateSizer {
-		r, update, err := statedb.CommitWithUpdate(block.NumberU64(), isEIP158, isCancun)
+	needUpdate := hasStateHook || hasStateSizer || sidecarActive
+	needDeriveCode := hasStateHook || hasStateSizer || sidecarActive
+	if needUpdate {
+		if bc.cfg.CommitStateRootToHeader {
+			if needDeriveCode {
+				root, update, err = statedb.CommitWithUpdateAndRoot(block.NumberU64(), isEIP158, isCancun, block.Root())
+			} else {
+				root, update, err = statedb.CommitWithUpdateAndRootNoCode(block.NumberU64(), isEIP158, isCancun, block.Root())
+			}
+		} else {
+			if needDeriveCode {
+				root, update, err = statedb.CommitWithUpdate(block.NumberU64(), isEIP158, isCancun)
+			} else {
+				root, update, err = statedb.CommitWithUpdateNoCode(block.NumberU64(), isEIP158, isCancun)
+			}
+		}
 		if err != nil {
 			return err
 		}
@@ -1664,9 +1713,19 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		if hasStateSizer {
 			bc.stateSizer.Notify(update)
 		}
-		root = r
+		if bc.ubtSidecar != nil && update != nil && bc.ubtSidecar.Ready() {
+			if err := bc.ubtSidecar.ApplyStateUpdate(block, update, bc.db); err != nil {
+				log.Error("Failed to apply UBT sidecar update", "block", block.NumberU64(), "hash", block.Hash(), "err", err)
+			} else if bc.cfg.UBTSanityCheck {
+				bc.ubtSidecar.SanityCheck(block, update, statedb)
+			}
+		}
 	} else {
-		root, err = statedb.Commit(block.NumberU64(), isEIP158, isCancun)
+		if bc.cfg.CommitStateRootToHeader {
+			root, err = statedb.CommitWithRoot(block.NumberU64(), isEIP158, isCancun, block.Root())
+		} else {
+			root, err = statedb.Commit(block.NumberU64(), isEIP158, isCancun)
+		}
 		if err != nil {
 			return err
 		}
@@ -2528,6 +2587,11 @@ func (bc *BlockChain) reorg(oldHead *types.Header, newHead *types.Header) error 
 		// len(newChain) == 0 && len(oldChain) > 0
 		// rewind the canonical chain to a lower point.
 		log.Error("Impossible reorg, please file an issue", "oldnum", oldHead.Number, "oldhash", oldHead.Hash(), "oldblocks", len(oldChain), "newnum", newHead.Number, "newhash", newHead.Hash(), "newblocks", len(newChain))
+	}
+	if bc.ubtSidecar != nil && bc.ubtSidecar.Ready() {
+		if err := bc.ubtSidecar.HandleReorg(commonBlock.Hash(), commonBlock.Number.Uint64()); err != nil {
+			log.Error("Failed to recover UBT sidecar during reorg", "number", commonBlock.Number, "hash", commonBlock.Hash(), "err", err)
+		}
 	}
 	// Acquire the tx-lookup lock before mutation. This step is essential
 	// as the txlookups should be changed atomically, and all subsequent

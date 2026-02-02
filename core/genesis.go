@@ -214,6 +214,48 @@ func flushAlloc(ga *types.GenesisAlloc, triedb *triedb.Database, tracer *tracing
 	return root, nil
 }
 
+// flushAllocWithRootID persists the genesis allocation under a caller-provided
+// root identifier. This is used for experimental setups where the canonical
+// header.Root differs from the internal trie hash (e.g. storing UBT/BinaryTrie
+// state while following a non-Verkle chain).
+func flushAllocWithRootID(ga *types.GenesisAlloc, triedb *triedb.Database, rootID common.Hash) (common.Hash, error) {
+	emptyRoot := types.EmptyRootHash
+	if triedb.IsVerkle() {
+		emptyRoot = types.EmptyVerkleHash
+	}
+	statedb, err := state.New(emptyRoot, state.NewDatabase(triedb, nil))
+	if err != nil {
+		return common.Hash{}, err
+	}
+	for addr, account := range *ga {
+		if account.Balance != nil {
+			// This is not actually logged via tracer because OnGenesisBlock
+			// already captures the allocations.
+			statedb.AddBalance(addr, uint256.MustFromBig(account.Balance), tracing.BalanceIncreaseGenesisBalance)
+		}
+		statedb.SetCode(addr, account.Code, tracing.CodeChangeGenesis)
+		statedb.SetNonce(addr, account.Nonce, tracing.NonceChangeGenesis)
+		for key, value := range account.Storage {
+			statedb.SetState(addr, key, value)
+		}
+	}
+	if triedb.IsVerkle() {
+		// In BinaryTrie/UBT mode, allow persisting state under an arbitrary root
+		// identifier. The pathdb reader disables hash checking in verkle mode.
+		if _, err := statedb.CommitWithRoot(0, false, false, rootID); err != nil {
+			return common.Hash{}, err
+		}
+		// Commit newly generated states into disk if it's not empty.
+		if rootID != emptyRoot {
+			if err := triedb.Commit(rootID, true); err != nil {
+				return common.Hash{}, err
+			}
+		}
+		return rootID, nil
+	}
+	return flushAlloc(ga, triedb, nil)
+}
+
 func getGenesisState(db ethdb.Database, blockhash common.Hash) (alloc types.GenesisAlloc, err error) {
 	blob := rawdb.ReadGenesisStateSpec(db, blockhash)
 	if len(blob) != 0 {
@@ -567,12 +609,18 @@ func (g *Genesis) Commit(db ethdb.Database, triedb *triedb.Database, tracer *tra
 	if config.Clique != nil && len(g.ExtraData) < 32+crypto.SignatureLength {
 		return nil, errors.New("can't start clique chain without signers")
 	}
-	// flush the data to disk and compute the state root
-	root, err := flushAlloc(&g.Alloc, triedb, tracer)
+	// Compute the canonical header root from the genesis specification. This is
+	// independent of how state is persisted locally (e.g. UBT shadow state).
+	headerRoot, err := hashAlloc(&g.Alloc, g.IsVerkle())
 	if err != nil {
 		return nil, err
 	}
-	block := g.toBlockWithRoot(root)
+	// Flush the data to disk. In BinaryTrie/UBT mode we may persist the state
+	// under the canonical header root even if the internal trie hash differs.
+	if _, err := flushAllocWithRootID(&g.Alloc, triedb, headerRoot); err != nil {
+		return nil, err
+	}
+	block := g.toBlockWithRoot(headerRoot)
 
 	// Marshal the genesis state specification and persist.
 	blob, err := json.Marshal(g.Alloc)
@@ -613,15 +661,66 @@ func EnableVerkleAtGenesis(db ethdb.Database, genesis *Genesis) (bool, error) {
 		if genesis.Config == nil {
 			return false, errGenesisNoConfig
 		}
-		return genesis.Config.EnableVerkleAtGenesis, nil
+		// Verkle-at-genesis devnets can be configured either via the explicit
+		// boolean flag, or by setting the Verkle fork timestamp to be active at
+		// the genesis timestamp (e.g. verkleTime=0).
+		if genesis.Config.EnableVerkleAtGenesis {
+			return true, nil
+		}
+		if genesis.Config.VerkleTime != nil && genesis.Timestamp >= *genesis.Config.VerkleTime {
+			return true, nil
+		}
+		return false, nil
 	}
 	if ghash := rawdb.ReadCanonicalHash(db, 0); ghash != (common.Hash{}) {
 		chainCfg := rawdb.ReadChainConfig(db, ghash)
 		if chainCfg != nil {
-			return chainCfg.EnableVerkleAtGenesis, nil
+			if chainCfg.EnableVerkleAtGenesis {
+				return true, nil
+			}
+			// If the chain config has a Verkle fork timestamp, consider it as a
+			// verkle-at-genesis devnet if the fork is active at the genesis time.
+			if chainCfg.VerkleTime != nil {
+				if header := rawdb.ReadHeader(db, ghash, 0); header != nil {
+					if header.Time >= *chainCfg.VerkleTime {
+						return true, nil
+					}
+				}
+			}
+			return false, nil
 		}
 	}
 	return false, nil
+}
+
+// EnableVerkleAtGenesisWithOverride is the same as EnableVerkleAtGenesis, but it
+// also considers chain config overrides (notably OverrideVerkle) when deciding
+// whether the trie database should be initialized in Verkle mode.
+func EnableVerkleAtGenesisWithOverride(db ethdb.Database, genesis *Genesis, overrides *ChainOverrides) (bool, error) {
+	// For a supplied genesis (fresh init), apply overrides on a config copy so we
+	// can initialize the triedb consistently with the genesis config that will be
+	// committed to disk.
+	if genesis != nil {
+		if genesis.Config == nil {
+			return false, errGenesisNoConfig
+		}
+		cfg := *genesis.Config
+		if overrides != nil {
+			if err := overrides.apply(&cfg); err != nil {
+				return false, err
+			}
+		}
+		if cfg.EnableVerkleAtGenesis {
+			return true, nil
+		}
+		if cfg.VerkleTime != nil && genesis.Timestamp >= *cfg.VerkleTime {
+			return true, nil
+		}
+		return false, nil
+	}
+	// For an already initialized DB, fall back to the on-disk config. (Applying
+	// overrides here could yield a triedb mode inconsistent with stored data.)
+	return EnableVerkleAtGenesis(db, nil)
 }
 
 // DefaultGenesisBlock returns the Ethereum main net genesis block.

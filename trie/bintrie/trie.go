@@ -236,7 +236,9 @@ func (t *BinaryTrie) GetAccount(addr common.Address) (*types.StateAccount, error
 // not be modified by the caller. If a node was not found in the database, a
 // trie.MissingNodeError is returned.
 func (t *BinaryTrie) GetStorage(addr common.Address, key []byte) ([]byte, error) {
-	return t.root.Get(GetBinaryTreeKey(addr, key), t.nodeResolver)
+	// Use GetBinaryTreeKeyStorageSlot to match UpdateStorage encoding
+	k := GetBinaryTreeKeyStorageSlot(addr, key)
+	return t.root.Get(k, t.nodeResolver)
 }
 
 // UpdateAccount updates the account information for the given address.
@@ -299,10 +301,25 @@ func (t *BinaryTrie) DeleteAccount(addr common.Address) error {
 	return nil
 }
 
+// MarkAccountDeleted writes an explicit delete marker for an account.
+// This sets the basic data and code hash leaves to zero and marks suffix 10 as present.
+func (t *BinaryTrie) MarkAccountDeleted(addr common.Address) error {
+	var (
+		zero   [HashSize]byte
+		values = make([][]byte, StemNodeWidth)
+		stem   = GetBinaryTreeKey(addr, zero[:])
+	)
+	values[BasicDataLeafKey] = zero[:]
+	values[CodeHashLeafKey] = zero[:]
+	values[10] = zero[:1]
+	return t.UpdateStem(stem[:StemSize], values)
+}
+
 // DeleteStorage removes any existing value for key from the trie. If a node was not
 // found in the database, a trie.MissingNodeError is returned.
 func (t *BinaryTrie) DeleteStorage(addr common.Address, key []byte) error {
-	k := GetBinaryTreeKey(addr, key)
+	// Use GetBinaryTreeKeyStorageSlot to match UpdateStorage encoding
+	k := GetBinaryTreeKeyStorageSlot(addr, key)
 	var zero [HashSize]byte
 	root, err := t.root.Insert(k, zero[:], t.nodeResolver, 0)
 	if err != nil {
@@ -400,6 +417,38 @@ func (t *BinaryTrie) UpdateContractCode(addr common.Address, codeHash common.Has
 	return nil
 }
 
+// DeleteContractCode removes contract code chunks for the given address.
+func (t *BinaryTrie) DeleteContractCode(addr common.Address, codeSize int) error {
+	if codeSize <= 0 {
+		return nil
+	}
+	var (
+		values [][]byte
+		key    []byte
+		zero   [HashSize]byte
+	)
+	chunkCount := codeSize / StemSize
+	if codeSize%StemSize != 0 {
+		chunkCount++
+	}
+	for chunknr := 0; chunknr < chunkCount; chunknr++ {
+		groupOffset := (chunknr + 128) % StemNodeWidth
+		if groupOffset == 0 || chunknr == 0 {
+			values = make([][]byte, StemNodeWidth)
+			var offset [HashSize]byte
+			binary.LittleEndian.PutUint64(offset[24:], uint64(chunknr)+128)
+			key = GetBinaryTreeKey(addr, offset[:])
+		}
+		values[groupOffset] = zero[:]
+		if groupOffset == StemNodeWidth-1 || chunknr == chunkCount-1 {
+			if err := t.UpdateStem(key[:StemSize], values); err != nil {
+				return fmt.Errorf("DeleteContractCode (addr=%x) error: %w", addr[:], err)
+			}
+		}
+	}
+	return nil
+}
+
 // PrefetchAccount attempts to resolve specific accounts from the database
 // to accelerate subsequent trie operations.
 func (t *BinaryTrie) PrefetchAccount(addresses []common.Address) error {
@@ -424,5 +473,5 @@ func (t *BinaryTrie) PrefetchStorage(addr common.Address, keys [][]byte) error {
 
 // Witness returns a set containing all trie nodes that have been accessed.
 func (t *BinaryTrie) Witness() map[string][]byte {
-	panic("not implemented")
+	return t.tracer.Values()
 }

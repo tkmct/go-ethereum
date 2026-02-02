@@ -40,6 +40,18 @@ func (w *Witness) ToExtWitness() *ExtWitness {
 	return ext
 }
 
+// NewWitnessFromExtWitness creates a Witness from ExtWitness format.
+func NewWitnessFromExtWitness(ext *ExtWitness) (*Witness, error) {
+	if ext == nil {
+		return nil, nil
+	}
+	w := &Witness{}
+	if err := w.fromExtWitness(ext); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
 // fromExtWitness converts the consensus witness format into our internal one.
 func (w *Witness) fromExtWitness(ext *ExtWitness) error {
 	w.Headers = ext.Headers
@@ -75,4 +87,38 @@ type ExtWitness struct {
 	Codes   []hexutil.Bytes `json:"codes"`
 	State   []hexutil.Bytes `json:"state"`
 	Keys    []hexutil.Bytes `json:"keys"`
+}
+
+// PathNode represents a path-aware node for UBT witness transfers.
+type PathNode struct {
+	Path hexutil.Bytes `json:"path"`
+	Node hexutil.Bytes `json:"node"`
+}
+
+// ExtUBTWitness is a path-aware witness format for UBT.
+type ExtUBTWitness struct {
+	Headers    []*types.Header `json:"headers"`
+	Codes      []hexutil.Bytes `json:"codes"`
+	StatePaths []PathNode      `json:"statePaths"`
+}
+
+// NewWitnessFromUBTWitness converts UBT witness into internal Witness.
+func NewWitnessFromUBTWitness(ext *ExtUBTWitness) (*Witness, error) {
+	if ext == nil {
+		return nil, nil
+	}
+	w := &Witness{
+		Headers:    ext.Headers,
+		Codes:      make(map[string]struct{}, len(ext.Codes)),
+		State:      make(map[string]struct{}),
+		StatePaths: make(map[string][]byte, len(ext.StatePaths)),
+	}
+	for _, code := range ext.Codes {
+		w.Codes[string(code)] = struct{}{}
+	}
+	for _, pn := range ext.StatePaths {
+		w.StatePaths[string(pn.Path)] = pn.Node
+		w.State[string(pn.Node)] = struct{}{}
+	}
+	return w, nil
 }

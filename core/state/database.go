@@ -244,8 +244,8 @@ func (db *CachingDB) OpenTrie(root common.Hash) (Trie, error) {
 			panic("state tree transition isn't supported yet")
 		}
 		if ts.Transitioned() {
-			// Use BinaryTrie instead of VerkleTrie when IsVerkle is set
-			// (IsVerkle actually means Binary Trie mode in this codebase)
+			// With full sync from genesis, UBT state is built directly.
+			// No conversion status check is needed.
 			return bintrie.NewBinaryTrie(root, db.triedb)
 		}
 	}

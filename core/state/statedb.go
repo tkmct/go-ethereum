@@ -37,6 +37,8 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/trie"
+	"github.com/ethereum/go-ethereum/trie/bintrie"
+	"github.com/ethereum/go-ethereum/trie/transitiontrie"
 	"github.com/ethereum/go-ethereum/trie/trienode"
 	"github.com/holiman/uint256"
 	"golang.org/x/sync/errgroup"
@@ -85,6 +87,12 @@ type StateDB struct {
 	// originalRoot is the pre-state root, before any changes were made.
 	// It will be updated when the Commit is called.
 	originalRoot common.Hash
+
+	// commitRootOverride, if set, forces the state transition to be persisted
+	// under the provided root identifier instead of the internally computed trie
+	// hash. This is intended for experimental setups only (e.g. shadow UBT state
+	// while following a non-Verkle chain).
+	commitRootOverride *common.Hash
 
 	// This map holds 'live' objects, which will get modified while
 	// processing a state transition.
@@ -856,8 +864,30 @@ func (s *StateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
 		})
 	}
 	// If witness building is enabled, gather all the read-only accesses.
-	// Skip witness collection in Verkle mode, they will be gathered
-	// together at the end.
+	// For UBT/BinaryTrie mode, collect witness from main trie (storage is unified)
+	// Use type assertion to detect BinaryTrie instead of relying on IsVerkle()
+	if s.witness != nil && s.trie != nil {
+		var witness map[string][]byte
+		// Check if trie is a TransitionTrie (wraps BinaryTrie)
+		if tt, ok := s.trie.(*transitiontrie.TransitionTrie); ok {
+			// TransitionTrie wraps BinaryTrie, get witness from overlay
+			if tt.Overlay() != nil {
+				witness = tt.Overlay().Witness()
+			} else {
+				log.Debug("TransitionTrie overlay is nil, skipping witness collection")
+			}
+		} else if bt, ok := s.trie.(*bintrie.BinaryTrie); ok {
+			// Direct BinaryTrie instance
+			witness = bt.Witness()
+		} else {
+			// For other trie types (MPT), skip witness collection here
+			// (handled in MPT-specific code below)
+		}
+		if len(witness) > 0 {
+			s.witness.AddStatePaths(witness)
+		}
+	}
+	// For MPT mode, collect witness from storage tries
 	if s.witness != nil && !s.db.TrieDB().IsVerkle() {
 		// Pull in anything that has been accessed before destruction
 		for _, obj := range s.stateObjectsDestruct {
@@ -1228,9 +1258,10 @@ func (s *StateDB) commit(deleteEmptyObjects bool, noStorageWiping bool, blockNum
 	// off some milliseconds from the commit operation. Also accumulate the code
 	// writes to run in parallel with the computations.
 	var (
-		start   = time.Now()
-		root    common.Hash
-		workers errgroup.Group
+		start        = time.Now()
+		root         common.Hash
+		computedRoot common.Hash
+		workers      errgroup.Group
 	)
 	// Schedule the account trie first since that will be the biggest, so give
 	// it the most time to crunch.
@@ -1245,6 +1276,7 @@ func (s *StateDB) commit(deleteEmptyObjects bool, noStorageWiping bool, blockNum
 		// Write the account trie changes, measuring the amount of wasted time
 		newroot, set := s.trie.Commit(true)
 		root = newroot
+		computedRoot = newroot
 
 		if err := merge(set); err != nil {
 			return err
@@ -1311,9 +1343,17 @@ func (s *StateDB) commit(deleteEmptyObjects bool, noStorageWiping bool, blockNum
 	s.stateObjectsDestruct = make(map[common.Address]*stateObject)
 
 	origin := s.originalRoot
+	if s.commitRootOverride != nil {
+		if *s.commitRootOverride == (common.Hash{}) {
+			return nil, errors.New("commitRootOverride cannot be zero hash")
+		}
+		root = *s.commitRootOverride
+		s.commitRootOverride = nil
+	}
 	s.originalRoot = root
-
-	return newStateUpdate(noStorageWiping, origin, root, blockNumber, deletes, updates, nodes), nil
+	ret := newStateUpdate(noStorageWiping, origin, root, blockNumber, deletes, updates, nodes)
+	ret.computedRoot = computedRoot
+	return ret, nil
 }
 
 // commitAndFlush is a wrapper of commit which also commits the state mutations
@@ -1391,12 +1431,63 @@ func (s *StateDB) Commit(block uint64, deleteEmptyObjects bool, noStorageWiping 
 
 // CommitWithUpdate writes the state mutations and returns the state update for
 // external processing (e.g., live tracing hooks or size tracker).
-func (s *StateDB) CommitWithUpdate(block uint64, deleteEmptyObjects bool, noStorageWiping bool) (common.Hash, *stateUpdate, error) {
+func (s *StateDB) CommitWithUpdate(block uint64, deleteEmptyObjects bool, noStorageWiping bool) (common.Hash, *StateUpdate, error) {
 	ret, err := s.commitAndFlush(block, deleteEmptyObjects, noStorageWiping, true)
 	if err != nil {
 		return common.Hash{}, nil, err
 	}
 	return ret.root, ret, nil
+}
+
+// CommitWithUpdateNoCode writes the state mutations and returns the state update
+// without deriving contract code metadata. This is cheaper and intended for
+// lightweight progress logging.
+func (s *StateDB) CommitWithUpdateNoCode(block uint64, deleteEmptyObjects bool, noStorageWiping bool) (common.Hash, *StateUpdate, error) {
+	ret, err := s.commitAndFlush(block, deleteEmptyObjects, noStorageWiping, false)
+	if err != nil {
+		return common.Hash{}, nil, err
+	}
+	return ret.root, ret, nil
+}
+
+// CommitWithUpdateAndRoot writes the state mutations and returns the state update,
+// but persists the resulting state under the caller-provided root identifier.
+func (s *StateDB) CommitWithUpdateAndRoot(block uint64, deleteEmptyObjects bool, noStorageWiping bool, root common.Hash) (common.Hash, *StateUpdate, error) {
+	s.commitRootOverride = &root
+	defer func() { s.commitRootOverride = nil }()
+	ret, err := s.commitAndFlush(block, deleteEmptyObjects, noStorageWiping, true)
+	if err != nil {
+		return common.Hash{}, nil, err
+	}
+	return root, ret, nil
+}
+
+// CommitWithUpdateAndRootNoCode writes the state mutations and returns the state
+// update without deriving contract code metadata. The resulting state is stored
+// under the provided root identifier.
+func (s *StateDB) CommitWithUpdateAndRootNoCode(block uint64, deleteEmptyObjects bool, noStorageWiping bool, root common.Hash) (common.Hash, *StateUpdate, error) {
+	s.commitRootOverride = &root
+	defer func() { s.commitRootOverride = nil }()
+	ret, err := s.commitAndFlush(block, deleteEmptyObjects, noStorageWiping, false)
+	if err != nil {
+		return common.Hash{}, nil, err
+	}
+	return root, ret, nil
+}
+
+// CommitWithRoot writes the state mutations into the configured data stores, but
+// persists the resulting state under the caller-provided root identifier.
+//
+// This is only safe in BinaryTrie/UBT (verkle/pathdb) mode, where node reads do
+// not enforce that the stored root identifier equals the internal trie hash.
+func (s *StateDB) CommitWithRoot(block uint64, deleteEmptyObjects bool, noStorageWiping bool, root common.Hash) (common.Hash, error) {
+	s.commitRootOverride = &root
+	defer func() { s.commitRootOverride = nil }()
+	_, err := s.Commit(block, deleteEmptyObjects, noStorageWiping)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return root, nil
 }
 
 // Prepare handles the preparatory steps for executing a state transition with.

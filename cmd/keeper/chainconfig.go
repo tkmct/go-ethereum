@@ -18,9 +18,16 @@ package main
 
 import (
 	"fmt"
+	"math/big"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/params"
 )
+
+// Helper function to create uint64 pointer
+func u64(v uint64) *uint64 {
+	return &v
+}
 
 // getChainConfig returns the appropriate chain configuration based on the chainID.
 // Returns an error for unsupported chain IDs.
@@ -32,7 +39,35 @@ func getChainConfig(chainID uint64) (*params.ChainConfig, error) {
 		return params.SepoliaChainConfig, nil
 	case params.HoodiChainConfig.ChainID.Uint64():
 		return params.HoodiChainConfig, nil
+	case 1338: // UBT test chain ID
+		return getUBTTestChainConfig(), nil
 	default:
 		return nil, fmt.Errorf("unsupported chain ID: %d", chainID)
+	}
+}
+
+// getUBTTestChainConfig returns a chain config with UBT enabled at genesis for testing.
+func getUBTTestChainConfig() *params.ChainConfig {
+	return &params.ChainConfig{
+		ChainID:                 big.NewInt(1338),
+		HomesteadBlock:          big.NewInt(0),
+		EIP150Block:             big.NewInt(0),
+		EIP155Block:             big.NewInt(0),
+		EIP158Block:             big.NewInt(0),
+		ByzantiumBlock:          big.NewInt(0),
+		ConstantinopleBlock:     big.NewInt(0),
+		PetersburgBlock:         big.NewInt(0),
+		IstanbulBlock:           big.NewInt(0),
+		MuirGlacierBlock:        big.NewInt(0),
+		BerlinBlock:             big.NewInt(0),
+		LondonBlock:             big.NewInt(0),
+		Ethash:                  new(params.EthashConfig),
+		ShanghaiTime:            u64(0),
+		VerkleTime:              u64(0),
+		TerminalTotalDifficulty: common.Big0,
+		EnableVerkleAtGenesis:   true,
+		BlobScheduleConfig: &params.BlobScheduleConfig{
+			Verkle: params.DefaultPragueBlobConfig,
+		},
 	}
 }

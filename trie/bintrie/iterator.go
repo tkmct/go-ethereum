@@ -249,7 +249,8 @@ func (it *binaryNodeIterator) LeafProof() [][]byte {
 	proof := make([][]byte, 0, len(it.stack)+StemNodeWidth)
 
 	// Build proof by walking up the stack and collecting sibling hashes
-	for i := range it.stack[:len(it.stack)-2] {
+	// (exclude the stem node itself, which is the last stack entry).
+	for i := range it.stack[:len(it.stack)-1] {
 		state := it.stack[i]
 		internalNode := state.Node.(*InternalNode) // should panic if the node isn't an InternalNode
 

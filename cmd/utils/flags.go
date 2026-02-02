@@ -283,6 +283,29 @@ var (
 		Usage:    "Scheme to use for storing ethereum state ('hash' or 'path')",
 		Category: flags.StateCategory,
 	}
+	// Experimental: run with UBT/BinaryTrie state backend even on non-Verkle chains.
+	// This is intended for shadow-state experimentation and requires disabling
+	// state-root validation to follow canonical chains whose headers commit MPT roots.
+	StateUBTFlag = &cli.BoolFlag{
+		Name:     "state.ubt",
+		Usage:    "Store state in UBT/BinaryTrie (experimental; intended for shadow state, requires --state.scheme=path and typically --state.skiproot)",
+		Category: flags.StateCategory,
+	}
+	UBTSidecarFlag = &cli.BoolFlag{
+		Name:     "ubt.sidecar",
+		Usage:    "Enable UBT sidecar (shadow UBT state) while keeping MPT as consensus state",
+		Category: flags.StateCategory,
+	}
+	UBTSanityFlag = &cli.BoolFlag{
+		Name:     "ubt.sanity",
+		Usage:    "Enable per-block UBT vs MPT sanity check (debug; requires --ubt.sidecar)",
+		Category: flags.StateCategory,
+	}
+	SkipStateRootValidationFlag = &cli.BoolFlag{
+		Name:     "state.skiproot",
+		Usage:    "Skip validating block header stateRoot against locally computed root (DANGEROUS; experimental)",
+		Category: flags.StateCategory,
+	}
 	StateSizeTrackingFlag = &cli.BoolFlag{
 		Name:     "state.size-tracking",
 		Usage:    "Enable state size tracking, retrieve state size with debug_stateSize.",
@@ -1044,6 +1067,10 @@ var (
 		RemoteDBFlag,
 		DBEngineFlag,
 		StateSchemeFlag,
+		StateUBTFlag,
+		UBTSidecarFlag,
+		UBTSanityFlag,
+		SkipStateRootValidationFlag,
 		HttpHeaderFlag,
 	}
 )
@@ -1701,6 +1728,55 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	}
 	if ctx.IsSet(StateSchemeFlag.Name) {
 		cfg.StateScheme = ctx.String(StateSchemeFlag.Name)
+	}
+	if ctx.IsSet(StateUBTFlag.Name) {
+		cfg.StateUseUBT = ctx.Bool(StateUBTFlag.Name)
+	}
+	if ctx.IsSet(UBTSidecarFlag.Name) {
+		cfg.UBTSidecar = ctx.Bool(UBTSidecarFlag.Name)
+	}
+	if ctx.IsSet(UBTSanityFlag.Name) {
+		cfg.UBTSanityCheck = ctx.Bool(UBTSanityFlag.Name)
+	}
+	if ctx.IsSet(SkipStateRootValidationFlag.Name) {
+		cfg.SkipStateRootValidation = ctx.Bool(SkipStateRootValidationFlag.Name)
+	}
+	// UBT mode requires the path-based state scheme.
+	if cfg.StateUseUBT && cfg.StateScheme != "" && cfg.StateScheme != rawdb.PathScheme {
+		Fatalf("--%s requires --%s=%s", StateUBTFlag.Name, StateSchemeFlag.Name, rawdb.PathScheme)
+	}
+	if cfg.StateUseUBT && cfg.StateScheme == "" {
+		cfg.StateScheme = rawdb.PathScheme
+	}
+	if cfg.StateUseUBT && !cfg.SkipStateRootValidation {
+		cfg.SkipStateRootValidation = true
+		log.Warn("Enabling --state.skiproot automatically because --state.ubt is set (experimental)")
+	}
+	// UBT mode requires full sync to avoid MPT/snap state without preimages.
+	if cfg.StateUseUBT && cfg.SyncMode != ethconfig.FullSync {
+		Fatalf("--%s requires --%s=full", StateUBTFlag.Name, SyncModeFlag.Name)
+	}
+	// Sidecar mode requires full sync, path scheme and preimages.
+	if cfg.UBTSidecar {
+		if cfg.StateUseUBT {
+			Fatalf("--%s cannot be used together with --%s", UBTSidecarFlag.Name, StateUBTFlag.Name)
+		}
+		if cfg.SyncMode != ethconfig.FullSync {
+			Fatalf("--%s requires --%s=full", UBTSidecarFlag.Name, SyncModeFlag.Name)
+		}
+		if cfg.StateScheme != "" && cfg.StateScheme != rawdb.PathScheme {
+			Fatalf("--%s requires --%s=%s", UBTSidecarFlag.Name, StateSchemeFlag.Name, rawdb.PathScheme)
+		}
+		if cfg.StateScheme == "" {
+			cfg.StateScheme = rawdb.PathScheme
+		}
+		if !cfg.Preimages {
+			cfg.Preimages = true
+			log.Warn("Enabling --cache.preimages automatically because --ubt.sidecar is set")
+		}
+	}
+	if cfg.UBTSanityCheck && !cfg.UBTSidecar {
+		Fatalf("--%s requires --%s", UBTSanityFlag.Name, UBTSidecarFlag.Name)
 	}
 	// Parse transaction history flag, if user is still using legacy config
 	// file with 'TxLookupLimit' configured, copy the value to 'TransactionHistory'.

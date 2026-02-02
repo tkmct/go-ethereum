@@ -65,3 +65,48 @@ func (w *Witness) MakeHashDB() ethdb.Database {
 	}
 	return memdb
 }
+
+// MakePathDB imports binary trie nodes, codes and block hashes from a witness
+// into a new path-based memory db for UBT/PathScheme support.
+//
+// PathDB wraps the database with VerklePrefix, so nodes must be stored with
+// the prefix already applied to be accessible through the wrapped interface.
+func (w *Witness) MakePathDB() ethdb.Database {
+	memdb := rawdb.NewMemoryDatabase()
+	verkleDB := rawdb.NewTable(memdb, string(rawdb.VerklePrefix))
+	hasher := crypto.NewKeccakState()
+	hash := make([]byte, 32)
+
+	// Inject all the "block hashes" (i.e. headers) into the ephemeral database
+	for _, header := range w.Headers {
+		rawdb.WriteHeader(memdb, header)
+	}
+
+	// Inject all the bytecodes into the ephemeral database
+	for code := range w.Codes {
+		blob := []byte(code)
+
+		hasher.Reset()
+		hasher.Write(blob)
+		hasher.Read(hash)
+
+		rawdb.WriteCode(memdb, common.BytesToHash(hash), blob)
+	}
+
+	// For UBT/PathScheme, use StatePaths if available (preserves paths)
+	// The root node of the trie is always located at the empty path. We must
+	// load it from this specific path to avoid ambiguity in case of hash collisions.
+	if rootBlob, ok := w.StatePaths[""]; ok {
+		// Write the root node at the special 'nil' path for pathdb.
+		rawdb.WriteAccountTrieNode(verkleDB, nil, rootBlob)
+	}
+
+	// Inject all other trie nodes into the ephemeral database.
+	for pathStr, blob := range w.StatePaths {
+		if pathStr != "" {
+			rawdb.WriteAccountTrieNode(verkleDB, []byte(pathStr), blob)
+		}
+	}
+
+	return memdb
+}
