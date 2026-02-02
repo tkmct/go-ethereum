@@ -483,6 +483,9 @@ func (sc *UBTSidecar) applyUBTUpdate(update *UBTUpdate) error {
 	if err := sc.triedb.Update(newRoot, parentRoot, update.BlockNum, merged, stateSet); err != nil {
 		return err
 	}
+	if prev, ok := rawdb.ReadUBTBlockRoot(sc.chainDB, update.BlockHash); ok && prev != newRoot {
+		log.Warn("UBT block root overwrite mismatch", "block", update.BlockNum, "hash", update.BlockHash, "prev", prev, "new", newRoot)
+	}
 	rawdb.WriteUBTCurrentRoot(sc.chainDB, newRoot, update.BlockNum, update.BlockHash)
 	rawdb.WriteUBTBlockRoot(sc.chainDB, update.BlockHash, newRoot)
 

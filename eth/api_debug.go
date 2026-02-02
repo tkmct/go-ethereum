@@ -18,9 +18,11 @@ package eth
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -531,22 +533,44 @@ func (api *DebugAPI) ExecutionWitnessByHash(hash common.Hash) (*stateless.ExtWit
 
 // UBTStorageProof represents a storage proof for UBT.
 type UBTStorageProof struct {
-	Key   common.Hash     `json:"key"`
-	Value hexutil.Bytes   `json:"value"`
-	Proof []hexutil.Bytes `json:"proof"`
+	Key       common.Hash     `json:"key"`
+	Value     hexutil.Bytes   `json:"value"`
+	Proof     []hexutil.Bytes `json:"proof"`
+	ProofPath []UBTProofNode  `json:"proofPath,omitempty"`
+}
+
+// UBTProofNode represents a proof sibling with its depth.
+type UBTProofNode struct {
+	Depth uint16        `json:"depth"`
+	Hash  hexutil.Bytes `json:"hash"`
 }
 
 // UBTProofResult is the response type for debug_getUBTProof.
 type UBTProofResult struct {
-	Address      common.Address    `json:"address"`
-	AccountProof []hexutil.Bytes   `json:"accountProof"`
-	Balance      *hexutil.Big      `json:"balance"`
-	CodeHash     common.Hash       `json:"codeHash"`
-	Nonce        hexutil.Uint64    `json:"nonce"`
-	StorageHash  common.Hash       `json:"storageHash"`
-	StorageProof []UBTStorageProof `json:"storageProof"`
-	StateRoot    common.Hash       `json:"stateRoot"`
-	UbtRoot      common.Hash       `json:"ubtRoot"`
+	Address          common.Address    `json:"address"`
+	AccountProof     []hexutil.Bytes   `json:"accountProof"`
+	AccountProofPath []UBTProofNode    `json:"accountProofPath,omitempty"`
+	Balance          *hexutil.Big      `json:"balance"`
+	CodeHash         common.Hash       `json:"codeHash"`
+	Nonce            hexutil.Uint64    `json:"nonce"`
+	BlockHash        common.Hash       `json:"blockHash"`
+	BlockNumber      hexutil.Uint64    `json:"blockNumber"`
+	TrieRoot         common.Hash       `json:"trieRoot"`
+	ParentBlockHash  common.Hash       `json:"parentBlockHash"`
+	ParentUbtRoot    common.Hash       `json:"parentUbtRoot"`
+	StorageHash      common.Hash       `json:"storageHash"`
+	StorageProof     []UBTStorageProof `json:"storageProof"`
+	StateRoot        common.Hash       `json:"stateRoot"`
+	UbtRoot          common.Hash       `json:"ubtRoot"`
+	ProofRoot        common.Hash       `json:"proofRoot"`
+}
+
+// UBTRootResult is the response type for debug_getUBTRoot.
+type UBTRootResult struct {
+	BlockHash   common.Hash    `json:"blockHash"`
+	BlockNumber hexutil.Uint64 `json:"blockNumber"`
+	UbtRoot     common.Hash    `json:"ubtRoot"`
+	Ok          bool           `json:"ok"`
 }
 
 // UBTStateResult is the response type for debug_getUBTState.
@@ -559,6 +583,24 @@ type UBTStateResult struct {
 	Storage   map[common.Hash]hexutil.Bytes `json:"storage"`
 	StateRoot common.Hash                   `json:"stateRoot"`
 	UbtRoot   common.Hash                   `json:"ubtRoot"`
+}
+
+// GetUBTRoot returns the UBT root for the given block number or hash.
+func (api *DebugAPI) GetUBTRoot(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (*UBTRootResult, error) {
+	header, err := api.eth.APIBackend.HeaderByNumberOrHash(ctx, blockNrOrHash)
+	if err != nil {
+		return nil, err
+	}
+	if header == nil {
+		return nil, fmt.Errorf("block %v not found", blockNrOrHash)
+	}
+	root, ok := rawdb.ReadUBTBlockRoot(api.eth.ChainDb(), header.Hash())
+	return &UBTRootResult{
+		BlockHash:   header.Hash(),
+		BlockNumber: hexutil.Uint64(header.Number.Uint64()),
+		UbtRoot:     root,
+		Ok:          ok,
+	}, nil
 }
 
 // GetUBTProof returns the binary trie proof for a given account and storage keys.
@@ -588,13 +630,21 @@ func (api *DebugAPI) GetUBTProof(ctx context.Context, address common.Address, st
 	} else {
 		ubtRoot = header.Root
 	}
+	parentHash := header.ParentHash
+	var parentUbtRoot common.Hash
+	if sc := api.eth.blockchain.UBTSidecar(); sc != nil {
+		if root, ok := sc.GetUBTRoot(parentHash); ok {
+			parentUbtRoot = root
+		}
+	}
 	bt, err := api.openBinaryTrie(ubtRoot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open binary trie: %w", err)
 	}
+	trieRoot := bt.Hash()
 
 	accountKey := bintrie.GetBinaryTreeKeyBasicData(address)
-	accountProof, err := generateProofFromBinaryTrie(bt, accountKey)
+	accountProof, accountProofPath, accountProofRoot, err := generateProofWithPathFromBinaryTrie(bt, accountKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate account proof: %w", err)
 	}
@@ -607,27 +657,35 @@ func (api *DebugAPI) GetUBTProof(ctx context.Context, address common.Address, st
 		}
 		value := statedb.GetState(address, key)
 		ubtKey := bintrie.GetBinaryTreeKeyStorageSlot(address, key.Bytes())
-		proof, err := generateProofFromBinaryTrie(bt, ubtKey)
+		proof, proofPath, _, err := generateProofWithPathFromBinaryTrie(bt, ubtKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate storage proof for %s: %w", keyHex, err)
 		}
 		storageProofs[i] = UBTStorageProof{
-			Key:   key,
-			Value: value.Bytes(),
-			Proof: proof,
+			Key:       key,
+			Value:     value.Bytes(),
+			Proof:     proof,
+			ProofPath: proofPath,
 		}
 	}
 
 	return &UBTProofResult{
-		Address:      address,
-		AccountProof: accountProof,
-		Balance:      (*hexutil.Big)(balance.ToBig()),
-		CodeHash:     codeHash,
-		Nonce:        hexutil.Uint64(nonce),
-		StorageHash:  common.Hash{},
-		StorageProof: storageProofs,
-		StateRoot:    header.Root,
-		UbtRoot:      ubtRoot,
+		Address:          address,
+		AccountProof:     accountProof,
+		AccountProofPath: accountProofPath,
+		Balance:          (*hexutil.Big)(balance.ToBig()),
+		CodeHash:         codeHash,
+		Nonce:            hexutil.Uint64(nonce),
+		BlockHash:        header.Hash(),
+		BlockNumber:      hexutil.Uint64(header.Number.Uint64()),
+		TrieRoot:         trieRoot,
+		ParentBlockHash:  parentHash,
+		ParentUbtRoot:    parentUbtRoot,
+		StorageHash:      common.Hash{},
+		StorageProof:     storageProofs,
+		StateRoot:        header.Root,
+		UbtRoot:          ubtRoot,
+		ProofRoot:        accountProofRoot,
 	}, nil
 }
 
@@ -733,16 +791,88 @@ func (api *DebugAPI) openBinaryTrie(root common.Hash) (*bintrie.BinaryTrie, erro
 	return bintrie.NewBinaryTrie(root, trieDB)
 }
 
-func generateProofFromBinaryTrie(bt *bintrie.BinaryTrie, targetKey []byte) ([]hexutil.Bytes, error) {
-	proofBytes, err := bt.Proof(targetKey)
+func generateProofWithPathFromBinaryTrie(bt *bintrie.BinaryTrie, targetKey []byte) ([]hexutil.Bytes, []UBTProofNode, common.Hash, error) {
+	siblings, stem, values, err := bt.ProofWithDepth(targetKey)
 	if err != nil {
-		return nil, err
+		return nil, nil, common.Hash{}, err
 	}
-	result := make([]hexutil.Bytes, len(proofBytes))
-	for i, p := range proofBytes {
-		result[i] = hexutil.Bytes(p)
+	legacyProof := make([]hexutil.Bytes, 0, len(siblings)+1+len(values))
+	for _, s := range siblings {
+		legacyProof = append(legacyProof, hexutil.Bytes(s.Hash.Bytes()))
 	}
-	return result, nil
+	if stem != nil {
+		legacyProof = append(legacyProof, hexutil.Bytes(stem))
+		for _, v := range values {
+			legacyProof = append(legacyProof, hexutil.Bytes(v))
+		}
+	}
+	proofPath := make([]UBTProofNode, len(siblings))
+	for i, s := range siblings {
+		proofPath[i] = UBTProofNode{Depth: s.Depth, Hash: hexutil.Bytes(s.Hash.Bytes())}
+	}
+	leaf := computeProofLeafHash(stem, values)
+	proofRoot := computeProofRootWithPath(targetKey, siblings, leaf)
+	return legacyProof, proofPath, proofRoot, nil
+}
+
+func computeProofLeafHash(stem []byte, values [][]byte) common.Hash {
+	if stem == nil {
+		return common.Hash{}
+	}
+	var data [bintrie.StemNodeWidth]common.Hash
+	for i, v := range values {
+		if len(v) == 0 {
+			continue
+		}
+		h := sha256.Sum256(v)
+		data[i] = common.BytesToHash(h[:])
+	}
+	h := sha256.New()
+	for level := 1; level <= 8; level++ {
+		for i := 0; i < bintrie.StemNodeWidth/(1<<level); i++ {
+			if data[i*2] == (common.Hash{}) && data[i*2+1] == (common.Hash{}) {
+				data[i] = common.Hash{}
+				continue
+			}
+			h.Reset()
+			h.Write(data[i*2][:])
+			h.Write(data[i*2+1][:])
+			data[i] = common.Hash(h.Sum(nil))
+		}
+	}
+	h.Reset()
+	h.Write(stem)
+	h.Write([]byte{0})
+	h.Write(data[0][:])
+	return common.BytesToHash(h.Sum(nil))
+}
+
+func computeProofRootWithPath(key []byte, siblings []bintrie.ProofSibling, leaf common.Hash) common.Hash {
+	if len(siblings) == 0 {
+		return leaf
+	}
+	ordered := make([]bintrie.ProofSibling, len(siblings))
+	copy(ordered, siblings)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Depth < ordered[j].Depth })
+	current := leaf
+	for i := len(ordered) - 1; i >= 0; i-- {
+		depth := int(ordered[i].Depth)
+		bit := (key[depth/8] >> (7 - (depth % 8))) & 1
+		if bit == 0 {
+			current = hashPair(current, ordered[i].Hash)
+		} else {
+			current = hashPair(ordered[i].Hash, current)
+		}
+	}
+	return current
+}
+
+func hashPair(left, right common.Hash) common.Hash {
+	var data [64]byte
+	copy(data[:32], left[:])
+	copy(data[32:], right[:])
+	sum := sha256.Sum256(data[:])
+	return common.BytesToHash(sum[:])
 }
 
 func parseStorageKey(keyHex string) (common.Hash, error) {

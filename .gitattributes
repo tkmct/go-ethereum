@@ -1,3 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
 *.sol linguist-language=Solidity
+
+# Use bd merge for beads JSONL files
+.beads/issues.jsonl merge=beads
