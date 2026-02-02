@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
 import EndpointForm, { EndpointValues } from '../components/EndpointForm';
-import BlockSelector, { BlockSelection, selectionToBlockRef } from '../components/BlockSelector';
+import BlockSelector, { BlockSelection } from '../components/BlockSelector';
 import ResultPanel from '../components/ResultPanel';
 import JsonViewer from '../components/JsonViewer';
 import { useLocalStorage } from '../hooks/useLocalStorage';
-import { blockRefToParam, callBatch, createRpcClient, RpcEndpoint } from '../lib/rpc';
+import { callBatch, createRpcClient, RpcEndpoint } from '../lib/rpc';
 
 const defaultEndpoints: EndpointValues = {
   mptUrl: 'http://localhost:8545',
@@ -27,6 +27,13 @@ type RpcBlock = {
 type ResolvedBlock = {
   number?: string;
   hash?: string;
+};
+
+type WitnessCallPlan = {
+  mptMethod: 'debug_executionWitness' | 'debug_executionWitnessByHash';
+  mptParam: unknown;
+  ubtParam: unknown;
+  resolved?: ResolvedBlock;
 };
 
 function hasTransactions(block: RpcBlock | null | undefined): boolean {
@@ -52,13 +59,45 @@ function formatWitnessError(err: unknown): string {
   return message;
 }
 
-async function resolveWitnessBlock(
-  endpoint: RpcEndpoint,
-  selection: BlockSelection
-): Promise<{ blockParam: unknown; resolved?: ResolvedBlock }> {
-  const blockRef = selectionToBlockRef(selection);
-  if (selection.mode === 'number' || selection.mode === 'hash') {
-    return { blockParam: blockRefToParam(blockRef) };
+function normalizeBlockNumberInput(value: string): string {
+  if (value.startsWith('0x') || value.startsWith('0X')) {
+    return value;
+  }
+  const parsed = BigInt(value);
+  return `0x${parsed.toString(16)}`;
+}
+
+function normalizeHexHash(value: string): string {
+  if (value.startsWith('0x') || value.startsWith('0X')) {
+    return value;
+  }
+  return `0x${value}`;
+}
+
+async function resolveWitnessPlan(endpoint: RpcEndpoint, selection: BlockSelection): Promise<WitnessCallPlan> {
+  if (selection.mode === 'number') {
+    if (!selection.value) {
+      throw new Error('Block number is required');
+    }
+    const numberHex = normalizeBlockNumberInput(selection.value);
+    return {
+      mptMethod: 'debug_executionWitness',
+      mptParam: numberHex,
+      ubtParam: numberHex,
+      resolved: { number: numberHex },
+    };
+  }
+  if (selection.mode === 'hash') {
+    if (!selection.value) {
+      throw new Error('Block hash is required');
+    }
+    const hash = normalizeHexHash(selection.value);
+    return {
+      mptMethod: 'debug_executionWitnessByHash',
+      mptParam: hash,
+      ubtParam: { blockHash: hash, requireCanonical: false },
+      resolved: { hash },
+    };
   }
 
   const client = createRpcClient(endpoint);
@@ -67,8 +106,13 @@ async function resolveWitnessBlock(
     throw new Error(`Block not found for ${selection.mode}`);
   }
   if (hasTransactions(tagBlock)) {
+    if (!tagBlock.number) {
+      throw new Error(`Block number missing for ${selection.mode}`);
+    }
     return {
-      blockParam: { blockHash: tagBlock.hash, requireCanonical: false },
+      mptMethod: 'debug_executionWitness',
+      mptParam: tagBlock.number,
+      ubtParam: tagBlock.number,
       resolved: { number: tagBlock.number, hash: tagBlock.hash },
     };
   }
@@ -93,8 +137,13 @@ async function resolveWitnessBlock(
   const results = await callBatch<RpcBlock>(endpoint, calls);
   for (const block of results) {
     if (block?.hash && hasTransactions(block)) {
+      if (!block.number) {
+        throw new Error('Block number missing for resolved transaction block');
+      }
       return {
-        blockParam: { blockHash: block.hash, requireCanonical: false },
+        mptMethod: 'debug_executionWitness',
+        mptParam: block.number,
+        ubtParam: block.number,
         resolved: { number: block.number, hash: block.hash },
       };
     }
@@ -131,13 +180,12 @@ export default function Witness() {
           ? { name: 'UBT', url: endpoints.ubtUrl }
           : { name: 'MPT', url: endpoints.mptUrl };
 
-      const resolved = await resolveWitnessBlock(resolveEndpoint, blockSelection);
-      const blockParam = resolved.blockParam;
-      setResolvedBlock(resolved.resolved ?? null);
+      const plan = await resolveWitnessPlan(resolveEndpoint, blockSelection);
+      setResolvedBlock(plan.resolved ?? null);
 
       const [stdResult, ubtResult] = await Promise.allSettled([
-        mptClient.call<unknown>('debug_executionWitness', [blockParam]),
-        ubtClient.call<unknown>('debug_executionWitnessUBT', [blockParam]),
+        mptClient.call<unknown>(plan.mptMethod, [plan.mptParam]),
+        ubtClient.call<unknown>('debug_executionWitnessUBT', [plan.ubtParam]),
       ]);
 
       let mptOk = false;
