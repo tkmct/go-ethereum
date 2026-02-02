@@ -752,9 +752,6 @@ func (api *DebugAPI) GetUBTProof(ctx context.Context, address common.Address, st
 // GetUBTState returns account and storage data read from the UBT sidecar.
 func (api *DebugAPI) GetUBTState(ctx context.Context, address common.Address, storageKeys []string, blockNrOrHash rpc.BlockNumberOrHash) (*UBTStateResult, error) {
 	sc := api.eth.blockchain.UBTSidecar()
-	if sc == nil || !sc.Ready() {
-		return nil, errors.New("ubt sidecar not ready")
-	}
 	header, err := api.eth.APIBackend.HeaderByNumberOrHash(ctx, blockNrOrHash)
 	if err != nil {
 		return nil, err
@@ -762,9 +759,26 @@ func (api *DebugAPI) GetUBTState(ctx context.Context, address common.Address, st
 	if header == nil {
 		return nil, fmt.Errorf("block %v not found", blockNrOrHash)
 	}
+	if sc == nil {
+		return nil, errors.New("ubt sidecar not ready")
+	}
 	ubtRoot, ok := sc.GetUBTRoot(header.Hash())
 	if !ok {
-		return nil, fmt.Errorf("ubt root not found for block %x", header.Hash())
+		if sc.Converting() && isLatestOrPending(blockNrOrHash) {
+			root, number, hash := sc.CurrentInfo()
+			if hash == (common.Hash{}) {
+				return nil, errors.New("ubt sidecar not ready")
+			}
+			header = api.eth.blockchain.GetHeader(hash, number)
+			if header == nil {
+				return nil, fmt.Errorf("block %x not found", hash)
+			}
+			ubtRoot = root
+		} else if sc.Ready() {
+			return nil, fmt.Errorf("ubt root not found for block %x", header.Hash())
+		} else {
+			return nil, errors.New("ubt sidecar not ready")
+		}
 	}
 	acc, err := sc.ReadAccount(ubtRoot, address)
 	if err != nil {
@@ -796,6 +810,13 @@ func (api *DebugAPI) GetUBTState(ctx context.Context, address common.Address, st
 		result.Storage[key] = value.Bytes()
 	}
 	return result, nil
+}
+
+func isLatestOrPending(blockNrOrHash rpc.BlockNumberOrHash) bool {
+	if num, ok := blockNrOrHash.Number(); ok {
+		return num == rpc.LatestBlockNumber || num == rpc.PendingBlockNumber
+	}
+	return false
 }
 
 // ExecutionWitnessUBT returns a path-aware witness for UBT nodes.

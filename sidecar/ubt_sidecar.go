@@ -130,6 +130,13 @@ func (sc *UBTSidecar) CurrentRoot() common.Hash {
 	return sc.currentRoot
 }
 
+// CurrentInfo returns the latest sidecar root and its associated block info.
+func (sc *UBTSidecar) CurrentInfo() (common.Hash, uint64, common.Hash) {
+	sc.mu.RLock()
+	defer sc.mu.RUnlock()
+	return sc.currentRoot, sc.currentBlock, sc.currentHash
+}
+
 // TrieDB exposes the sidecar's trie database.
 func (sc *UBTSidecar) TrieDB() *triedb.Database {
 	return sc.triedb

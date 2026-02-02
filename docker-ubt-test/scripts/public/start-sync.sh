@@ -31,6 +31,8 @@ HISTORY_TX=""
 HISTORY_LOGS_DISABLE=false
 MAXPEERS=""
 UBT_SANITY=false
+UBT_AUTOCONVERT=true
+UBT_COMMIT_INTERVAL=128
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -82,6 +84,18 @@ while [[ $# -gt 0 ]]; do
             UBT_SANITY=true
             shift
             ;;
+        --ubt-autoconvert)
+            UBT_AUTOCONVERT=true
+            shift
+            ;;
+        --ubt-no-autoconvert)
+            UBT_AUTOCONVERT=false
+            shift
+            ;;
+        --ubt-commit)
+            UBT_COMMIT_INTERVAL="$2"
+            shift 2
+            ;;
         *)
             shift
             ;;
@@ -123,6 +137,16 @@ if [ "$UBT_SANITY" = true ]; then
     UBT_SANITY_FLAG="--ubt.sanity"
 fi
 
+UBT_AUTOCONVERT_FLAG=""
+if [ "$UBT_AUTOCONVERT" = true ]; then
+    UBT_AUTOCONVERT_FLAG="--ubt.sidecar.autoconvert"
+fi
+
+UBT_COMMIT_FLAG=""
+if [ -n "$UBT_COMMIT_INTERVAL" ]; then
+    UBT_COMMIT_FLAG="--ubt.sidecar.commit ${UBT_COMMIT_INTERVAL}"
+fi
+
 # Determine checkpoint sync URL based on network
 case "$NETWORK" in
     mainnet)
@@ -154,6 +178,8 @@ services:
       --syncmode full
       --state.scheme path
       --ubt.sidecar
+      ${UBT_AUTOCONVERT_FLAG}
+      ${UBT_COMMIT_FLAG}
       ${UBT_SANITY_FLAG}
       --cache.preimages
       ${CACHE_FLAG}
