@@ -17,58 +17,60 @@ import (
 // MarshalTOML marshals as TOML.
 func (c Config) MarshalTOML() (interface{}, error) {
 	type Config struct {
-		Genesis                 *core.Genesis `toml:",omitempty"`
-		NetworkId               uint64
-		SyncMode                SyncMode
-		HistoryMode             history.HistoryMode
-		EthDiscoveryURLs        []string
-		SnapDiscoveryURLs       []string
-		NoPruning               bool
-		NoPrefetch              bool
-		TxLookupLimit           uint64 `toml:",omitempty"`
-		TransactionHistory      uint64 `toml:",omitempty"`
-		LogHistory              uint64 `toml:",omitempty"`
-		LogNoHistory            bool   `toml:",omitempty"`
-		LogExportCheckpoints    string
-		StateHistory            uint64                 `toml:",omitempty"`
-		StateScheme             string                 `toml:",omitempty"`
-		RequiredBlocks          map[uint64]common.Hash `toml:"-"`
-		SlowBlockThreshold      time.Duration          `toml:",omitempty"`
-		SkipBcVersionCheck      bool                   `toml:"-"`
-		DatabaseHandles         int                    `toml:"-"`
-		DatabaseCache           int
-		DatabaseFreezer         string
-		DatabaseEra             string
-		TrieCleanCache          int
-		TrieDirtyCache          int
-		TrieTimeout             time.Duration
-		SnapshotCache           int
-		Preimages               bool
-		FilterLogCacheSize      int
-		LogQueryLimit           int
-		Miner                   miner.Config
-		TxPool                  legacypool.Config
-		BlobPool                blobpool.Config
-		GPO                     gasprice.Config
-		EnablePreimageRecording bool
-		EnableWitnessStats      bool
-		StatelessSelfValidation bool
-		StateUseUBT             bool
-		UBTSidecar              bool
-		UBTSanityCheck          bool
-		SkipStateRootValidation bool
-		EnableStateSizeTracking bool
-		VMTrace                 string
-		VMTraceJsonConfig       string
-		RPCGasCap               uint64
-		RPCEVMTimeout           time.Duration
-		RPCTxFeeCap             float64
-		OverrideOsaka           *uint64       `toml:",omitempty"`
-		OverrideBPO1            *uint64       `toml:",omitempty"`
-		OverrideBPO2            *uint64       `toml:",omitempty"`
-		OverrideVerkle          *uint64       `toml:",omitempty"`
-		TxSyncDefaultTimeout    time.Duration `toml:",omitempty"`
-		TxSyncMaxTimeout        time.Duration `toml:",omitempty"`
+		Genesis                  *core.Genesis `toml:",omitempty"`
+		NetworkId                uint64
+		SyncMode                 SyncMode
+		HistoryMode              history.HistoryMode
+		EthDiscoveryURLs         []string
+		SnapDiscoveryURLs        []string
+		NoPruning                bool
+		NoPrefetch               bool
+		TxLookupLimit            uint64 `toml:",omitempty"`
+		TransactionHistory       uint64 `toml:",omitempty"`
+		LogHistory               uint64 `toml:",omitempty"`
+		LogNoHistory             bool   `toml:",omitempty"`
+		LogExportCheckpoints     string
+		StateHistory             uint64                 `toml:",omitempty"`
+		StateScheme              string                 `toml:",omitempty"`
+		RequiredBlocks           map[uint64]common.Hash `toml:"-"`
+		SlowBlockThreshold       time.Duration          `toml:",omitempty"`
+		SkipBcVersionCheck       bool                   `toml:"-"`
+		DatabaseHandles          int                    `toml:"-"`
+		DatabaseCache            int
+		DatabaseFreezer          string
+		DatabaseEra              string
+		TrieCleanCache           int
+		TrieDirtyCache           int
+		TrieTimeout              time.Duration
+		SnapshotCache            int
+		Preimages                bool
+		FilterLogCacheSize       int
+		LogQueryLimit            int
+		Miner                    miner.Config
+		TxPool                   legacypool.Config
+		BlobPool                 blobpool.Config
+		GPO                      gasprice.Config
+		EnablePreimageRecording  bool
+		EnableWitnessStats       bool
+		StatelessSelfValidation  bool
+		StateUseUBT              bool
+		UBTSidecar               bool   `toml:",omitempty"`
+		UBTSidecarAutoConvert    bool   `toml:",omitempty"`
+		UBTSidecarCommitInterval uint64 `toml:",omitempty"`
+		UBTSanityCheck           bool   `toml:",omitempty"`
+		SkipStateRootValidation  bool
+		EnableStateSizeTracking  bool
+		VMTrace                  string
+		VMTraceJsonConfig        string
+		RPCGasCap                uint64
+		RPCEVMTimeout            time.Duration
+		RPCTxFeeCap              float64
+		OverrideOsaka            *uint64       `toml:",omitempty"`
+		OverrideBPO1             *uint64       `toml:",omitempty"`
+		OverrideBPO2             *uint64       `toml:",omitempty"`
+		OverrideVerkle           *uint64       `toml:",omitempty"`
+		TxSyncDefaultTimeout     time.Duration `toml:",omitempty"`
+		TxSyncMaxTimeout         time.Duration `toml:",omitempty"`
 	}
 	var enc Config
 	enc.Genesis = c.Genesis
@@ -109,6 +111,8 @@ func (c Config) MarshalTOML() (interface{}, error) {
 	enc.StatelessSelfValidation = c.StatelessSelfValidation
 	enc.StateUseUBT = c.StateUseUBT
 	enc.UBTSidecar = c.UBTSidecar
+	enc.UBTSidecarAutoConvert = c.UBTSidecarAutoConvert
+	enc.UBTSidecarCommitInterval = c.UBTSidecarCommitInterval
 	enc.UBTSanityCheck = c.UBTSanityCheck
 	enc.SkipStateRootValidation = c.SkipStateRootValidation
 	enc.EnableStateSizeTracking = c.EnableStateSizeTracking
@@ -129,58 +133,60 @@ func (c Config) MarshalTOML() (interface{}, error) {
 // UnmarshalTOML unmarshals from TOML.
 func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	type Config struct {
-		Genesis                 *core.Genesis `toml:",omitempty"`
-		NetworkId               *uint64
-		SyncMode                *SyncMode
-		HistoryMode             *history.HistoryMode
-		EthDiscoveryURLs        []string
-		SnapDiscoveryURLs       []string
-		NoPruning               *bool
-		NoPrefetch              *bool
-		TxLookupLimit           *uint64 `toml:",omitempty"`
-		TransactionHistory      *uint64 `toml:",omitempty"`
-		LogHistory              *uint64 `toml:",omitempty"`
-		LogNoHistory            *bool   `toml:",omitempty"`
-		LogExportCheckpoints    *string
-		StateHistory            *uint64                `toml:",omitempty"`
-		StateScheme             *string                `toml:",omitempty"`
-		RequiredBlocks          map[uint64]common.Hash `toml:"-"`
-		SlowBlockThreshold      *time.Duration         `toml:",omitempty"`
-		SkipBcVersionCheck      *bool                  `toml:"-"`
-		DatabaseHandles         *int                   `toml:"-"`
-		DatabaseCache           *int
-		DatabaseFreezer         *string
-		DatabaseEra             *string
-		TrieCleanCache          *int
-		TrieDirtyCache          *int
-		TrieTimeout             *time.Duration
-		SnapshotCache           *int
-		Preimages               *bool
-		FilterLogCacheSize      *int
-		LogQueryLimit           *int
-		Miner                   *miner.Config
-		TxPool                  *legacypool.Config
-		BlobPool                *blobpool.Config
-		GPO                     *gasprice.Config
-		EnablePreimageRecording *bool
-		EnableWitnessStats      *bool
-		StatelessSelfValidation *bool
-		StateUseUBT             *bool
-		UBTSidecar              *bool
-		UBTSanityCheck          *bool
-		SkipStateRootValidation *bool
-		EnableStateSizeTracking *bool
-		VMTrace                 *string
-		VMTraceJsonConfig       *string
-		RPCGasCap               *uint64
-		RPCEVMTimeout           *time.Duration
-		RPCTxFeeCap             *float64
-		OverrideOsaka           *uint64        `toml:",omitempty"`
-		OverrideBPO1            *uint64        `toml:",omitempty"`
-		OverrideBPO2            *uint64        `toml:",omitempty"`
-		OverrideVerkle          *uint64        `toml:",omitempty"`
-		TxSyncDefaultTimeout    *time.Duration `toml:",omitempty"`
-		TxSyncMaxTimeout        *time.Duration `toml:",omitempty"`
+		Genesis                  *core.Genesis `toml:",omitempty"`
+		NetworkId                *uint64
+		SyncMode                 *SyncMode
+		HistoryMode              *history.HistoryMode
+		EthDiscoveryURLs         []string
+		SnapDiscoveryURLs        []string
+		NoPruning                *bool
+		NoPrefetch               *bool
+		TxLookupLimit            *uint64 `toml:",omitempty"`
+		TransactionHistory       *uint64 `toml:",omitempty"`
+		LogHistory               *uint64 `toml:",omitempty"`
+		LogNoHistory             *bool   `toml:",omitempty"`
+		LogExportCheckpoints     *string
+		StateHistory             *uint64                `toml:",omitempty"`
+		StateScheme              *string                `toml:",omitempty"`
+		RequiredBlocks           map[uint64]common.Hash `toml:"-"`
+		SlowBlockThreshold       *time.Duration         `toml:",omitempty"`
+		SkipBcVersionCheck       *bool                  `toml:"-"`
+		DatabaseHandles          *int                   `toml:"-"`
+		DatabaseCache            *int
+		DatabaseFreezer          *string
+		DatabaseEra              *string
+		TrieCleanCache           *int
+		TrieDirtyCache           *int
+		TrieTimeout              *time.Duration
+		SnapshotCache            *int
+		Preimages                *bool
+		FilterLogCacheSize       *int
+		LogQueryLimit            *int
+		Miner                    *miner.Config
+		TxPool                   *legacypool.Config
+		BlobPool                 *blobpool.Config
+		GPO                      *gasprice.Config
+		EnablePreimageRecording  *bool
+		EnableWitnessStats       *bool
+		StatelessSelfValidation  *bool
+		StateUseUBT              *bool
+		UBTSidecar               *bool   `toml:",omitempty"`
+		UBTSidecarAutoConvert    *bool   `toml:",omitempty"`
+		UBTSidecarCommitInterval *uint64 `toml:",omitempty"`
+		UBTSanityCheck           *bool   `toml:",omitempty"`
+		SkipStateRootValidation  *bool
+		EnableStateSizeTracking  *bool
+		VMTrace                  *string
+		VMTraceJsonConfig        *string
+		RPCGasCap                *uint64
+		RPCEVMTimeout            *time.Duration
+		RPCTxFeeCap              *float64
+		OverrideOsaka            *uint64        `toml:",omitempty"`
+		OverrideBPO1             *uint64        `toml:",omitempty"`
+		OverrideBPO2             *uint64        `toml:",omitempty"`
+		OverrideVerkle           *uint64        `toml:",omitempty"`
+		TxSyncDefaultTimeout     *time.Duration `toml:",omitempty"`
+		TxSyncMaxTimeout         *time.Duration `toml:",omitempty"`
 	}
 	var dec Config
 	if err := unmarshal(&dec); err != nil {
@@ -299,6 +305,12 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	}
 	if dec.UBTSidecar != nil {
 		c.UBTSidecar = *dec.UBTSidecar
+	}
+	if dec.UBTSidecarAutoConvert != nil {
+		c.UBTSidecarAutoConvert = *dec.UBTSidecarAutoConvert
+	}
+	if dec.UBTSidecarCommitInterval != nil {
+		c.UBTSidecarCommitInterval = *dec.UBTSidecarCommitInterval
 	}
 	if dec.UBTSanityCheck != nil {
 		c.UBTSanityCheck = *dec.UBTSanityCheck

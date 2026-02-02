@@ -193,11 +193,13 @@ type BlockChainConfig struct {
 	VmConfig   vm.Config       // Config options for the EVM Interpreter
 
 	// Experimental options
-	UseUBT                  bool // Force using UBT/BinaryTrie as the state backend (path scheme only)
-	UBTSidecar              bool // Enable UBT sidecar (shadow UBT state)
-	UBTSanityCheck          bool // Enable per-block UBT vs MPT sanity check (debug)
-	SkipStateRootValidation bool // Skip validating header stateRoot against computed root (dangerous)
-	CommitStateRootToHeader bool // Persist state under the canonical header.Root instead of computed root
+	UseUBT                   bool   // Force using UBT/BinaryTrie as the state backend (path scheme only)
+	UBTSidecar               bool   // Enable UBT sidecar (shadow UBT state)
+	UBTSidecarAutoConvert    bool   // Auto-convert MPT->UBT when sidecar is not ready
+	UBTSidecarCommitInterval uint64 // Commit UBT sidecar diff layers every N blocks (0 = disabled)
+	UBTSanityCheck           bool   // Enable per-block UBT vs MPT sanity check (debug)
+	SkipStateRootValidation  bool   // Skip validating header stateRoot against computed root (dangerous)
+	CommitStateRootToHeader  bool   // Persist state under the canonical header.Root instead of computed root
 
 	// TxLookupLimit specifies the maximum number of blocks from head for which
 	// transaction hashes will be indexed.
@@ -426,6 +428,7 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 		if err != nil {
 			return nil, err
 		}
+		sc.SetCommitInterval(cfg.UBTSidecarCommitInterval)
 		bc.ubtSidecar = sc
 	}
 
@@ -457,6 +460,7 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 		if err := bc.ubtSidecar.InitFromDB(); err != nil {
 			return nil, err
 		}
+		bc.maybeStartUBTAutoConvert("startup")
 	}
 	// Make sure the state associated with the block is available, or log out
 	// if there is no available state, waiting for state sync.
@@ -580,6 +584,29 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 		}
 	}
 	return bc, nil
+}
+
+func (bc *BlockChain) maybeStartUBTAutoConvert(reason string) {
+	if bc.ubtSidecar == nil || !bc.cfg.UBTSidecarAutoConvert {
+		return
+	}
+	if bc.ubtSidecar.Ready() || bc.ubtSidecar.Converting() {
+		return
+	}
+	head := bc.CurrentBlock()
+	if head == nil || !bc.HasState(head.Root) {
+		log.Warn("Skipping UBT conversion, head state unavailable", "reason", reason)
+		return
+	}
+	if !bc.ubtSidecar.BeginConversion(head.Root, head.Number.Uint64(), head.Hash()) {
+		return
+	}
+	log.Info("Starting UBT sidecar conversion", "reason", reason, "block", head.Number, "hash", head.Hash())
+	go func(root common.Hash, number uint64, hash common.Hash) {
+		if err := bc.ubtSidecar.ConvertFromMPT(root, number, hash, bc.statedb); err != nil {
+			log.Error("UBT sidecar conversion failed", "err", err)
+		}
+	}(head.Root, head.Number.Uint64(), head.Hash())
 }
 
 func (bc *BlockChain) setupSnapshot() {
@@ -1713,11 +1740,18 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		if hasStateSizer {
 			bc.stateSizer.Notify(update)
 		}
-		if bc.ubtSidecar != nil && update != nil && bc.ubtSidecar.Ready() {
-			if err := bc.ubtSidecar.ApplyStateUpdate(block, update, bc.db); err != nil {
-				log.Error("Failed to apply UBT sidecar update", "block", block.NumberU64(), "hash", block.Hash(), "err", err)
-			} else if bc.cfg.UBTSanityCheck {
-				bc.ubtSidecar.SanityCheck(block, update, statedb)
+		if bc.ubtSidecar != nil {
+			if bc.ubtSidecar.Ready() && update != nil {
+				if err := bc.ubtSidecar.ApplyStateUpdate(block, update, bc.db); err != nil {
+					log.Error("Failed to apply UBT sidecar update", "block", block.NumberU64(), "hash", block.Hash(), "err", err)
+					bc.maybeStartUBTAutoConvert("apply update")
+				} else if bc.cfg.UBTSanityCheck {
+					bc.ubtSidecar.SanityCheck(block, update, statedb)
+				}
+			} else if bc.ubtSidecar.Converting() {
+				if err := bc.ubtSidecar.EnqueueUpdate(block, update); err != nil {
+					log.Error("Failed to enqueue UBT sidecar update", "block", block.NumberU64(), "hash", block.Hash(), "err", err)
+				}
 			}
 		}
 	} else {
@@ -2591,6 +2625,7 @@ func (bc *BlockChain) reorg(oldHead *types.Header, newHead *types.Header) error 
 	if bc.ubtSidecar != nil && bc.ubtSidecar.Ready() {
 		if err := bc.ubtSidecar.HandleReorg(commonBlock.Hash(), commonBlock.Number.Uint64()); err != nil {
 			log.Error("Failed to recover UBT sidecar during reorg", "number", commonBlock.Number, "hash", commonBlock.Hash(), "err", err)
+			bc.maybeStartUBTAutoConvert("reorg")
 		}
 	}
 	// Acquire the tx-lookup lock before mutation. This step is essential

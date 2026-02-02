@@ -50,13 +50,20 @@ type UBTAccount struct {
 type UBTSidecar struct {
 	mu sync.RWMutex
 
-	enabled bool
-	ready   bool
-	stale   bool
+	enabled    bool
+	ready      bool
+	stale      bool
+	converting bool
 
-	currentRoot  common.Hash
-	currentBlock uint64
-	currentHash  common.Hash
+	conversionRoot  common.Hash
+	conversionBlock uint64
+	conversionHash  common.Hash
+
+	currentRoot        common.Hash
+	currentBlock       uint64
+	currentHash        common.Hash
+	lastCommittedBlock uint64
+	commitInterval     uint64
 
 	triedb  *triedb.Database
 	chainDB ethdb.Database
@@ -106,7 +113,14 @@ func (sc *UBTSidecar) Enabled() bool {
 func (sc *UBTSidecar) Ready() bool {
 	sc.mu.RLock()
 	defer sc.mu.RUnlock()
-	return sc.enabled && sc.ready && !sc.stale
+	return sc.enabled && sc.ready && !sc.stale && !sc.converting
+}
+
+// Converting returns whether the sidecar is converting MPT to UBT.
+func (sc *UBTSidecar) Converting() bool {
+	sc.mu.RLock()
+	defer sc.mu.RUnlock()
+	return sc.enabled && sc.converting && !sc.stale
 }
 
 // CurrentRoot returns the current UBT root.
@@ -119,6 +133,13 @@ func (sc *UBTSidecar) CurrentRoot() common.Hash {
 // TrieDB exposes the sidecar's trie database.
 func (sc *UBTSidecar) TrieDB() *triedb.Database {
 	return sc.triedb
+}
+
+// SetCommitInterval configures how often UBT sidecar commits are flushed (in blocks).
+func (sc *UBTSidecar) SetCommitInterval(interval uint64) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.commitInterval = interval
 }
 
 // Close closes the sidecar trie database.
@@ -136,16 +157,48 @@ func (sc *UBTSidecar) InitFromDB() error {
 		sc.mu.Unlock()
 		return nil
 	}
+	sc.mu.Unlock()
+
 	root, block, hash, ok := rawdb.ReadUBTCurrentRoot(sc.chainDB)
 	if ok {
-		sc.currentRoot = root
-		sc.currentBlock = block
-		sc.currentHash = hash
-		sc.ready = true
+		if err := sc.ensureRootAvailable(root); err == nil {
+			sc.mu.Lock()
+			sc.currentRoot = root
+			sc.currentBlock = block
+			sc.currentHash = hash
+			sc.ready = true
+			sc.stale = false
+			sc.converting = false
+			sc.mu.Unlock()
+		} else {
+			log.Warn("UBT sidecar current root unavailable", "block", block, "hash", hash, "err", err)
+			sc.mu.Lock()
+			sc.ready = false
+			sc.stale = true
+			sc.converting = false
+			sc.mu.Unlock()
+		}
+	}
+	if root, block, hash, ok := rawdb.ReadUBTCommittedRoot(sc.chainDB); ok {
+		sc.mu.Lock()
+		sc.lastCommittedBlock = block
 		sc.mu.Unlock()
+		if !sc.Ready() {
+			if err := sc.ensureRootAvailable(root); err == nil {
+				sc.mu.Lock()
+				sc.currentRoot = root
+				sc.currentBlock = block
+				sc.currentHash = hash
+				sc.mu.Unlock()
+				log.Warn("UBT sidecar recovered to committed root; conversion required", "block", block, "hash", hash)
+			} else {
+				log.Warn("UBT sidecar committed root unavailable", "block", block, "hash", hash, "err", err)
+			}
+		}
+	}
+	if ok {
 		return nil
 	}
-	sc.mu.Unlock()
 
 	genesisHash := rawdb.ReadCanonicalHash(sc.chainDB, 0)
 	if genesisHash == (common.Hash{}) {
@@ -273,10 +326,12 @@ func (sc *UBTSidecar) buildFromGenesis(genesisHash common.Hash, alloc types.Gene
 	if root == types.EmptyBinaryHash {
 		rawdb.WriteUBTCurrentRoot(sc.chainDB, root, 0, genesisHash)
 		rawdb.WriteUBTBlockRoot(sc.chainDB, genesisHash, root)
+		rawdb.WriteUBTCommittedRoot(sc.chainDB, root, 0, genesisHash)
 		sc.mu.Lock()
 		sc.currentRoot = root
 		sc.currentBlock = 0
 		sc.currentHash = genesisHash
+		sc.lastCommittedBlock = 0
 		sc.ready = true
 		sc.stale = false
 		sc.mu.Unlock()
@@ -286,13 +341,18 @@ func (sc *UBTSidecar) buildFromGenesis(genesisHash common.Hash, alloc types.Gene
 	if err := sc.triedb.Update(root, types.EmptyBinaryHash, 0, merged, triedb.NewStateSet()); err != nil {
 		return sc.fail("triedb update", err)
 	}
+	if err := sc.triedb.Commit(root, false); err != nil {
+		return sc.fail("commit ubt trie", err)
+	}
 	rawdb.WriteUBTCurrentRoot(sc.chainDB, root, 0, genesisHash)
 	rawdb.WriteUBTBlockRoot(sc.chainDB, genesisHash, root)
+	rawdb.WriteUBTCommittedRoot(sc.chainDB, root, 0, genesisHash)
 
 	sc.mu.Lock()
 	sc.currentRoot = root
 	sc.currentBlock = 0
 	sc.currentHash = genesisHash
+	sc.lastCommittedBlock = 0
 	sc.ready = true
 	sc.stale = false
 	sc.mu.Unlock()
@@ -338,6 +398,9 @@ func (sc *UBTSidecar) ApplyStateUpdate(block *types.Block, update *state.StateUp
 	}
 	if err := sc.applyUBTUpdate(ubtUpdate); err != nil {
 		return sc.fail("apply update", err)
+	}
+	if err := sc.maybeCommit(block.NumberU64(), block.Hash()); err != nil {
+		return err
 	}
 	return nil
 }
@@ -501,9 +564,75 @@ func (sc *UBTSidecar) fail(stage string, err error) error {
 	sc.mu.Lock()
 	sc.stale = true
 	sc.ready = false
+	sc.converting = false
 	sc.mu.Unlock()
 	log.Error("UBT sidecar failed", "stage", stage, "err", err)
 	return err
+}
+
+func (sc *UBTSidecar) ensureRootAvailable(root common.Hash) error {
+	if root == (common.Hash{}) {
+		return nil
+	}
+	if sc.triedb == nil {
+		return errors.New("ubt sidecar missing triedb")
+	}
+	if recoverable, err := sc.triedb.Recoverable(root); err == nil && recoverable {
+		if err := sc.triedb.Recover(root); err != nil {
+			return err
+		}
+		return nil
+	}
+	var lastErr error
+	if _, err := sc.triedb.NodeReader(root); err == nil {
+		return nil
+	} else {
+		lastErr = err
+	}
+	if _, err := sc.triedb.StateReader(root); err == nil {
+		return nil
+	} else {
+		lastErr = err
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return errors.New("ubt root unavailable")
+}
+
+func (sc *UBTSidecar) applyNoopUpdate(blockNum uint64, blockHash common.Hash) {
+	sc.mu.RLock()
+	root := sc.currentRoot
+	sc.mu.RUnlock()
+	rawdb.WriteUBTCurrentRoot(sc.chainDB, root, blockNum, blockHash)
+	rawdb.WriteUBTBlockRoot(sc.chainDB, blockHash, root)
+	sc.mu.Lock()
+	sc.currentBlock = blockNum
+	sc.currentHash = blockHash
+	sc.mu.Unlock()
+}
+
+func (sc *UBTSidecar) maybeCommit(blockNum uint64, blockHash common.Hash) error {
+	sc.mu.RLock()
+	interval := sc.commitInterval
+	lastCommit := sc.lastCommittedBlock
+	root := sc.currentRoot
+	sc.mu.RUnlock()
+	if interval == 0 {
+		return nil
+	}
+	if lastCommit != 0 && blockNum-lastCommit < interval {
+		return nil
+	}
+	if err := sc.triedb.Commit(root, false); err != nil {
+		return sc.fail("commit", err)
+	}
+	rawdb.WriteUBTCommittedRoot(sc.chainDB, root, blockNum, blockHash)
+	sc.mu.Lock()
+	sc.lastCommittedBlock = blockNum
+	sc.mu.Unlock()
+	log.Info("Committed UBT sidecar state", "block", blockNum, "hash", blockHash, "root", root)
+	return nil
 }
 
 func resolveCodeLen(update *UBTUpdate, addr common.Address, codeHash common.Hash, db ethdb.Database) (int, error) {

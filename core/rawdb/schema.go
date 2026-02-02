@@ -169,9 +169,13 @@ var (
 	VerkleTransitionStatePrefix = []byte("verkle-transition-state-")
 
 	// UBT sidecar metadata
-	UBTSidecarPrefix   = []byte("ubt-sidecar-")
-	UBTCurrentRootKey  = []byte("ubt-current-root")
-	UBTBlockRootPrefix = []byte("ubt-block-root-") // UBTBlockRootPrefix + blockHash
+	UBTSidecarPrefix         = []byte("ubt-sidecar-")
+	UBTCurrentRootKey        = []byte("ubt-current-root")
+	UBTCommittedRootKey      = []byte("ubt-committed-root")
+	UBTConversionProgressKey = []byte("ubt-conv-progress")
+	UBTBlockRootPrefix       = []byte("ubt-block-root-")   // UBTBlockRootPrefix + blockHash
+	UBTUpdateQueuePrefix     = []byte("ubt-update-queue-") // UBTUpdateQueuePrefix + blockNum + blockHash
+	UBTUpdateQueueMetaKey    = []byte("ubt-update-queue-meta")
 )
 
 // LegacyTxLookupEntry is the legacy TxLookupEntry definition with some unnecessary

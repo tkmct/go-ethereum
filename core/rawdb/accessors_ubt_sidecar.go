@@ -29,6 +29,20 @@ type ubtCurrentRoot struct {
 	BlockHash common.Hash
 }
 
+// UBTConversionProgress tracks the progress of MPT->UBT conversion.
+type UBTConversionProgress struct {
+	Root      common.Hash
+	Block     uint64
+	BlockHash common.Hash
+	Started   uint64
+}
+
+// UBTUpdateQueueMeta tracks the queued update bounds.
+type UBTUpdateQueueMeta struct {
+	Start uint64
+	End   uint64
+}
+
 // ubtBlockRootKey is the prefix for block hash -> UBT root lookup.
 func ubtBlockRootKey(blockHash common.Hash) []byte {
 	return append(UBTBlockRootPrefix, blockHash.Bytes()...)
@@ -55,6 +69,92 @@ func WriteUBTCurrentRoot(db ethdb.KeyValueWriter, root common.Hash, block uint64
 	}
 	if err := db.Put(UBTCurrentRootKey, blob); err != nil {
 		log.Crit("Failed to store UBT current root", "err", err)
+	}
+}
+
+// ReadUBTCommittedRoot retrieves the last committed UBT root and block info.
+func ReadUBTCommittedRoot(db ethdb.KeyValueReader) (root common.Hash, block uint64, hash common.Hash, ok bool) {
+	data, _ := db.Get(UBTCommittedRootKey)
+	if len(data) == 0 {
+		return common.Hash{}, 0, common.Hash{}, false
+	}
+	var entry ubtCurrentRoot
+	if err := rlp.DecodeBytes(data, &entry); err != nil {
+		return common.Hash{}, 0, common.Hash{}, false
+	}
+	return entry.Root, entry.Block, entry.BlockHash, true
+}
+
+// WriteUBTCommittedRoot stores the last committed UBT root and block info.
+func WriteUBTCommittedRoot(db ethdb.KeyValueWriter, root common.Hash, block uint64, blockHash common.Hash) {
+	blob, err := rlp.EncodeToBytes(&ubtCurrentRoot{Root: root, Block: block, BlockHash: blockHash})
+	if err != nil {
+		log.Crit("Failed to encode UBT committed root", "err", err)
+	}
+	if err := db.Put(UBTCommittedRootKey, blob); err != nil {
+		log.Crit("Failed to store UBT committed root", "err", err)
+	}
+}
+
+// ReadUBTConversionProgress retrieves the conversion progress metadata.
+func ReadUBTConversionProgress(db ethdb.KeyValueReader) (*UBTConversionProgress, error) {
+	data, _ := db.Get(UBTConversionProgressKey)
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var entry UBTConversionProgress
+	if err := rlp.DecodeBytes(data, &entry); err != nil {
+		return nil, err
+	}
+	return &entry, nil
+}
+
+// WriteUBTConversionProgress stores conversion progress metadata.
+func WriteUBTConversionProgress(db ethdb.KeyValueWriter, entry *UBTConversionProgress) {
+	blob, err := rlp.EncodeToBytes(entry)
+	if err != nil {
+		log.Crit("Failed to encode UBT conversion progress", "err", err)
+	}
+	if err := db.Put(UBTConversionProgressKey, blob); err != nil {
+		log.Crit("Failed to store UBT conversion progress", "err", err)
+	}
+}
+
+// DeleteUBTConversionProgress deletes conversion progress metadata.
+func DeleteUBTConversionProgress(db ethdb.KeyValueWriter) {
+	if err := db.Delete(UBTConversionProgressKey); err != nil {
+		log.Crit("Failed to delete UBT conversion progress", "err", err)
+	}
+}
+
+// ReadUBTUpdateQueueMeta retrieves queued update metadata.
+func ReadUBTUpdateQueueMeta(db ethdb.KeyValueReader) (*UBTUpdateQueueMeta, error) {
+	data, _ := db.Get(UBTUpdateQueueMetaKey)
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var entry UBTUpdateQueueMeta
+	if err := rlp.DecodeBytes(data, &entry); err != nil {
+		return nil, err
+	}
+	return &entry, nil
+}
+
+// WriteUBTUpdateQueueMeta stores queued update metadata.
+func WriteUBTUpdateQueueMeta(db ethdb.KeyValueWriter, entry *UBTUpdateQueueMeta) {
+	blob, err := rlp.EncodeToBytes(entry)
+	if err != nil {
+		log.Crit("Failed to encode UBT update queue meta", "err", err)
+	}
+	if err := db.Put(UBTUpdateQueueMetaKey, blob); err != nil {
+		log.Crit("Failed to store UBT update queue meta", "err", err)
+	}
+}
+
+// DeleteUBTUpdateQueueMeta deletes queued update metadata.
+func DeleteUBTUpdateQueueMeta(db ethdb.KeyValueWriter) {
+	if err := db.Delete(UBTUpdateQueueMetaKey); err != nil {
+		log.Crit("Failed to delete UBT update queue meta", "err", err)
 	}
 }
 

@@ -59,6 +59,30 @@ func NewUBTUpdate(block *types.Block, update *state.StateUpdate) *UBTUpdate {
 	}
 }
 
+// NewEmptyUBTUpdate constructs a noop update for blocks without state changes.
+func NewEmptyUBTUpdate(block *types.Block) *UBTUpdate {
+	if block == nil {
+		return nil
+	}
+	return &UBTUpdate{
+		BlockNum:   block.NumberU64(),
+		BlockHash:  block.Hash(),
+		ParentHash: block.ParentHash(),
+	}
+}
+
+// Empty reports whether the update contains no state mutations.
+func (u *UBTUpdate) Empty() bool {
+	if u == nil {
+		return true
+	}
+	return len(u.Accounts) == 0 &&
+		len(u.AccountsOrigin) == 0 &&
+		len(u.Storages) == 0 &&
+		len(u.StoragesOrigin) == 0 &&
+		len(u.Codes) == 0
+}
+
 type ubtAccountKV struct {
 	Hash common.Hash
 	Data []byte

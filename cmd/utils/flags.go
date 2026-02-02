@@ -296,6 +296,17 @@ var (
 		Usage:    "Enable UBT sidecar (shadow UBT state) while keeping MPT as consensus state",
 		Category: flags.StateCategory,
 	}
+	UBTSidecarAutoConvertFlag = &cli.BoolFlag{
+		Name:     "ubt.sidecar.autoconvert",
+		Usage:    "Auto-convert MPT->UBT when sidecar is not ready (requires --ubt.sidecar)",
+		Category: flags.StateCategory,
+	}
+	UBTSidecarCommitIntervalFlag = &cli.Uint64Flag{
+		Name:     "ubt.sidecar.commit",
+		Usage:    "Commit UBT sidecar diff layers every N blocks (0 disables commits)",
+		Value:    ethconfig.Defaults.UBTSidecarCommitInterval,
+		Category: flags.StateCategory,
+	}
 	UBTSanityFlag = &cli.BoolFlag{
 		Name:     "ubt.sanity",
 		Usage:    "Enable per-block UBT vs MPT sanity check (debug; requires --ubt.sidecar)",
@@ -1069,6 +1080,8 @@ var (
 		StateSchemeFlag,
 		StateUBTFlag,
 		UBTSidecarFlag,
+		UBTSidecarAutoConvertFlag,
+		UBTSidecarCommitIntervalFlag,
 		UBTSanityFlag,
 		SkipStateRootValidationFlag,
 		HttpHeaderFlag,
@@ -1735,6 +1748,12 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	if ctx.IsSet(UBTSidecarFlag.Name) {
 		cfg.UBTSidecar = ctx.Bool(UBTSidecarFlag.Name)
 	}
+	if ctx.IsSet(UBTSidecarAutoConvertFlag.Name) {
+		cfg.UBTSidecarAutoConvert = ctx.Bool(UBTSidecarAutoConvertFlag.Name)
+	}
+	if ctx.IsSet(UBTSidecarCommitIntervalFlag.Name) {
+		cfg.UBTSidecarCommitInterval = ctx.Uint64(UBTSidecarCommitIntervalFlag.Name)
+	}
 	if ctx.IsSet(UBTSanityFlag.Name) {
 		cfg.UBTSanityCheck = ctx.Bool(UBTSanityFlag.Name)
 	}
@@ -1773,6 +1792,9 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 		if !cfg.Preimages {
 			cfg.Preimages = true
 			log.Warn("Enabling --cache.preimages automatically because --ubt.sidecar is set")
+		}
+		if cfg.UBTSidecarCommitInterval == 0 {
+			log.Warn("UBT sidecar commits disabled; restarts may require reconversion", "flag", UBTSidecarCommitIntervalFlag.Name)
 		}
 	}
 	if cfg.UBTSanityCheck && !cfg.UBTSidecar {
