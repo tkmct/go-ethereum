@@ -4,7 +4,7 @@ import BlockSelector, { BlockSelection, selectionToBlockRef } from '../component
 import ResultPanel from '../components/ResultPanel';
 import JsonViewer from '../components/JsonViewer';
 import { useLocalStorage } from '../hooks/useLocalStorage';
-import { blockRefToParam, createRpcClient } from '../lib/rpc';
+import { blockRefToParam, callBatch, createRpcClient, RpcEndpoint } from '../lib/rpc';
 
 const defaultEndpoints: EndpointValues = {
   mptUrl: 'http://localhost:8545',
@@ -16,37 +16,165 @@ const defaultBlock: BlockSelection = {
   value: '',
 };
 
+const MAX_SCAN_DEPTH = 20;
+
+type RpcBlock = {
+  number?: string;
+  hash?: string;
+  transactions?: unknown[];
+};
+
+type ResolvedBlock = {
+  number?: string;
+  hash?: string;
+};
+
+function hasTransactions(block: RpcBlock | null | undefined): boolean {
+  return !!block && Array.isArray(block.transactions) && block.transactions.length > 0;
+}
+
+function parseBlockNumber(value?: string): bigint | null {
+  if (!value) {
+    return null;
+  }
+  try {
+    return BigInt(value);
+  } catch {
+    return null;
+  }
+}
+
+function formatWitnessError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  if (message.toLowerCase().includes('no state paths')) {
+    return `${message} (block has no state access; try a block with transactions)`;
+  }
+  return message;
+}
+
+async function resolveWitnessBlock(
+  endpoint: RpcEndpoint,
+  selection: BlockSelection
+): Promise<{ blockParam: unknown; resolved?: ResolvedBlock }> {
+  const blockRef = selectionToBlockRef(selection);
+  if (selection.mode === 'number' || selection.mode === 'hash') {
+    return { blockParam: blockRefToParam(blockRef) };
+  }
+
+  const client = createRpcClient(endpoint);
+  const tagBlock = await client.call<RpcBlock>('eth_getBlockByNumber', [selection.mode, false]);
+  if (!tagBlock || !tagBlock.hash) {
+    throw new Error(`Block not found for ${selection.mode}`);
+  }
+  if (hasTransactions(tagBlock)) {
+    return {
+      blockParam: { blockHash: tagBlock.hash, requireCanonical: false },
+      resolved: { number: tagBlock.number, hash: tagBlock.hash },
+    };
+  }
+
+  const start = parseBlockNumber(tagBlock.number);
+  if (start === null) {
+    throw new Error(`Could not parse block number for ${selection.mode}`);
+  }
+
+  const calls: { method: string; params: unknown[] }[] = [];
+  for (let i = 1; i <= MAX_SCAN_DEPTH; i += 1) {
+    const n = start - BigInt(i);
+    if (n < 0n) {
+      break;
+    }
+    calls.push({ method: 'eth_getBlockByNumber', params: [`0x${n.toString(16)}`, false] });
+  }
+  if (calls.length === 0) {
+    throw new Error(`No recent blocks to scan from ${selection.mode}`);
+  }
+
+  const results = await callBatch<RpcBlock>(endpoint, calls);
+  for (const block of results) {
+    if (block?.hash && hasTransactions(block)) {
+      return {
+        blockParam: { blockHash: block.hash, requireCanonical: false },
+        resolved: { number: block.number, hash: block.hash },
+      };
+    }
+  }
+
+  throw new Error(`No recent blocks with transactions (looked back ${calls.length} blocks from ${selection.mode}).`);
+}
+
 export default function Witness() {
   const [endpoints, setEndpoints] = useLocalStorage<EndpointValues>('ubt-checker:endpoints', defaultEndpoints);
   const [blockSelection, setBlockSelection] = useLocalStorage<BlockSelection>('ubt-checker:block', defaultBlock);
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [error, setError] = useState<string | undefined>(undefined);
+  const [mptError, setMptError] = useState<string | undefined>(undefined);
+  const [ubtError, setUbtError] = useState<string | undefined>(undefined);
   const [standardWitness, setStandardWitness] = useState<unknown>(null);
   const [ubtWitness, setUbtWitness] = useState<unknown>(null);
+  const [resolvedBlock, setResolvedBlock] = useState<ResolvedBlock | null>(null);
 
   const handleFetch = async () => {
     try {
       setStatus('loading');
       setError(undefined);
+      setMptError(undefined);
+      setUbtError(undefined);
       setStandardWitness(null);
       setUbtWitness(null);
+      setResolvedBlock(null);
 
       const mptClient = createRpcClient({ name: 'MPT', url: endpoints.mptUrl });
       const ubtClient = createRpcClient({ name: 'UBT', url: endpoints.ubtUrl });
-      const blockRef = selectionToBlockRef(blockSelection);
-      const blockParam = blockRefToParam(blockRef);
+      const resolveEndpoint =
+        endpoints.ubtUrl && endpoints.ubtUrl !== endpoints.mptUrl
+          ? { name: 'UBT', url: endpoints.ubtUrl }
+          : { name: 'MPT', url: endpoints.mptUrl };
 
-      const [std, ubt] = await Promise.all([
+      const resolved = await resolveWitnessBlock(resolveEndpoint, blockSelection);
+      const blockParam = resolved.blockParam;
+      setResolvedBlock(resolved.resolved ?? null);
+
+      const [stdResult, ubtResult] = await Promise.allSettled([
         mptClient.call<unknown>('debug_executionWitness', [blockParam]),
         ubtClient.call<unknown>('debug_executionWitnessUBT', [blockParam]),
       ]);
 
-      setStandardWitness(std);
-      setUbtWitness(ubt);
-      setStatus('success');
+      let mptOk = false;
+      let ubtOk = false;
+
+      if (stdResult.status === 'fulfilled' && stdResult.value != null) {
+        setStandardWitness(stdResult.value);
+        mptOk = true;
+      } else {
+        const reason =
+          stdResult.status === 'fulfilled'
+            ? new Error('RPC debug_executionWitness returned empty result')
+            : stdResult.reason;
+        setMptError(formatWitnessError(reason));
+      }
+
+      if (ubtResult.status === 'fulfilled' && ubtResult.value != null) {
+        setUbtWitness(ubtResult.value);
+        ubtOk = true;
+      } else {
+        const reason =
+          ubtResult.status === 'fulfilled'
+            ? new Error('RPC debug_executionWitnessUBT returned empty result')
+            : ubtResult.reason;
+        setUbtError(formatWitnessError(reason));
+      }
+
+      if (mptOk || ubtOk) {
+        setStatus('success');
+        setError(undefined);
+      } else {
+        setStatus('error');
+        setError('Both witness RPCs failed.');
+      }
     } catch (err) {
       setStatus('error');
-      setError((err as Error).message);
+      setError(formatWitnessError(err));
     }
   };
 
@@ -73,6 +201,21 @@ export default function Witness() {
       <ResultPanel title="Witness Results" status={status} error={error}>
         <div className="diff">
           <div className="badge rose">Verification not implemented yet.</div>
+          {resolvedBlock && (
+            <div className="mono">
+              Resolved block: {resolvedBlock.number ?? 'unknown'} {resolvedBlock.hash ?? ''}
+            </div>
+          )}
+          <div className={`badge ${mptError ? 'rose' : standardWitness ? 'teal' : ''}`}>
+            MPT witness:{' '}
+            {mptError ? 'error' : standardWitness ? 'ok' : status === 'loading' ? 'loading' : 'idle'}
+          </div>
+          {mptError && <div className="mono">{mptError}</div>}
+          <div className={`badge ${ubtError ? 'rose' : ubtWitness ? 'teal' : ''}`}>
+            UBT witness:{' '}
+            {ubtError ? 'error' : ubtWitness ? 'ok' : status === 'loading' ? 'loading' : 'idle'}
+          </div>
+          {ubtError && <div className="mono">{ubtError}</div>}
         </div>
       </ResultPanel>
 
