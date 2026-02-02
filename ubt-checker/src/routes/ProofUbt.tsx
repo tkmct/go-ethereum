@@ -5,7 +5,7 @@ import StorageKeyList from '../components/StorageKeyList';
 import ResultPanel from '../components/ResultPanel';
 import JsonViewer from '../components/JsonViewer';
 import { useLocalStorage } from '../hooks/useLocalStorage';
-import { bytesToHex, hexToBytes } from '../lib/format';
+import { bytesToHex, hexToBytes, strip0x } from '../lib/format';
 import { sha256 } from '../lib/hash';
 import { blockRefToParam, createRpcClient } from '../lib/rpc';
 import { getBinaryTreeKeyBasicData } from '../lib/ubtKeys';
@@ -158,6 +158,7 @@ export default function ProofUbt() {
   const [ubtRootLookup, setUbtRootLookup] = useState<UbtRootLookup | null>(null);
   const [accountResult, setAccountResult] = useState<{ ok: boolean; errors: string[] } | null>(null);
   const [storageResult, setStorageResult] = useState<{ ok: boolean; errors: string[] } | null>(null);
+  const [rootResult, setRootResult] = useState<{ ok: boolean; errors: string[] } | null>(null);
   const handleFetch = async () => {
     try {
       setStatus('loading');
@@ -166,6 +167,7 @@ export default function ProofUbt() {
       setUbtRootLookup(null);
       setAccountResult(null);
       setStorageResult(null);
+      setRootResult(null);
 
       const client = createRpcClient({ name: 'UBT', url: endpoints.ubtUrl });
       const keys = storageKeys.map(normalizeHex).filter((k) => k !== '0x');
@@ -198,11 +200,19 @@ export default function ProofUbt() {
       console.log('ubt root lookup', rootLookup);
       const account = verifyUbtAccountProof(result);
       const storage = verifyUbtStorageProofs(result);
+      const rootErrors: string[] = [];
+      if (!rootLookup.ok) {
+        rootErrors.push('ubt root lookup missing for block');
+      } else if (strip0x(rootLookup.ubtRoot).toLowerCase() !== strip0x(result.ubtRoot).toLowerCase()) {
+        rootErrors.push(`ubt root mismatch: proof ${result.ubtRoot} vs lookup ${rootLookup.ubtRoot}`);
+      }
+      const rootCheck = { ok: rootErrors.length === 0, errors: rootErrors };
 
       setProof(result);
       setUbtRootLookup(rootLookup);
       setAccountResult(account);
       setStorageResult(storage);
+      setRootResult(rootCheck);
       setStatus('success');
     } catch (err) {
       setStatus('error');
@@ -270,6 +280,20 @@ export default function ProofUbt() {
                   <div key={err}>{err}</div>
                 ))}
               </div>
+            )}
+            {rootResult && (
+              <>
+                <div className={`badge ${rootResult.ok ? 'teal' : 'rose'}`}>
+                  UBT root check: {rootResult.ok ? 'match' : 'mismatch'}
+                </div>
+                {rootResult.errors.length > 0 && (
+                  <div className="mono">
+                    {rootResult.errors.map((err) => (
+                      <div key={err}>{err}</div>
+                    ))}
+                  </div>
+                )}
+              </>
             )}
             {ubtRootLookup && (
               <div className="mono mono-stack">
