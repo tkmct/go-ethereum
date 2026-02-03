@@ -66,6 +66,7 @@ type UBTSidecar struct {
 	commitInterval     uint64
 
 	triedb  *triedb.Database
+	config  *triedb.Config
 	chainDB ethdb.Database
 }
 
@@ -81,6 +82,7 @@ func NewUBTSidecar(db ethdb.Database, base *triedb.Config) (*UBTSidecar, error) 
 	sc := &UBTSidecar{
 		enabled: true,
 		triedb:  triedb.NewDatabase(db, &cfg),
+		config:  &cfg,
 		chainDB: db,
 	}
 	return sc, nil
@@ -205,6 +207,20 @@ func (sc *UBTSidecar) InitFromDB() error {
 	}
 	if ok {
 		return nil
+	}
+	progress, err := rawdb.ReadUBTConversionProgress(sc.chainDB)
+	if err != nil {
+		log.Warn("UBT sidecar failed to read conversion progress", "err", err)
+	}
+	if progress == nil {
+		if root, has, err := sc.verkleDiskRoot(); err != nil {
+			log.Warn("UBT sidecar failed to read verkle root", "err", err)
+		} else if has {
+			log.Warn("UBT sidecar verkle data present without metadata; clearing", "root", root)
+			if err := sc.resetVerkleTrie(); err != nil {
+				log.Warn("Failed to reset UBT sidecar trie", "err", err)
+			}
+		}
 	}
 
 	genesisHash := rawdb.ReadCanonicalHash(sc.chainDB, 0)
@@ -605,6 +621,53 @@ func (sc *UBTSidecar) ensureRootAvailable(root common.Hash) error {
 		return lastErr
 	}
 	return errors.New("ubt root unavailable")
+}
+
+func (sc *UBTSidecar) verkleDiskRoot() (common.Hash, bool, error) {
+	if sc.chainDB == nil {
+		return common.Hash{}, false, errors.New("ubt sidecar missing chain db")
+	}
+	vdb := rawdb.NewTable(sc.chainDB, string(rawdb.VerklePrefix))
+	iter := vdb.NewIterator(nil, nil)
+	defer iter.Release()
+	if !iter.Next() {
+		if err := iter.Error(); err != nil {
+			return common.Hash{}, false, err
+		}
+		return common.Hash{}, false, nil
+	}
+	blob := rawdb.ReadAccountTrieNode(vdb, nil)
+	if len(blob) == 0 {
+		return common.Hash{}, true, nil
+	}
+	node, err := bintrie.DeserializeNode(blob, 0)
+	if err != nil {
+		return common.Hash{}, true, err
+	}
+	return node.Hash(), true, nil
+}
+
+func (sc *UBTSidecar) resetVerkleTrie() error {
+	if sc.config == nil {
+		return errors.New("ubt sidecar missing triedb config")
+	}
+	vdb := rawdb.NewTable(sc.chainDB, string(rawdb.VerklePrefix))
+	if err := vdb.DeleteRange(nil, nil); err != nil {
+		return err
+	}
+	sc.mu.Lock()
+	if sc.triedb != nil {
+		_ = sc.triedb.Close()
+	}
+	sc.triedb = triedb.NewDatabase(sc.chainDB, sc.config)
+	sc.stale = false
+	sc.ready = false
+	sc.converting = false
+	sc.currentRoot = common.Hash{}
+	sc.currentBlock = 0
+	sc.currentHash = common.Hash{}
+	sc.mu.Unlock()
+	return nil
 }
 
 func (sc *UBTSidecar) applyNoopUpdate(blockNum uint64, blockHash common.Hash) {
