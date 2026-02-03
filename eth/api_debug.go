@@ -764,19 +764,33 @@ func (api *DebugAPI) GetUBTState(ctx context.Context, address common.Address, st
 	}
 	ubtRoot, ok := sc.GetUBTRoot(header.Hash())
 	if !ok {
-		if sc.Converting() && isLatestOrPending(blockNrOrHash) {
-			root, number, hash := sc.CurrentInfo()
-			if hash == (common.Hash{}) {
-				return nil, errors.New("ubt sidecar not ready")
+		if isLatestOrPending(blockNrOrHash) {
+			if sc.Converting() {
+				root, number, hash := sc.CurrentInfo()
+				if hash != (common.Hash{}) {
+					header = api.eth.blockchain.GetHeader(hash, number)
+					if header == nil {
+						return nil, fmt.Errorf("block %x not found", hash)
+					}
+					ubtRoot = root
+					ok = true
+				}
 			}
-			header = api.eth.blockchain.GetHeader(hash, number)
-			if header == nil {
-				return nil, fmt.Errorf("block %x not found", hash)
+			if !ok {
+				if root, number, hash, ok2 := rawdb.ReadUBTCommittedRoot(api.eth.ChainDb()); ok2 {
+					header = api.eth.blockchain.GetHeader(hash, number)
+					if header == nil {
+						return nil, fmt.Errorf("block %x not found", hash)
+					}
+					ubtRoot = root
+					ok = true
+				}
 			}
-			ubtRoot = root
-		} else if sc.Ready() {
-			return nil, fmt.Errorf("ubt root not found for block %x", header.Hash())
-		} else {
+		}
+		if !ok {
+			if sc.Ready() {
+				return nil, fmt.Errorf("ubt root not found for block %x", header.Hash())
+			}
 			return nil, errors.New("ubt sidecar not ready")
 		}
 	}
