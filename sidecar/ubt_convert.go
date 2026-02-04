@@ -96,7 +96,10 @@ func (sc *UBTSidecar) ConvertFromMPT(root common.Hash, blockNum uint64, blockHas
 		if err := rlp.DecodeBytes(it.Value, &data); err != nil {
 			return sc.fail("decode account", err)
 		}
-		addrBytes := rawdb.ReadPreimage(sc.chainDB, common.BytesToHash(it.Key))
+		addrBytes := mptDB.TrieDB().Preimage(common.BytesToHash(it.Key))
+		if len(addrBytes) == 0 {
+			addrBytes = rawdb.ReadPreimage(sc.chainDB, common.BytesToHash(it.Key))
+		}
 		if len(addrBytes) == 0 {
 			return sc.fail("address preimage", fmt.Errorf("missing preimage for %x", it.Key))
 		}
@@ -137,7 +140,10 @@ func (sc *UBTSidecar) ConvertFromMPT(root common.Hash, blockNum uint64, blockHas
 				if err != nil {
 					return sc.fail("decode storage", err)
 				}
-				rawKey := rawdb.ReadPreimage(sc.chainDB, common.BytesToHash(stIt.Key))
+				rawKey := mptDB.TrieDB().Preimage(common.BytesToHash(stIt.Key))
+				if len(rawKey) == 0 {
+					rawKey = rawdb.ReadPreimage(sc.chainDB, common.BytesToHash(stIt.Key))
+				}
 				if len(rawKey) == 0 {
 					return sc.fail("storage preimage", fmt.Errorf("missing storage preimage for %x", stIt.Key))
 				}
