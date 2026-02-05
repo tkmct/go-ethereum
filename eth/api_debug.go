@@ -509,11 +509,18 @@ func (api *DebugAPI) ExecutionWitness(bn rpc.BlockNumber) (*stateless.ExtWitness
 	if parent == nil {
 		return &stateless.ExtWitness{}, fmt.Errorf("block number %v found, but parent missing", bn)
 	}
+	if !api.eth.APIBackend.ChainConfig().IsByzantium(block.Number()) {
+		return nil, fmt.Errorf("execution witness unavailable before Byzantium (block %v)", block.NumberU64())
+	}
 	result, err := bc.ProcessBlock(parent.Root, block, false, true)
 	if err != nil {
 		return nil, err
 	}
-	return result.Witness().ToExtWitness(), nil
+	witness := result.Witness()
+	if witness == nil {
+		return nil, errors.New("no witness generated")
+	}
+	return witness.ToExtWitness(), nil
 }
 
 func (api *DebugAPI) ExecutionWitnessByHash(hash common.Hash) (*stateless.ExtWitness, error) {
@@ -526,11 +533,18 @@ func (api *DebugAPI) ExecutionWitnessByHash(hash common.Hash) (*stateless.ExtWit
 	if parent == nil {
 		return &stateless.ExtWitness{}, fmt.Errorf("block number %x found, but parent missing", hash)
 	}
+	if !api.eth.APIBackend.ChainConfig().IsByzantium(block.Number()) {
+		return nil, fmt.Errorf("execution witness unavailable before Byzantium (block %v)", block.NumberU64())
+	}
 	result, err := bc.ProcessBlock(parent.Root, block, false, true)
 	if err != nil {
 		return nil, err
 	}
-	return result.Witness().ToExtWitness(), nil
+	witness := result.Witness()
+	if witness == nil {
+		return nil, errors.New("no witness generated")
+	}
+	return witness.ToExtWitness(), nil
 }
 
 // ExecutionWitnessVerification is the response type for debug_verifyExecutionWitness.
@@ -846,6 +860,9 @@ func (api *DebugAPI) ExecutionWitnessUBT(ctx context.Context, blockNrOrHash rpc.
 	parent := bc.GetHeader(block.ParentHash(), block.NumberU64()-1)
 	if parent == nil {
 		return nil, fmt.Errorf("block %v found, but parent missing", blockNrOrHash)
+	}
+	if !api.eth.APIBackend.ChainConfig().IsByzantium(block.Number()) {
+		return nil, fmt.Errorf("execution witness unavailable before Byzantium (block %v)", block.NumberU64())
 	}
 	result, err := bc.ProcessBlock(parent.Root, block, false, true)
 	if err != nil {
