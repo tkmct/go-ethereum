@@ -22,10 +22,8 @@ import (
 	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
 )
 
@@ -128,7 +126,7 @@ func (sc *UBTSidecar) SanityCheck(block *types.Block, update *state.StateUpdate,
 			return bytes.Compare(slotHashes[i][:], slotHashes[j][:]) < 0
 		})
 		for _, slotHash := range slotHashes {
-			rawKey, err := ubtSanityResolveStorageKey(rawStorageKey, slotHash, sc.chainDB)
+			rawKey, err := sc.sanityResolveStorageKey(rawStorageKey, slotHash)
 			if err != nil {
 				mismatches++
 				ubtSanityLog(mismatches, "UBT sanity: storage key resolve failed", "block", block.NumberU64(), "hash", block.Hash(), "address", addr, "slot", slotHash, "err", err)
@@ -153,11 +151,11 @@ func (sc *UBTSidecar) SanityCheck(block *types.Block, update *state.StateUpdate,
 	}
 }
 
-func ubtSanityResolveStorageKey(rawStorageKey bool, slotHash common.Hash, db ethdb.KeyValueReader) (common.Hash, error) {
+func (sc *UBTSidecar) sanityResolveStorageKey(rawStorageKey bool, slotHash common.Hash) (common.Hash, error) {
 	if rawStorageKey {
 		return slotHash, nil
 	}
-	preimage := rawdb.ReadPreimage(db, slotHash)
+	preimage := sc.preimage(slotHash)
 	if len(preimage) == 0 {
 		return common.Hash{}, fmt.Errorf("missing storage preimage for %x", slotHash)
 	}

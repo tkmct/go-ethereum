@@ -65,9 +65,10 @@ type UBTSidecar struct {
 	lastCommittedBlock uint64
 	commitInterval     uint64
 
-	triedb  *triedb.Database
-	config  *triedb.Config
-	chainDB ethdb.Database
+	triedb    *triedb.Database
+	config    *triedb.Config
+	chainDB   ethdb.Database
+	mptTrieDB *triedb.Database
 }
 
 // NewUBTSidecar initializes the sidecar with a dedicated verkle namespace.
@@ -157,6 +158,25 @@ func (sc *UBTSidecar) Close() error {
 		return nil
 	}
 	return sc.triedb.Close()
+}
+
+// SetMPTTrieDB configures the MPT trie database used to resolve preimages.
+func (sc *UBTSidecar) SetMPTTrieDB(db *triedb.Database) {
+	sc.mu.Lock()
+	sc.mptTrieDB = db
+	sc.mu.Unlock()
+}
+
+func (sc *UBTSidecar) preimage(hash common.Hash) []byte {
+	sc.mu.RLock()
+	tdb := sc.mptTrieDB
+	sc.mu.RUnlock()
+	if tdb != nil {
+		if preimage := tdb.Preimage(hash); len(preimage) > 0 {
+			return preimage
+		}
+	}
+	return rawdb.ReadPreimage(sc.chainDB, hash)
 }
 
 // InitFromDB initializes sidecar state from database metadata.
@@ -481,7 +501,7 @@ func (sc *UBTSidecar) applyUBTUpdate(update *UBTUpdate) error {
 				return bytes.Compare(slotHashes[i][:], slotHashes[j][:]) < 0
 			})
 			for _, slotHash := range slotHashes {
-				rawKey, err := resolveStorageKey(update.RawStorageKey, rawKeyMap, slotHash, sc.chainDB)
+				rawKey, err := sc.resolveStorageKey(update.RawStorageKey, rawKeyMap, slotHash)
 				if err != nil {
 					return err
 				}
@@ -542,7 +562,7 @@ func (sc *UBTSidecar) applyUBTUpdate(update *UBTUpdate) error {
 			})
 			for _, slotHash := range slotHashes {
 				encVal := slots[slotHash]
-				rawKey, err := resolveStorageKey(update.RawStorageKey, rawKeyMap, slotHash, sc.chainDB)
+				rawKey, err := sc.resolveStorageKey(update.RawStorageKey, rawKeyMap, slotHash)
 				if err != nil {
 					return err
 				}
@@ -737,14 +757,14 @@ func decodeStorageValue(enc []byte) ([]byte, error) {
 	return val, nil
 }
 
-func resolveStorageKey(rawStorageKey bool, rawKeyMap map[common.Hash]common.Hash, slotHash common.Hash, db ethdb.Database) (common.Hash, error) {
+func (sc *UBTSidecar) resolveStorageKey(rawStorageKey bool, rawKeyMap map[common.Hash]common.Hash, slotHash common.Hash) (common.Hash, error) {
 	if rawStorageKey {
 		if rawKey, ok := rawKeyMap[slotHash]; ok {
 			return rawKey, nil
 		}
 		return common.Hash{}, fmt.Errorf("missing raw storage key for %x", slotHash)
 	}
-	preimage := rawdb.ReadPreimage(db, slotHash)
+	preimage := sc.preimage(slotHash)
 	if len(preimage) == 0 {
 		return common.Hash{}, fmt.Errorf("missing storage preimage for %x", slotHash)
 	}

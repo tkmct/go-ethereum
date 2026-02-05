@@ -428,6 +428,7 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 		if err != nil {
 			return nil, err
 		}
+		sc.SetMPTTrieDB(bc.triedb)
 		sc.SetCommitInterval(cfg.UBTSidecarCommitInterval)
 		bc.ubtSidecar = sc
 	}
@@ -605,6 +606,9 @@ func (bc *BlockChain) maybeStartUBTAutoConvert(reason string) {
 	go func(root common.Hash, number uint64, hash common.Hash) {
 		if err := bc.ubtSidecar.ConvertFromMPT(root, number, hash, bc.statedb); err != nil {
 			log.Error("UBT sidecar conversion failed", "err", err)
+			if errors.Is(err, sidecar.ErrUBTConversionStale) {
+				bc.maybeStartUBTAutoConvert("conversion stale")
+			}
 		}
 	}(head.Root, head.Number.Uint64(), head.Hash())
 }

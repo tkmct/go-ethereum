@@ -33,9 +33,17 @@ import (
 	"github.com/ethereum/go-ethereum/trie/bintrie"
 	"github.com/ethereum/go-ethereum/trie/trienode"
 	"github.com/ethereum/go-ethereum/triedb"
+	"github.com/ethereum/go-ethereum/triedb/pathdb"
 )
 
 const ubtConversionLogInterval = 200_000
+
+func wrapConversionErr(err error) error {
+	if errors.Is(err, pathdb.ErrSnapshotStale) {
+		return fmt.Errorf("%w: %v", ErrUBTConversionStale, err)
+	}
+	return err
+}
 
 // BeginConversion transitions the sidecar into converting mode.
 func (sc *UBTSidecar) BeginConversion(root common.Hash, blockNum uint64, blockHash common.Hash) bool {
@@ -78,7 +86,7 @@ func (sc *UBTSidecar) ConvertFromMPT(root common.Hash, blockNum uint64, blockHas
 	log.Info("Starting UBT sidecar conversion", "block", blockNum, "hash", blockHash)
 	tr, err := mptDB.OpenTrie(root)
 	if err != nil {
-		return sc.fail("open state trie", err)
+		return sc.fail("open state trie", wrapConversionErr(err))
 	}
 	bt, err := bintrie.NewBinaryTrie(types.EmptyBinaryHash, sc.triedb)
 	if err != nil {
@@ -86,7 +94,7 @@ func (sc *UBTSidecar) ConvertFromMPT(root common.Hash, blockNum uint64, blockHas
 	}
 	nodeIt, err := tr.NodeIterator(nil)
 	if err != nil {
-		return sc.fail("iterate account trie", err)
+		return sc.fail("iterate account trie", wrapConversionErr(err))
 	}
 	it := trie.NewIterator(nodeIt)
 
@@ -128,11 +136,11 @@ func (sc *UBTSidecar) ConvertFromMPT(root common.Hash, blockNum uint64, blockHas
 		if data.Root != types.EmptyRootHash {
 			storageTr, err := mptDB.OpenStorageTrie(root, addr, data.Root, tr)
 			if err != nil {
-				return sc.fail("open storage trie", err)
+				return sc.fail("open storage trie", wrapConversionErr(err))
 			}
 			storageIt, err := storageTr.NodeIterator(nil)
 			if err != nil {
-				return sc.fail("iterate storage trie", err)
+				return sc.fail("iterate storage trie", wrapConversionErr(err))
 			}
 			stIt := trie.NewIterator(storageIt)
 			for stIt.Next() {
@@ -158,7 +166,7 @@ func (sc *UBTSidecar) ConvertFromMPT(root common.Hash, blockNum uint64, blockHas
 				}
 			}
 			if stIt.Err != nil {
-				return sc.fail("iterate storage trie", stIt.Err)
+				return sc.fail("iterate storage trie", wrapConversionErr(stIt.Err))
 			}
 		}
 		accounts++
@@ -167,7 +175,7 @@ func (sc *UBTSidecar) ConvertFromMPT(root common.Hash, blockNum uint64, blockHas
 		}
 	}
 	if it.Err != nil {
-		return sc.fail("iterate account trie", it.Err)
+		return sc.fail("iterate account trie", wrapConversionErr(it.Err))
 	}
 
 	newRoot, nodeset := bt.Commit(false)

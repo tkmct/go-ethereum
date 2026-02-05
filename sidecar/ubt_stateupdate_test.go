@@ -26,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/ethereum/go-ethereum/triedb/pathdb"
@@ -232,6 +233,51 @@ func TestApplyStateUpdateAccountDeletion(t *testing.T) {
 	}
 }
 
+func TestApplyStateUpdateUsesTrieDBPreimages(t *testing.T) {
+	chainDB := rawdb.NewMemoryDatabase()
+	cfg := *triedb.HashDefaults
+	cfg.Preimages = true
+	mptTrieDB := triedb.NewDatabase(chainDB, &cfg)
+
+	sc := newTestSidecarWithDB(t, chainDB)
+	sc.SetMPTTrieDB(mptTrieDB)
+	seedSidecar(t, sc)
+
+	stateDB := state.NewDatabase(mptTrieDB, nil)
+	addr := common.HexToAddress("0x00000000000000000000000000000000000000ee")
+	sentinel := common.HexToAddress("0x00000000000000000000000000000000000000ef")
+	slot := common.HexToHash("0x01")
+	val := common.HexToHash("0x9999")
+
+	update, _ := commitStateUpdate(t, stateDB, types.EmptyRootHash, 1, false, func(sdb *state.StateDB) {
+		sdb.SetBalance(addr, uint256.NewInt(1), tracing.BalanceChangeUnspecified)
+		sdb.SetState(addr, slot, val)
+		sdb.SetBalance(sentinel, uint256.NewInt(1), tracing.BalanceChangeUnspecified)
+	})
+
+	slotHash := crypto.Keccak256Hash(slot.Bytes())
+	if preimage := rawdb.ReadPreimage(chainDB, slotHash); preimage != nil {
+		t.Fatalf("expected no preimage on disk, got %x", preimage)
+	}
+
+	block := newTestBlock(1, common.Hash{})
+	if err := sc.ApplyStateUpdate(block, update, chainDB); err != nil {
+		t.Fatalf("apply update failed: %v", err)
+	}
+
+	ubtRoot, ok := sc.GetUBTRoot(block.Hash())
+	if !ok {
+		t.Fatalf("missing UBT root for block 1")
+	}
+	got, err := sc.ReadStorage(ubtRoot, addr, slot)
+	if err != nil {
+		t.Fatalf("read storage failed: %v", err)
+	}
+	if got != val {
+		t.Fatalf("unexpected storage value: %x", got)
+	}
+}
+
 func newTestSidecarWithDB(t *testing.T, db ethdb.Database) *UBTSidecar {
 	t.Helper()
 	cfg := &triedb.Config{
@@ -273,7 +319,7 @@ func seedSidecar(t *testing.T, sc *UBTSidecar) common.Hash {
 }
 
 func newTestStateDB() *state.CachingDB {
-	tdb := triedb.NewDatabase(rawdb.NewMemoryDatabase(), nil)
+	tdb := triedb.NewDatabase(rawdb.NewMemoryDatabase(), triedb.HashDefaults)
 	return state.NewDatabase(tdb, nil)
 }
 

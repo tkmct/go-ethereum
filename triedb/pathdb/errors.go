@@ -32,6 +32,11 @@ var (
 	// to not maintain the layer's original state.
 	errSnapshotStale = errors.New("layer stale")
 
+	// ErrSnapshotStale is returned from data accessors if the underlying layer
+	// had been invalidated due to the chain progressing forward far enough
+	// to not maintain the layer's original state.
+	ErrSnapshotStale = errSnapshotStale
+
 	// errUnexpectedHistory is returned if an unmatched state history is applied
 	// to the database for state rollback.
 	errUnexpectedHistory = errors.New("unexpected state history")
