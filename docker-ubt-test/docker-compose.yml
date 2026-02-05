@@ -81,14 +81,16 @@ services:
     ports:
       - "5052:5052"   # HTTP API
       - "5054:5054"   # Metrics
-      - "9000:9000"   # P2P TCP
-      - "9000:9000/udp" # P2P UDP
+      - "19000:19000"   # P2P TCP
+      - "19000:19000/udp" # P2P UDP
     command: >
       lighthouse bn
       --network hoodi
       --execution-endpoint http://geth:8551
       --execution-jwt /config/jwt.hex
       --checkpoint-sync-url https://checkpoint-sync.hoodi.ethpandaops.io
+      --port 19000
+      --discovery-port 19000
       --http
       --http-address 0.0.0.0
       --http-port 5052

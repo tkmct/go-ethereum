@@ -25,7 +25,7 @@ canonical MPT state starting from genesis.
      |  ubt-test        |  |                  |
      |                  |  | --ubt.sidecar    |
      |  :5052 HTTP API  |  |                  |
-     |  :9000 P2P       |  |                  |
+     |  :19000 P2P      |  |                  |
      +--------+---------+  |                  |
               |             |  :8545 RPC       |
               +--Engine API-+  :8551 Engine    |
@@ -169,7 +169,7 @@ docker-ubt-test/
 | 30303 | Geth | P2P |
 | 5052 | Lighthouse | HTTP API |
 | 5054 | Lighthouse | Metrics |
-| 9000 | Lighthouse | P2P |
+| 19000 | Lighthouse | P2P |
 | 8552 | geth-seed | Engine API (seed) |
 | 6061 | geth-ubt | Metrics (UBT) |
 | 6062 | geth-seed | Metrics (seed) |
@@ -177,7 +177,7 @@ docker-ubt-test/
 | 5053 | lighthouse-bn-seed | HTTP API (seed) |
 | 30303 | geth-ubt | P2P (UBT) |
 | 30305 | geth-seed | P2P (seed) |
-| 9000 | lighthouse-bn-ubt | P2P (UBT) |
+| 19000 | lighthouse-bn-ubt | P2P (UBT) |
 | 9001 | lighthouse-bn-seed | P2P (seed) |
 
 ## Tools
