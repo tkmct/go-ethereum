@@ -21,6 +21,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -29,7 +31,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/trie/bintrie"
 	"github.com/ethereum/go-ethereum/trie/trienode"
 	"github.com/ethereum/go-ethereum/triedb"
@@ -38,11 +39,60 @@ import (
 
 const ubtConversionLogInterval = 200_000
 
-func wrapConversionErr(err error) error {
-	if errors.Is(err, pathdb.ErrSnapshotStale) {
-		return fmt.Errorf("%w: %v", ErrUBTConversionStale, err)
+// Maximum number of consecutive iterator-open failures before giving up.
+const maxIteratorRetries = 20
+
+const (
+	retryableErrNotConstructed = "snapshot is not constructed"
+	retryableErrWaitingForSync = "waiting for sync"
+	retryableUnknownLayerPrefix = "unknown layer: "
+)
+
+// isRetryableIterError returns true for transient iterator errors that
+// should be retried with a fresh root rather than aborting conversion.
+func isRetryableIterError(err error) bool {
+	if err == nil {
+		return false
 	}
-	return err
+	if errors.Is(err, pathdb.ErrSnapshotStale) {
+		return true
+	}
+	msg := err.Error()
+	return msg == retryableErrNotConstructed ||
+		msg == retryableErrWaitingForSync ||
+		// "unknown layer: ..." happens when a diff layer is evicted
+		// between reading the head root and opening the iterator.
+		strings.HasPrefix(msg, retryableUnknownLayerPrefix)
+}
+
+// readHeadStateRef reads the current head block's state reference from the
+// chain database. This is used during conversion retries to obtain a fresh
+// root that is likely still present in the pathdb layer tree.
+func (sc *UBTSidecar) readHeadStateRef() (root common.Hash, num uint64, hash common.Hash, ok bool) {
+	headHash := rawdb.ReadHeadBlockHash(sc.chainDB)
+	if headHash == (common.Hash{}) {
+		return
+	}
+	number, found := rawdb.ReadHeaderNumber(sc.chainDB, headHash)
+	if !found {
+		return
+	}
+	header := rawdb.ReadHeader(sc.chainDB, headHash, number)
+	if header == nil {
+		return
+	}
+	return header.Root, number, headHash, true
+}
+
+// retryBackoff sleeps for a duration that increases with the retry count,
+// adding jitter to avoid thundering-herd effects.
+func retryBackoff(attempt int) {
+	base := time.Duration(attempt) * 2 * time.Second
+	if base > 30*time.Second {
+		base = 30 * time.Second
+	}
+	jitter := time.Duration(rand.Int63n(int64(time.Second)))
+	time.Sleep(base + jitter)
 }
 
 // BeginConversion transitions the sidecar into converting mode.
@@ -72,7 +122,16 @@ func (sc *UBTSidecar) BeginConversion(root common.Hash, blockNum uint64, blockHa
 	return true
 }
 
-// ConvertFromMPT rebuilds the UBT sidecar from the MPT state root.
+// ConvertFromMPT rebuilds the UBT sidecar by iterating the MPT state
+// snapshot. It uses pathdb's flat snapshot iterators (AccountIterator /
+// StorageIterator) which are resilient to diff-layer eviction: most data
+// comes from the persistent disk iterator which never goes stale. When
+// the in-memory buffer portion does go stale the iterator is restarted
+// from the last successfully processed account with a fresh head root.
+//
+// Correctness: the update queue captures every block from conversion start
+// with absolute account/storage values. Any account read at a stale root
+// is corrected during queue replay.
 func (sc *UBTSidecar) ConvertFromMPT(root common.Hash, blockNum uint64, blockHash common.Hash, mptDB state.Database) error {
 	if mptDB == nil {
 		return sc.fail("convert init", errors.New("missing state database"))
@@ -83,108 +142,183 @@ func (sc *UBTSidecar) ConvertFromMPT(root common.Hash, blockNum uint64, blockHas
 		}
 	}
 
-	log.Info("Starting UBT sidecar conversion", "block", blockNum, "hash", blockHash)
-	tr, err := mptDB.OpenTrie(root)
-	if err != nil {
-		return sc.fail("open state trie", wrapConversionErr(err))
-	}
+	tdb := mptDB.TrieDB()
+	log.Info("Starting UBT sidecar conversion (snapshot)", "block", blockNum, "hash", blockHash)
+
 	bt, err := bintrie.NewBinaryTrie(types.EmptyBinaryHash, sc.triedb)
 	if err != nil {
 		return sc.fail("open ubt trie", err)
 	}
-	nodeIt, err := tr.NodeIterator(nil)
-	if err != nil {
-		return sc.fail("iterate account trie", wrapConversionErr(err))
-	}
-	it := trie.NewIterator(nodeIt)
 
-	var accounts uint64
-	for it.Next() {
-		var data types.StateAccount
-		if err := rlp.DecodeBytes(it.Value, &data); err != nil {
-			return sc.fail("decode account", err)
-		}
-		addrBytes := mptDB.TrieDB().Preimage(common.BytesToHash(it.Key))
-		if len(addrBytes) == 0 {
-			addrBytes = rawdb.ReadPreimage(sc.chainDB, common.BytesToHash(it.Key))
-		}
-		if len(addrBytes) == 0 {
-			return sc.fail("address preimage", fmt.Errorf("missing preimage for %x", it.Key))
-		}
-		if len(addrBytes) != common.AddressLength {
-			return sc.fail("address preimage", fmt.Errorf("invalid address preimage length %d", len(addrBytes)))
-		}
-		addr := common.BytesToAddress(addrBytes)
-		codeHash := codeHashFromBytes(data.CodeHash)
-		codeLen := 0
-		if codeHash != types.EmptyCodeHash {
-			code := rawdb.ReadCode(sc.chainDB, codeHash)
-			if len(code) == 0 {
-				return sc.fail("account code", fmt.Errorf("missing code for %x", codeHash))
+	var (
+		lastSeek       common.Hash // resume point (zero = start)
+		done           bool        // true when all accounts have been processed
+		accounts       uint64
+		currentRoot    = root
+		openRetries    int
+	)
+
+	for !done {
+		accIt, err := tdb.AccountIterator(currentRoot, lastSeek)
+		if err != nil {
+			if !isRetryableIterError(err) || openRetries >= maxIteratorRetries {
+				return sc.fail("open account iterator", err)
 			}
-			codeLen = len(code)
-		}
-		if err := bt.UpdateAccount(addr, &data, codeLen); err != nil {
-			return sc.fail("update account", err)
-		}
-		if codeLen > 0 {
-			code := rawdb.ReadCode(sc.chainDB, codeHash)
-			if err := bt.UpdateContractCode(addr, codeHash, code); err != nil {
-				return sc.fail("update code", err)
+			openRetries++
+			log.Warn("UBT conversion: account iterator open failed, retrying",
+				"err", err, "attempt", openRetries, "accounts", accounts)
+			retryBackoff(openRetries)
+
+			newRoot, _, _, ok := sc.readHeadStateRef()
+			if !ok {
+				return sc.fail("open account iterator", fmt.Errorf("cannot read head state: %w", err))
 			}
+			currentRoot = newRoot
+			continue
 		}
-		if data.Root != types.EmptyRootHash {
-			storageTr, err := mptDB.OpenStorageTrie(root, addr, data.Root, tr)
+		openRetries = 0 // reset on successful open
+
+		stale := false
+		for accIt.Next() {
+			accountHash := accIt.Hash()
+			slimData := common.CopyBytes(accIt.Account())
+
+			// Check for stale error from Account() returning nil.
+			if slimData == nil {
+				if itErr := accIt.Error(); itErr != nil {
+					if isRetryableIterError(itErr) {
+						stale = true
+					} else {
+						accIt.Release()
+						return sc.fail("iterate account iterator", itErr)
+					}
+					break
+				}
+				continue // nil account = deleted entry, skip
+			}
+
+			data, err := types.FullAccount(slimData)
 			if err != nil {
-				return sc.fail("open storage trie", wrapConversionErr(err))
+				accIt.Release()
+				return sc.fail("decode account", err)
 			}
-			storageIt, err := storageTr.NodeIterator(nil)
-			if err != nil {
-				return sc.fail("iterate storage trie", wrapConversionErr(err))
+
+			// Resolve address preimage.
+			addrBytes := tdb.Preimage(accountHash)
+			if len(addrBytes) == 0 {
+				addrBytes = rawdb.ReadPreimage(sc.chainDB, accountHash)
 			}
-			stIt := trie.NewIterator(storageIt)
-			for stIt.Next() {
-				_, content, _, err := rlp.Split(stIt.Value)
+			if len(addrBytes) == 0 {
+				accIt.Release()
+				return sc.fail("address preimage", fmt.Errorf("missing preimage for %x", accountHash))
+			}
+			if len(addrBytes) != common.AddressLength {
+				accIt.Release()
+				return sc.fail("address preimage", fmt.Errorf("invalid address preimage length %d for %x", len(addrBytes), accountHash))
+			}
+
+			addr := common.BytesToAddress(addrBytes)
+			codeHash := codeHashFromBytes(data.CodeHash)
+			codeLen := 0
+			if codeHash != types.EmptyCodeHash {
+				code := rawdb.ReadCode(sc.chainDB, codeHash)
+				if len(code) == 0 {
+					accIt.Release()
+					return sc.fail("account code", fmt.Errorf("missing code for %x", codeHash))
+				}
+				codeLen = len(code)
+			}
+			if err := bt.UpdateAccount(addr, data, codeLen); err != nil {
+				accIt.Release()
+				return sc.fail("update account", err)
+			}
+			if codeLen > 0 {
+				code := rawdb.ReadCode(sc.chainDB, codeHash)
+				if err := bt.UpdateContractCode(addr, codeHash, code); err != nil {
+					accIt.Release()
+					return sc.fail("update code", err)
+				}
+			}
+
+			// Iterate storage for this account.
+			if data.Root != types.EmptyRootHash {
+				storageStale, err := sc.convertAccountStorage(tdb, bt, currentRoot, accountHash, addr)
 				if err != nil {
-					return sc.fail("decode storage", err)
+					accIt.Release()
+					return err
 				}
-				rawKey := mptDB.TrieDB().Preimage(common.BytesToHash(stIt.Key))
-				if len(rawKey) == 0 {
-					rawKey = rawdb.ReadPreimage(sc.chainDB, common.BytesToHash(stIt.Key))
-				}
-				if len(rawKey) == 0 {
-					return sc.fail("storage preimage", fmt.Errorf("missing storage preimage for %x", stIt.Key))
-				}
-				if len(rawKey) != common.HashLength {
-					return sc.fail("storage preimage", fmt.Errorf("invalid storage preimage length %d", len(rawKey)))
-				}
-				if len(content) == 0 {
-					continue
-				}
-				if err := bt.UpdateStorage(addr, rawKey, content); err != nil {
-					return sc.fail("update storage", err)
+				if storageStale {
+					// Storage went stale mid-account. We break out of the
+					// account loop WITHOUT advancing lastSeek so this
+					// account will be re-processed from scratch on retry
+					// (UpdateAccount is idempotent, storage re-insertion
+					// overwrites prior values).
+					stale = true
+					break
 				}
 			}
-			if stIt.Err != nil {
-				return sc.fail("iterate storage trie", wrapConversionErr(stIt.Err))
+
+			// Account fully processed; advance seek past it.
+			lastSeek = accountHash
+			accounts++
+			if accounts%ubtConversionLogInterval == 0 {
+				log.Info("UBT conversion progress", "accounts", accounts, "lastHash", accountHash)
 			}
 		}
-		accounts++
-		if accounts%ubtConversionLogInterval == 0 {
-			log.Info("UBT conversion progress", "accounts", accounts, "block", blockNum)
+
+		// Check iterator error (may be set even when Next() returned false).
+		if !stale {
+			if itErr := accIt.Error(); itErr != nil {
+				if isRetryableIterError(itErr) {
+					stale = true
+				} else {
+					accIt.Release()
+					return sc.fail("iterate account iterator", itErr)
+				}
+			}
 		}
-	}
-	if it.Err != nil {
-		return sc.fail("iterate account trie", wrapConversionErr(it.Err))
+		accIt.Release()
+
+		if !stale {
+			done = true
+			break
+		}
+
+		// Stale — get fresh root and resume.
+		newRoot, newNum, _, ok := sc.readHeadStateRef()
+		if !ok {
+			return sc.fail("resume conversion", errors.New("cannot read head state after stale"))
+		}
+		log.Info("UBT conversion resuming after stale",
+			"accounts", accounts, "prevRoot", currentRoot, "newRoot", newRoot, "newBlock", newNum)
+		currentRoot = newRoot
+		// Advance lastSeek past the last fully-processed account.
+		// If lastSeek is zero (no accounts processed yet), keep it zero.
+		if lastSeek != (common.Hash{}) {
+			next := incrementHash(lastSeek)
+			if next == (common.Hash{}) {
+				// Wrapped around 0xff..ff → 0x00..00, meaning all accounts done.
+				done = true
+				break
+			}
+			lastSeek = next
+		}
 	}
 
+	// Commit the UBT trie. At this point the UBT represents a mixed-root
+	// state that does not correspond to any single block. We deliberately
+	// do NOT write block↔root mappings here; those are deferred until the
+	// queue replay brings the UBT to a canonical block.
 	newRoot, nodeset := bt.Commit(false)
 	merged := trienode.NewWithNodeSet(nodeset)
 	if err := sc.triedb.Update(newRoot, types.EmptyBinaryHash, blockNum, merged, triedb.NewStateSet()); err != nil {
 		return sc.fail("update ubt trie", err)
 	}
+
+	// Write current root with conversion-start metadata. This is an
+	// intermediate bookmark — not a valid block↔root mapping. The
+	// correct mappings are written by the queue replay below.
 	rawdb.WriteUBTCurrentRoot(sc.chainDB, newRoot, blockNum, blockHash)
-	rawdb.WriteUBTBlockRoot(sc.chainDB, blockHash, newRoot)
 	sc.mu.Lock()
 	sc.currentRoot = newRoot
 	sc.currentBlock = blockNum
@@ -202,14 +336,95 @@ func (sc *UBTSidecar) ConvertFromMPT(root common.Hash, blockNum uint64, blockHas
 	if err := sc.replayUpdateQueue(); err != nil {
 		return sc.fail("replay updates", err)
 	}
+	// If conversion completed with an empty replay queue, there may be no mapping
+	// for the conversion-start block yet. Populate it now for debug/proof APIs.
+	currentRoot, currentBlock, currentHash := sc.CurrentInfo()
+	if _, ok := rawdb.ReadUBTBlockRoot(sc.chainDB, blockHash); !ok {
+		rawdb.WriteUBTBlockRoot(sc.chainDB, blockHash, currentRoot)
+	}
 	rawdb.DeleteUBTConversionProgress(sc.chainDB)
 	sc.mu.Lock()
 	sc.converting = false
 	sc.ready = true
 	sc.stale = false
 	sc.mu.Unlock()
-	log.Info("UBT sidecar conversion completed", "block", blockNum, "hash", blockHash)
+	log.Info("UBT sidecar conversion completed", "accounts", accounts, "block", currentBlock, "hash", currentHash)
 	return nil
+}
+
+// convertAccountStorage iterates storage for a single account using the
+// pathdb StorageIterator. Returns (storageStale, error). If storageStale
+// is true, the caller should restart this account from scratch with a
+// fresh root.
+func (sc *UBTSidecar) convertAccountStorage(
+	tdb *triedb.Database,
+	bt *bintrie.BinaryTrie,
+	root common.Hash,
+	accountHash common.Hash,
+	addr common.Address,
+) (storageStale bool, err error) {
+	stIt, err := tdb.StorageIterator(root, accountHash, common.Hash{})
+	if err != nil {
+		if isRetryableIterError(err) {
+			return true, nil // signal storage-stale to caller
+		}
+		return false, sc.fail("open storage iterator", err)
+	}
+	defer stIt.Release()
+
+	for stIt.Next() {
+		slotHash := stIt.Hash()
+		slotValue := common.CopyBytes(stIt.Slot())
+
+		if slotValue == nil {
+			if itErr := stIt.Error(); itErr != nil {
+				if isRetryableIterError(itErr) {
+					return true, nil // stale mid-storage
+				}
+				return false, sc.fail("iterate storage iterator", itErr)
+			}
+			continue // deleted slot
+		}
+		if len(slotValue) == 0 {
+			continue
+		}
+
+		// Resolve storage key preimage.
+		rawKey := tdb.Preimage(slotHash)
+		if len(rawKey) == 0 {
+			rawKey = rawdb.ReadPreimage(sc.chainDB, slotHash)
+		}
+		if len(rawKey) == 0 {
+			return false, sc.fail("storage preimage", fmt.Errorf("missing storage preimage for %x", slotHash))
+		}
+		if len(rawKey) != common.HashLength {
+			return false, sc.fail("storage preimage", fmt.Errorf("invalid storage preimage length %d for %x", len(rawKey), slotHash))
+		}
+		if err := bt.UpdateStorage(addr, rawKey, slotValue); err != nil {
+			return false, sc.fail("update storage", err)
+		}
+	}
+	if itErr := stIt.Error(); itErr != nil {
+		if isRetryableIterError(itErr) {
+			return true, nil // stale after loop
+		}
+		return false, sc.fail("iterate storage iterator", itErr)
+	}
+	return false, nil
+}
+
+// incrementHash returns h+1 treating h as a 256-bit big-endian integer.
+// Returns the zero hash on overflow (0xff..ff + 1 wraps to 0x00..00).
+func incrementHash(h common.Hash) common.Hash {
+	var result common.Hash
+	copy(result[:], h[:])
+	for i := common.HashLength - 1; i >= 0; i-- {
+		result[i]++
+		if result[i] != 0 {
+			return result
+		}
+	}
+	return common.Hash{} // overflow
 }
 
 // EnqueueUpdate appends a UBT update to the conversion queue.
@@ -328,6 +543,21 @@ func (sc *UBTSidecar) replayQueueUpTo(end uint64) error {
 		return err
 	}
 	return nil
+}
+
+// drainLeftoverQueue replays any queue items left over from conversion.
+// This handles the race where blocks are enqueued between the final
+// replayUpdateQueue call and the converting→ready state transition.
+func (sc *UBTSidecar) drainLeftoverQueue() error {
+	meta, err := rawdb.ReadUBTUpdateQueueMeta(sc.chainDB)
+	if err != nil {
+		return err
+	}
+	if meta == nil {
+		return nil
+	}
+	log.Info("Draining leftover UBT conversion queue", "start", meta.Start, "end", meta.End)
+	return sc.replayUpdateQueue()
 }
 
 func (sc *UBTSidecar) clearUpdateQueue() error {

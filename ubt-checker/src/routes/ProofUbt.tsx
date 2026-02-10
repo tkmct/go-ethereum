@@ -14,6 +14,7 @@ import { verifyUbtAccountProof, verifyUbtStorageProofs, UbtProof } from '../lib/
 const defaultEndpoints: EndpointValues = {
   mptUrl: 'http://localhost:8545',
   ubtUrl: 'http://localhost:9545',
+  apiKey: '',
 };
 
 const defaultBlock: BlockSelection = {
@@ -169,13 +170,16 @@ export default function ProofUbt() {
       setStorageResult(null);
       setRootResult(null);
 
-      const client = createRpcClient({ name: 'UBT', url: endpoints.ubtUrl });
+      const client = createRpcClient({ name: 'UBT', url: endpoints.ubtUrl, apiKey: endpoints.apiKey });
       const keys = storageKeys.map(normalizeHex).filter((k) => k !== '0x');
       const blockRef = selectionToBlockRef(blockSelection);
       const blockParam = blockRefToParam(blockRef);
 
       const result = await client.call<UbtProof>('debug_getUBTProof', [address, keys, blockParam]);
-      const rootLookup = await client.call<UbtRootLookup>('debug_getUBTRoot', [blockParam]);
+      // Pin root lookup to the exact block the proof was generated for,
+      // otherwise "latest" may resolve to a different block between calls.
+      const rootBlockRef = result.blockHash ? { blockHash: result.blockHash } : blockParam;
+      const rootLookup = await client.call<UbtRootLookup>('debug_getUBTRoot', [rootBlockRef]);
       const stemIndex = result.accountProof.findIndex((hex) => {
         const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
         return clean.length === 62; // 31 bytes

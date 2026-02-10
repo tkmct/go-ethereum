@@ -354,7 +354,9 @@ type BlockChain struct {
 	logger     *tracing.Hooks
 	stateSizer *state.SizeTracker // State size tracking
 
-	ubtSidecar *sidecar.UBTSidecar
+	ubtSidecar             *sidecar.UBTSidecar
+	ubtAutoConvertMu       sync.Mutex
+	lastUBTConvertAttempt  time.Time // Cooldown for auto-convert retries
 
 	lastForkReadyAlert time.Time     // Last time there was a fork readiness print out
 	slowBlockThreshold time.Duration // Block execution time threshold beyond which detailed statistics will be logged
@@ -460,6 +462,18 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 	if bc.ubtSidecar != nil {
 		if err := bc.ubtSidecar.InitFromDB(); err != nil {
 			return nil, err
+		}
+		// If the sidecar is ready but far behind the chain head, trigger a
+		// fresh conversion rather than waiting for the first ApplyStateUpdate
+		// to fail on a 50k+ block gap.
+		if bc.ubtSidecar.Ready() {
+			head := bc.CurrentBlock()
+			_, sidecarBlock, _ := bc.ubtSidecar.CurrentInfo()
+			if head != nil && head.Number.Uint64() > sidecarBlock+128 {
+				log.Warn("UBT sidecar too far behind head, triggering reconversion",
+					"sidecar", sidecarBlock, "head", head.Number)
+				bc.ubtSidecar.MarkStale()
+			}
 		}
 		bc.maybeStartUBTAutoConvert("startup")
 	}
@@ -587,11 +601,23 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 	return bc, nil
 }
 
+const (
+	ubtAutoConvertCooldown = 5 * time.Minute
+)
+
 func (bc *BlockChain) maybeStartUBTAutoConvert(reason string) {
 	if bc.ubtSidecar == nil || !bc.cfg.UBTSidecarAutoConvert {
 		return
 	}
 	if bc.ubtSidecar.Ready() || bc.ubtSidecar.Converting() {
+		return
+	}
+	bc.ubtAutoConvertMu.Lock()
+	defer bc.ubtAutoConvertMu.Unlock()
+	if bc.ubtSidecar.Ready() || bc.ubtSidecar.Converting() {
+		return
+	}
+	if time.Since(bc.lastUBTConvertAttempt) < ubtAutoConvertCooldown {
 		return
 	}
 	head := bc.CurrentBlock()
@@ -602,13 +628,12 @@ func (bc *BlockChain) maybeStartUBTAutoConvert(reason string) {
 	if !bc.ubtSidecar.BeginConversion(head.Root, head.Number.Uint64(), head.Hash()) {
 		return
 	}
+	bc.lastUBTConvertAttempt = time.Now()
 	log.Info("Starting UBT sidecar conversion", "reason", reason, "block", head.Number, "hash", head.Hash())
 	go func(root common.Hash, number uint64, hash common.Hash) {
 		if err := bc.ubtSidecar.ConvertFromMPT(root, number, hash, bc.statedb); err != nil {
 			log.Error("UBT sidecar conversion failed", "err", err)
-			if errors.Is(err, sidecar.ErrUBTConversionStale) {
-				bc.maybeStartUBTAutoConvert("conversion stale")
-			}
+			bc.maybeStartUBTAutoConvert("conversion failed")
 		}
 	}(head.Root, head.Number.Uint64(), head.Hash())
 }
@@ -1756,6 +1781,8 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 				if err := bc.ubtSidecar.EnqueueUpdate(block, update); err != nil {
 					log.Error("Failed to enqueue UBT sidecar update", "block", block.NumberU64(), "hash", block.Hash(), "err", err)
 				}
+			} else {
+				bc.maybeStartUBTAutoConvert("sidecar stale")
 			}
 		}
 	} else {

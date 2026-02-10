@@ -3,6 +3,7 @@ import React from 'react';
 export type EndpointValues = {
   mptUrl: string;
   ubtUrl: string;
+  apiKey: string;
 };
 
 type Props = {
@@ -32,6 +33,15 @@ export default function EndpointForm({ values, onChange }: Props) {
             onChange={(e) => onChange({ ...values, ubtUrl: e.target.value })}
           />
         </div>
+      </div>
+      <div className="field">
+        <label>API Key</label>
+        <input
+          type="password"
+          placeholder="Optional X-API-Key header"
+          value={values.apiKey}
+          onChange={(e) => onChange({ ...values, apiKey: e.target.value })}
+        />
       </div>
     </div>
   );

@@ -18,6 +18,8 @@ export type UbtProof = {
   accountProofPath?: UbtProofSibling[];
   storageProof: UbtStorageProof[];
   ubtRoot: string;
+  blockHash?: string;
+  blockNumber?: string;
 };
 
 export type UbtProofSibling = {

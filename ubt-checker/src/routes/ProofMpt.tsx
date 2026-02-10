@@ -11,6 +11,7 @@ import { verifyEthGetProof, EthGetProof } from '../lib/ethProof';
 const defaultEndpoints: EndpointValues = {
   mptUrl: 'http://localhost:8545',
   ubtUrl: 'http://localhost:9545',
+  apiKey: '',
 };
 
 const defaultBlock: BlockSelection = {
@@ -82,7 +83,7 @@ export default function ProofMpt() {
       setProof(null);
       setVerification(null);
 
-      const client = createRpcClient({ name: 'MPT', url: endpoints.mptUrl });
+      const client = createRpcClient({ name: 'MPT', url: endpoints.mptUrl, apiKey: endpoints.apiKey });
       const keys = storageKeys.map(normalizeHex).filter((k) => k !== '0x');
       const header = await fetchHeader(client, blockSelection);
       if (!header) {

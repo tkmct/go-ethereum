@@ -9,6 +9,7 @@ import { callBatch, createRpcClient, RpcEndpoint } from '../lib/rpc';
 const defaultEndpoints: EndpointValues = {
   mptUrl: 'http://localhost:8545',
   ubtUrl: 'http://localhost:9545',
+  apiKey: '',
 };
 
 const defaultBlock: BlockSelection = {
@@ -249,12 +250,12 @@ export default function Witness() {
       setMptVerification(null);
       setUbtVerification(null);
 
-      const mptClient = createRpcClient({ name: 'MPT', url: endpoints.mptUrl });
-      const ubtClient = createRpcClient({ name: 'UBT', url: endpoints.ubtUrl });
+      const mptClient = createRpcClient({ name: 'MPT', url: endpoints.mptUrl, apiKey: endpoints.apiKey });
+      const ubtClient = createRpcClient({ name: 'UBT', url: endpoints.ubtUrl, apiKey: endpoints.apiKey });
       const resolveEndpoint =
         endpoints.ubtUrl && endpoints.ubtUrl !== endpoints.mptUrl
-          ? { name: 'UBT', url: endpoints.ubtUrl }
-          : { name: 'MPT', url: endpoints.mptUrl };
+          ? { name: 'UBT', url: endpoints.ubtUrl, apiKey: endpoints.apiKey }
+          : { name: 'MPT', url: endpoints.mptUrl, apiKey: endpoints.apiKey };
 
       const plan = await resolveWitnessPlan(resolveEndpoint, blockSelection);
       setResolvedBlock(plan.resolved ?? null);
@@ -325,8 +326,8 @@ export default function Witness() {
       setMptVerification(null);
       setUbtVerification(null);
 
-      const mptClient = createRpcClient({ name: 'MPT', url: endpoints.mptUrl });
-      const ubtClient = createRpcClient({ name: 'UBT', url: endpoints.ubtUrl });
+      const mptClient = createRpcClient({ name: 'MPT', url: endpoints.mptUrl, apiKey: endpoints.apiKey });
+      const ubtClient = createRpcClient({ name: 'UBT', url: endpoints.ubtUrl, apiKey: endpoints.apiKey });
 
       const requests: { label: 'mpt' | 'ubt'; promise: Promise<WitnessVerification> }[] = [];
       if (standardWitness && mptVerifyParam) {

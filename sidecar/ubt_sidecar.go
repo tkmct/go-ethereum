@@ -119,6 +119,15 @@ func (sc *UBTSidecar) Ready() bool {
 	return sc.enabled && sc.ready && !sc.stale && !sc.converting
 }
 
+// MarkStale forces the sidecar into the stale state so that a fresh
+// conversion can be triggered (e.g. when the sidecar is far behind head).
+func (sc *UBTSidecar) MarkStale() {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.stale = true
+	sc.ready = false
+}
+
 // Converting returns whether the sidecar is converting MPT to UBT.
 func (sc *UBTSidecar) Converting() bool {
 	sc.mu.RLock()
@@ -434,6 +443,12 @@ func (sc *UBTSidecar) HandleReorg(ancestorHash common.Hash, ancestorNum uint64) 
 func (sc *UBTSidecar) ApplyStateUpdate(block *types.Block, update *state.StateUpdate, db ethdb.Database) error {
 	if !sc.Ready() {
 		return errors.New("ubt sidecar not ready")
+	}
+	// Drain any leftover queue items from conversion. A small number of
+	// blocks may have been enqueued between the final replayUpdateQueue
+	// and the converting→ready transition.
+	if err := sc.drainLeftoverQueue(); err != nil {
+		return sc.fail("drain leftover queue", err)
 	}
 	ubtUpdate := NewUBTUpdate(block, update)
 	if ubtUpdate == nil {

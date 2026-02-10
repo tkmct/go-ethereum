@@ -11,6 +11,7 @@ import { bytesToHex, hexToBytes, pad32, strip0x, toBigInt } from '../lib/format'
 const defaultEndpoints: EndpointValues = {
   mptUrl: 'http://localhost:8545',
   ubtUrl: 'http://localhost:9545',
+  apiKey: '',
 };
 
 const defaultBlock: BlockSelection = {
@@ -108,8 +109,8 @@ export default function Compare() {
       setMpt(null);
       setUbt(null);
 
-      const clientMpt = createRpcClient({ name: 'MPT', url: endpoints.mptUrl });
-      const clientUbt = createRpcClient({ name: 'UBT', url: endpoints.ubtUrl });
+      const clientMpt = createRpcClient({ name: 'MPT', url: endpoints.mptUrl, apiKey: endpoints.apiKey });
+      const clientUbt = createRpcClient({ name: 'UBT', url: endpoints.ubtUrl, apiKey: endpoints.apiKey });
       const keys = storageKeys.map(normalizeHex).filter((k) => k !== '0x');
       const paddedKeys = keys.map((key) => bytesToHex(pad32(hexToBytes(key))));
       const blockRef = selectionToBlockRef(blockSelection);

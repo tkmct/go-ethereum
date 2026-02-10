@@ -7,6 +7,7 @@ import { blockRefToParam, createRpcClient } from '../lib/rpc';
 const defaultEndpoints: EndpointValues = {
   mptUrl: 'http://localhost:8545',
   ubtUrl: 'http://localhost:9545',
+  apiKey: '',
 };
 
 const defaultBlock: BlockSelection = {
@@ -31,6 +32,7 @@ function readEndpoints(): EndpointValues {
   return {
     mptUrl: stored.mptUrl ?? defaultEndpoints.mptUrl,
     ubtUrl: stored.ubtUrl ?? defaultEndpoints.ubtUrl,
+    apiKey: stored.apiKey ?? defaultEndpoints.apiKey,
   };
 }
 
@@ -69,7 +71,7 @@ export default function AccountRangeModal({ isOpen, onClose }: Props) {
 
       const endpoints = readEndpoints();
       const blockSelection = readBlockSelection();
-      const client = createRpcClient({ name: 'UBT', url: endpoints.ubtUrl });
+      const client = createRpcClient({ name: 'UBT', url: endpoints.ubtUrl, apiKey: endpoints.apiKey });
       const blockRef = selectionToBlockRef(blockSelection);
       const blockParam = blockRefToParam(blockRef);
 

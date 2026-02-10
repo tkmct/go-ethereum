@@ -1,6 +1,7 @@
 export type RpcEndpoint = {
   name: string;
   url: string;
+  apiKey?: string;
 };
 
 export type BlockRef =
@@ -17,6 +18,18 @@ type JsonRpcResponse<T> = {
   error?: { code: number; message: string; data?: unknown };
 };
 
+function resolveProxy(url: string): { url: string; extraHeaders: Record<string, string> } {
+  if (import.meta.env.DEV) {
+    try {
+      const parsed = new URL(url);
+      if (parsed.origin !== window.location.origin) {
+        return { url: '/__proxy', extraHeaders: { 'X-Proxy-Target': url } };
+      }
+    } catch {}
+  }
+  return { url, extraHeaders: {} };
+}
+
 let nextId = 1;
 
 export function createRpcClient(endpoint: RpcEndpoint) {
@@ -28,9 +41,15 @@ export function createRpcClient(endpoint: RpcEndpoint) {
         method,
         params,
       };
-      const res = await fetch(endpoint.url, {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (endpoint.apiKey) {
+        headers['X-API-Key'] = endpoint.apiKey;
+      }
+      const proxy = resolveProxy(endpoint.url);
+      Object.assign(headers, proxy.extraHeaders);
+      const res = await fetch(proxy.url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(body),
       });
       if (!res.ok) {
@@ -58,9 +77,15 @@ export async function callBatch<T>(
     method: call.method,
     params: call.params,
   }));
-  const res = await fetch(endpoint.url, {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (endpoint.apiKey) {
+    headers['X-API-Key'] = endpoint.apiKey;
+  }
+  const proxy = resolveProxy(endpoint.url);
+  Object.assign(headers, proxy.extraHeaders);
+  const res = await fetch(proxy.url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
