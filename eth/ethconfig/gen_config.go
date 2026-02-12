@@ -65,9 +65,18 @@ func (c Config) MarshalTOML() (interface{}, error) {
 		OverrideBPO1            *uint64       `toml:",omitempty"`
 		OverrideBPO2            *uint64       `toml:",omitempty"`
 		OverrideVerkle          *uint64       `toml:",omitempty"`
-		TxSyncDefaultTimeout    time.Duration `toml:",omitempty"`
-		TxSyncMaxTimeout        time.Duration `toml:",omitempty"`
-		RangeLimit              uint64        `toml:",omitempty"`
+		TxSyncDefaultTimeout       time.Duration `toml:",omitempty"`
+		TxSyncMaxTimeout           time.Duration `toml:",omitempty"`
+		RangeLimit                 uint64        `toml:",omitempty"`
+		UBTConversionEnabled       bool
+		UBTDecoupledMode           bool
+		UBTOutboxDBPath            string
+		UBTOutboxWriteTimeout      time.Duration
+		UBTReorgMarkerEnabled      bool
+		UBTOutboxReadRPCEnabled    bool
+		UBTOutboxRetentionWindow   uint64
+		UBTDebugEndpoint           string
+		UBTDebugTimeout            time.Duration
 	}
 	var enc Config
 	enc.Genesis = c.Genesis
@@ -121,6 +130,15 @@ func (c Config) MarshalTOML() (interface{}, error) {
 	enc.TxSyncDefaultTimeout = c.TxSyncDefaultTimeout
 	enc.TxSyncMaxTimeout = c.TxSyncMaxTimeout
 	enc.RangeLimit = c.RangeLimit
+	enc.UBTConversionEnabled = c.UBTConversionEnabled
+	enc.UBTDecoupledMode = c.UBTDecoupledMode
+	enc.UBTOutboxDBPath = c.UBTOutboxDBPath
+	enc.UBTOutboxWriteTimeout = c.UBTOutboxWriteTimeout
+	enc.UBTReorgMarkerEnabled = c.UBTReorgMarkerEnabled
+	enc.UBTOutboxReadRPCEnabled = c.UBTOutboxReadRPCEnabled
+	enc.UBTOutboxRetentionWindow = c.UBTOutboxRetentionWindow
+	enc.UBTDebugEndpoint = c.UBTDebugEndpoint
+	enc.UBTDebugTimeout = c.UBTDebugTimeout
 	return &enc, nil
 }
 
@@ -175,9 +193,18 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 		OverrideBPO1            *uint64        `toml:",omitempty"`
 		OverrideBPO2            *uint64        `toml:",omitempty"`
 		OverrideVerkle          *uint64        `toml:",omitempty"`
-		TxSyncDefaultTimeout    *time.Duration `toml:",omitempty"`
-		TxSyncMaxTimeout        *time.Duration `toml:",omitempty"`
-		RangeLimit              *uint64        `toml:",omitempty"`
+		TxSyncDefaultTimeout       *time.Duration `toml:",omitempty"`
+		TxSyncMaxTimeout           *time.Duration `toml:",omitempty"`
+		RangeLimit                 *uint64        `toml:",omitempty"`
+		UBTConversionEnabled       *bool
+		UBTDecoupledMode           *bool
+		UBTOutboxDBPath            *string
+		UBTOutboxWriteTimeout      *time.Duration
+		UBTReorgMarkerEnabled      *bool
+		UBTOutboxReadRPCEnabled    *bool
+		UBTOutboxRetentionWindow   *uint64
+		UBTDebugEndpoint           *string
+		UBTDebugTimeout            *time.Duration
 	}
 	var dec Config
 	if err := unmarshal(&dec); err != nil {
@@ -335,6 +362,33 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	}
 	if dec.RangeLimit != nil {
 		c.RangeLimit = *dec.RangeLimit
+	}
+	if dec.UBTConversionEnabled != nil {
+		c.UBTConversionEnabled = *dec.UBTConversionEnabled
+	}
+	if dec.UBTDecoupledMode != nil {
+		c.UBTDecoupledMode = *dec.UBTDecoupledMode
+	}
+	if dec.UBTOutboxDBPath != nil {
+		c.UBTOutboxDBPath = *dec.UBTOutboxDBPath
+	}
+	if dec.UBTOutboxWriteTimeout != nil {
+		c.UBTOutboxWriteTimeout = *dec.UBTOutboxWriteTimeout
+	}
+	if dec.UBTReorgMarkerEnabled != nil {
+		c.UBTReorgMarkerEnabled = *dec.UBTReorgMarkerEnabled
+	}
+	if dec.UBTOutboxReadRPCEnabled != nil {
+		c.UBTOutboxReadRPCEnabled = *dec.UBTOutboxReadRPCEnabled
+	}
+	if dec.UBTOutboxRetentionWindow != nil {
+		c.UBTOutboxRetentionWindow = *dec.UBTOutboxRetentionWindow
+	}
+	if dec.UBTDebugEndpoint != nil {
+		c.UBTDebugEndpoint = *dec.UBTDebugEndpoint
+	}
+	if dec.UBTDebugTimeout != nil {
+		c.UBTDebugTimeout = *dec.UBTDebugTimeout
 	}
 	return nil
 }

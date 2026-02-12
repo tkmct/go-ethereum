@@ -75,8 +75,12 @@ var Defaults = Config{
 	RPCTxFeeCap:             1, // 1 ether
 	TxSyncDefaultTimeout:    20 * time.Second,
 	TxSyncMaxTimeout:        1 * time.Minute,
-	SlowBlockThreshold:      -1, // Disabled by default; set via --debug.logslowblock flag
-	RangeLimit:              0,
+	SlowBlockThreshold:       -1, // Disabled by default; set via --debug.logslowblock flag
+	RangeLimit:               0,
+	UBTReorgMarkerEnabled:    true,
+	UBTOutboxReadRPCEnabled:  true,
+	UBTOutboxWriteTimeout:    5 * time.Second,
+	UBTOutboxRetentionWindow: 100000,
 }
 
 //go:generate go run github.com/fjl/gencodec -type Config -formats toml -out gen_config.go
@@ -124,6 +128,20 @@ type Config struct {
 	// nodes on top. It can be 'hash', 'path', or none which means use the scheme
 	// consistent with persistent state.
 	StateScheme string `toml:",omitempty"`
+
+	// UBT conversion options
+	UBTConversionEnabled       bool          // Enable UBT outbox emission
+	UBTDecoupledMode           bool          // Use decoupled outbox+daemon architecture
+	UBTOutboxDBPath            string        // Path for dedicated outbox DB (default: <datadir>/ubt-outbox)
+	UBTOutboxWriteTimeout      time.Duration // Outbox write timeout
+	UBTReorgMarkerEnabled      bool          // Emit reorg markers (default: true)
+	UBTOutboxReadRPCEnabled    bool          // Enable outbox-read RPC (default: true)
+	UBTOutboxRetentionWindow   uint64        // Keep last N sequences (0 = unlimited)
+	UBTDebugEndpoint            string        // UBT daemon RPC endpoint for debug proxy (empty = disabled)
+	UBTDebugTimeout             time.Duration // Timeout for UBT debug RPC calls (default: 5s)
+	UBTReplayRPCEnabled         bool          // Enable replay RPC for archive-based recovery
+	UBTReplayRPCEndpoint        string        // Endpoint for replay RPC (default: same as main RPC)
+	UBTDebugRPCProxyEnabled     bool          // Explicitly enable UBT debug RPC proxy (default: false; also enabled when UBTDebugEndpoint is set)
 
 	// RequiredBlocks is a set of block number -> hash mappings which must be in the
 	// canonical chain of all remote peers. Setting the option makes geth verify the

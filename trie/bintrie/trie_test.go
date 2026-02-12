@@ -18,11 +18,15 @@ package bintrie
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/trie"
+	"github.com/holiman/uint256"
 )
 
 var (
@@ -197,6 +201,30 @@ func TestMerkleizeMultipleEntries(t *testing.T) {
 	}
 }
 
+func TestUpdateAccount_BalanceOverflow(t *testing.T) {
+	tr := &BinaryTrie{
+		root:   NewBinaryNode(),
+		tracer: trie.NewPrevalueTracer(),
+	}
+
+	addr := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
+
+	// Create a uint256 with value 2^128 (129 bits, 17 bytes) — exceeds 128-bit limit
+	bigBal := new(uint256.Int).Lsh(uint256.NewInt(1), 128)
+	acc := &types.StateAccount{
+		Nonce:    1,
+		Balance:  bigBal,
+		CodeHash: common.Hash{}.Bytes(),
+	}
+	err := tr.UpdateAccount(addr, acc, 0)
+	if err == nil {
+		t.Fatal("expected error for >128-bit balance")
+	}
+	if !strings.Contains(err.Error(), "128-bit limit") {
+		t.Fatalf("expected '128-bit limit' in error message, got: %s", err)
+	}
+}
+
 func TestBinaryTrieWitness(t *testing.T) {
 	tracer := trie.NewPrevalueTracer()
 
@@ -221,4 +249,102 @@ func TestBinaryTrieWitness(t *testing.T) {
 	if !bytes.Equal(witness[string([]byte("path2"))], []byte("blob2")) {
 		t.Fatal("unexpected witness value for path2")
 	}
+}
+
+func TestGetCode_RoundTrip(t *testing.T) {
+	addr := common.HexToAddress("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+	tests := []struct {
+		name     string
+		codeLen  int
+		wantNil  bool
+	}{
+		{"empty account (no code)", 0, true},
+		{"single chunk (5 bytes)", 5, false},
+		{"exactly 31 bytes", 31, false},
+		{"multi-chunk within header stem (100 bytes)", 100, false},
+		{"exactly 128 chunks (3968 bytes)", 128 * 31, false},
+		{"crossing stem boundary (4000 bytes)", 4000, false},
+		{"large contract (8000 bytes)", 8000, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := &BinaryTrie{
+				root:   NewBinaryNode(),
+				tracer: trie.NewPrevalueTracer(),
+			}
+
+			// Generate deterministic test code
+			var code []byte
+			if tt.codeLen > 0 {
+				code = make([]byte, tt.codeLen)
+				for i := range code {
+					code[i] = byte(i % 251) // Prime to avoid patterns
+				}
+			}
+
+			// Create account first
+			codeHash := common.Hash{}
+			if code != nil {
+				h := sha256Sum(code)
+				codeHash = h
+			}
+			acc := &types.StateAccount{
+				Nonce:    1,
+				Balance:  uint256.NewInt(1000),
+				CodeHash: codeHash.Bytes(),
+			}
+			if err := tr.UpdateAccount(addr, acc, len(code)); err != nil {
+				t.Fatalf("UpdateAccount: %v", err)
+			}
+
+			// Write code chunks
+			if code != nil {
+				if err := tr.UpdateContractCode(addr, codeHash, code); err != nil {
+					t.Fatalf("UpdateContractCode: %v", err)
+				}
+			}
+
+			// Read it back
+			got, err := tr.GetCode(addr)
+			if err != nil {
+				t.Fatalf("GetCode: %v", err)
+			}
+
+			if tt.wantNil {
+				if got != nil {
+					t.Fatalf("expected nil code, got %d bytes", len(got))
+				}
+				return
+			}
+
+			if !bytes.Equal(got, code) {
+				t.Fatalf("code mismatch: got %d bytes, want %d bytes", len(got), len(code))
+			}
+		})
+	}
+}
+
+func TestGetCode_NonExistentAccount(t *testing.T) {
+	tr := &BinaryTrie{
+		root:   NewBinaryNode(),
+		tracer: trie.NewPrevalueTracer(),
+	}
+	addr := common.HexToAddress("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	code, err := tr.GetCode(addr)
+	if err != nil {
+		t.Fatalf("GetCode on empty trie should not error: %v", err)
+	}
+	if code != nil {
+		t.Fatalf("expected nil code for non-existent account, got %d bytes", len(code))
+	}
+}
+
+func sha256Sum(data []byte) common.Hash {
+	h := sha256.New()
+	h.Write(data)
+	var result common.Hash
+	copy(result[:], h.Sum(nil))
+	return result
 }

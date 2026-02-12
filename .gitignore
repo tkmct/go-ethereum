@@ -57,3 +57,5 @@ cmd/geth/geth
 cmd/rlpdump/rlpdump
 cmd/workload/workload
 cmd/keeper/keeper
+cmd/ubtconv/ubtconv
+/ubtconv

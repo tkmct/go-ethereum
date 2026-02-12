@@ -40,6 +40,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
 	"github.com/ethereum/go-ethereum/core/txpool/locals"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/ubtemit"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/eth/downloader"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
@@ -124,6 +125,9 @@ type Ethereum struct {
 	lock sync.RWMutex // Protects the variadic fields (e.g. gas price and etherbase)
 
 	shutdownTracker *shutdowncheck.ShutdownTracker // Tracks if and when the node has shutdown ungracefully
+
+	outboxStore    *ubtemit.OutboxStore // UBT outbox store (nil if not enabled)
+	emitterService *ubtemit.Service     // UBT emitter service (nil if not enabled)
 }
 
 // New creates a new Ethereum object (including the initialisation of the common Ethereum object),
@@ -281,6 +285,22 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		return nil, err
 	}
 
+	// Set up UBT emitter if configured
+	if config.UBTConversionEnabled {
+		outboxPath := config.UBTOutboxDBPath
+		if outboxPath == "" {
+			outboxPath = stack.ResolvePath("ubt-outbox")
+		}
+		outboxStore, err := ubtemit.NewOutboxStore(outboxPath, config.UBTOutboxWriteTimeout, config.UBTOutboxRetentionWindow, 0)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open UBT outbox store: %w", err)
+		}
+		eth.outboxStore = outboxStore
+		eth.emitterService = ubtemit.NewService(outboxStore)
+		eth.blockchain.SetUBTEmitter(eth.emitterService, config.UBTReorgMarkerEnabled)
+		log.Info("UBT conversion emitter enabled", "outbox", outboxPath, "retention", config.UBTOutboxRetentionWindow)
+	}
+
 	// Initialize filtermaps log index.
 	fmConfig := filtermaps.Config{
 		History:        config.LogHistory,
@@ -391,8 +411,8 @@ func makeExtraData(extra []byte) []byte {
 func (s *Ethereum) APIs() []rpc.API {
 	apis := ethapi.GetAPIs(s.APIBackend)
 
-	// Append all the local APIs and return
-	return append(apis, []rpc.API{
+	// Append all the local APIs
+	apis = append(apis, []rpc.API{
 		{
 			Namespace: "miner",
 			Service:   NewMinerAPI(s),
@@ -410,6 +430,28 @@ func (s *Ethereum) APIs() []rpc.API {
 			Service:   s.netRPCService,
 		},
 	}...)
+
+	// Add UBT outbox API if enabled and outbox-read RPC is not disabled
+	if s.outboxStore != nil && s.config.UBTOutboxReadRPCEnabled {
+		apis = append(apis, rpc.API{
+			Namespace: "ubt",
+			Service:   NewUBTOutboxAPI(s),
+		})
+	}
+
+	// Enable debug proxy if explicitly enabled OR if endpoint is set (backward compat)
+	if s.config.UBTDebugRPCProxyEnabled || s.config.UBTDebugEndpoint != "" {
+		timeout := s.config.UBTDebugTimeout
+		if timeout == 0 {
+			timeout = 5 * time.Second
+		}
+		apis = append(apis, rpc.API{
+			Namespace: "debug",
+			Service:   NewUBTDebugAPI(s.config.UBTDebugEndpoint, timeout),
+		})
+	}
+
+	return apis
 }
 
 func (s *Ethereum) ResetWithGenesisBlock(gb *types.Block) {
@@ -424,6 +466,8 @@ func (s *Ethereum) TxPool() *txpool.TxPool             { return s.txPool }
 func (s *Ethereum) BlobTxPool() *blobpool.BlobPool     { return s.blobTxPool }
 func (s *Ethereum) Engine() consensus.Engine           { return s.engine }
 func (s *Ethereum) ChainDb() ethdb.Database            { return s.chainDb }
+func (s *Ethereum) OutboxStore() *ubtemit.OutboxStore  { return s.outboxStore }
+func (s *Ethereum) EmitterService() *ubtemit.Service   { return s.emitterService }
 func (s *Ethereum) IsListening() bool                  { return true } // Always listening
 func (s *Ethereum) Downloader() *downloader.Downloader { return s.handler.downloader }
 func (s *Ethereum) Synced() bool                       { return s.handler.synced.Load() }
@@ -588,6 +632,11 @@ func (s *Ethereum) Stop() error {
 
 	// Clean shutdown marker as the last thing before closing db
 	s.shutdownTracker.Stop()
+
+	// Close UBT outbox store if it was opened
+	if s.outboxStore != nil {
+		s.outboxStore.Close()
+	}
 
 	s.chainDb.Close()
 	s.eventMux.Stop()

@@ -336,6 +336,71 @@ var (
 		Category: flags.StateCategory,
 		Value:    "",
 	}
+	UBTConversionEnabledFlag = &cli.BoolFlag{
+		Name:     "ubt.conversion-enabled",
+		Usage:    "Enable UBT conversion outbox emission",
+		Category: flags.StateCategory,
+	}
+	UBTDecoupledFlag = &cli.BoolFlag{
+		Name:     "ubt.decoupled",
+		Usage:    "Use decoupled outbox+daemon architecture for UBT conversion",
+		Category: flags.StateCategory,
+	}
+	UBTOutboxDBPathFlag = &cli.StringFlag{
+		Name:     "ubt.outbox-db-path",
+		Usage:    "Path for dedicated UBT outbox database",
+		Category: flags.StateCategory,
+	}
+	UBTOutboxWriteTimeoutFlag = &cli.DurationFlag{
+		Name:     "ubt.outbox-write-timeout",
+		Usage:    "UBT outbox write timeout",
+		Value:    5 * time.Second,
+		Category: flags.StateCategory,
+	}
+	UBTReorgMarkerEnabledFlag = &cli.BoolFlag{
+		Name:     "ubt.reorg-marker-enabled",
+		Usage:    "Enable UBT reorg marker emission",
+		Value:    true,
+		Category: flags.StateCategory,
+	}
+	UBTOutboxReadRPCEnabledFlag = &cli.BoolFlag{
+		Name:     "ubt.outbox-read-rpc-enabled",
+		Usage:    "Enable outbox-read RPC endpoints for daemon consumption",
+		Value:    true,
+		Category: flags.StateCategory,
+	}
+	UBTOutboxRetentionWindowFlag = &cli.Uint64Flag{
+		Name:     "ubt.outbox-retention-seq-window",
+		Usage:    "Maximum number of outbox events to retain (0 = unlimited)",
+		Value:    100000,
+		Category: flags.StateCategory,
+	}
+	UBTDebugEndpointFlag = &cli.StringFlag{
+		Name:     "ubt.debug-endpoint",
+		Usage:    "UBT daemon RPC endpoint for debug proxy (enables debug_getUBT* methods)",
+		Category: flags.StateCategory,
+	}
+	UBTDebugTimeoutFlag = &cli.DurationFlag{
+		Name:     "ubt.debug-timeout",
+		Usage:    "Timeout for UBT debug RPC calls",
+		Value:    5 * time.Second,
+		Category: flags.StateCategory,
+	}
+	UBTReplayRPCEnabledFlag = &cli.BoolFlag{
+		Name:     "ubt.replay-rpc-enabled",
+		Usage:    "Enable replay RPC endpoint for archive-based UBT recovery",
+		Category: flags.EthCategory,
+	}
+	UBTReplayRPCEndpointFlag = &cli.StringFlag{
+		Name:     "ubt.replay-rpc-endpoint",
+		Usage:    "Replay RPC endpoint URL (default: same as main RPC)",
+		Category: flags.EthCategory,
+	}
+	UBTDebugRPCProxyEnabledFlag = &cli.BoolFlag{
+		Name:     "ubt.debug-rpc-proxy-enabled",
+		Usage:    "Explicitly enable UBT debug RPC proxy",
+		Category: flags.EthCategory,
+	}
 	// Beacon client light sync settings
 	BeaconApiFlag = &cli.StringSliceFlag{
 		Name:     "beacon.api",
@@ -1761,6 +1826,43 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	}
 	if ctx.IsSet(LogExportCheckpointsFlag.Name) {
 		cfg.LogExportCheckpoints = ctx.String(LogExportCheckpointsFlag.Name)
+	}
+	// UBT conversion options
+	if ctx.IsSet(UBTConversionEnabledFlag.Name) {
+		cfg.UBTConversionEnabled = ctx.Bool(UBTConversionEnabledFlag.Name)
+	}
+	if ctx.IsSet(UBTDecoupledFlag.Name) {
+		cfg.UBTDecoupledMode = ctx.Bool(UBTDecoupledFlag.Name)
+	}
+	if ctx.IsSet(UBTOutboxDBPathFlag.Name) {
+		cfg.UBTOutboxDBPath = ctx.String(UBTOutboxDBPathFlag.Name)
+	}
+	if ctx.IsSet(UBTOutboxWriteTimeoutFlag.Name) {
+		cfg.UBTOutboxWriteTimeout = ctx.Duration(UBTOutboxWriteTimeoutFlag.Name)
+	}
+	if ctx.IsSet(UBTReorgMarkerEnabledFlag.Name) {
+		cfg.UBTReorgMarkerEnabled = ctx.Bool(UBTReorgMarkerEnabledFlag.Name)
+	}
+	if ctx.IsSet(UBTOutboxReadRPCEnabledFlag.Name) {
+		cfg.UBTOutboxReadRPCEnabled = ctx.Bool(UBTOutboxReadRPCEnabledFlag.Name)
+	}
+	if ctx.IsSet(UBTOutboxRetentionWindowFlag.Name) {
+		cfg.UBTOutboxRetentionWindow = ctx.Uint64(UBTOutboxRetentionWindowFlag.Name)
+	}
+	if ctx.IsSet(UBTDebugEndpointFlag.Name) {
+		cfg.UBTDebugEndpoint = ctx.String(UBTDebugEndpointFlag.Name)
+	}
+	if ctx.IsSet(UBTDebugTimeoutFlag.Name) {
+		cfg.UBTDebugTimeout = ctx.Duration(UBTDebugTimeoutFlag.Name)
+	}
+	if ctx.IsSet(UBTReplayRPCEnabledFlag.Name) {
+		cfg.UBTReplayRPCEnabled = ctx.Bool(UBTReplayRPCEnabledFlag.Name)
+	}
+	if ctx.IsSet(UBTReplayRPCEndpointFlag.Name) {
+		cfg.UBTReplayRPCEndpoint = ctx.String(UBTReplayRPCEndpointFlag.Name)
+	}
+	if ctx.IsSet(UBTDebugRPCProxyEnabledFlag.Name) {
+		cfg.UBTDebugRPCProxyEnabled = ctx.Bool(UBTDebugRPCProxyEnabledFlag.Name)
 	}
 	if ctx.IsSet(CacheFlag.Name) || ctx.IsSet(CacheTrieFlag.Name) {
 		cfg.TrieCleanCache = ctx.Int(CacheFlag.Name) * ctx.Int(CacheTrieFlag.Name) / 100

@@ -167,6 +167,19 @@ var (
 
 	// Verkle transition information
 	VerkleTransitionStatePrefix = []byte("verkle-transition-state-")
+
+	// UBT outbox keys
+	ubtOutboxEventPrefix       = []byte("ubt-evt-")       // ubt-evt- + seq (8 bytes big-endian) -> RLP-encoded OutboxEnvelope
+	ubtOutboxSeqCounterKey     = []byte("ubt-seq")        // Current sequence counter
+	ubtOutboxLowestSeqKey      = []byte("ubt-lowseq")    // Lowest non-deleted sequence number
+	ubtOutboxDiskUsageKey      = []byte("ubt-diskusage") // Cumulative disk usage bytes
+	ubtOutboxConsumerStateKey  = []byte("ubt-consumer")  // Consumer checkpoint state
+	ubtBlockRootPrefix         = []byte("ubt-blk-root-")  // ubt-blk-root- + block number (8 bytes big-endian) -> UBT root hash
+	ubtBlockHashPrefix         = []byte("ubt-blk-hash-")  // ubt-blk-hash- + block number (8 bytes big-endian) -> canonical block hash
+	ubtBlockParentHashPrefix   = []byte("ubt-blk-phash-") // ubt-blk-phash- + block number (8 bytes big-endian) -> canonical parent hash
+	ubtBlockNumberByHashPrefix = []byte("ubt-h2n-")       // ubt-h2n- + block hash (32 bytes) -> block number (8 bytes big-endian)
+	ubtAnchorSnapshotPrefix    = []byte("ubt-anchor-")    // ubt-anchor- + index (8 bytes big-endian) -> RLP-encoded UBTAnchorSnapshot
+	ubtAnchorSnapshotCountKey  = []byte("ubt-anchor-cnt") // Total count of anchor snapshots
 )
 
 // LegacyTxLookupEntry is the legacy TxLookupEntry definition with some unnecessary
@@ -458,4 +471,58 @@ func trienodeHistoryIndexBlockKey(addressHash common.Hash, path []byte, blockID 
 // transitionStateKey = transitionStatusKey + hash
 func transitionStateKey(hash common.Hash) []byte {
 	return append(VerkleTransitionStatePrefix, hash.Bytes()...)
+}
+
+// ubtOutboxEventKey creates the key for an outbox event by sequence number.
+// ubtOutboxEventKey = ubtOutboxEventPrefix + seq (8 bytes big-endian)
+func ubtOutboxEventKey(seq uint64) []byte {
+	key := make([]byte, len(ubtOutboxEventPrefix)+8)
+	copy(key, ubtOutboxEventPrefix)
+	binary.BigEndian.PutUint64(key[len(ubtOutboxEventPrefix):], seq)
+	return key
+}
+
+// ubtBlockRootKey creates the key for a UBT block root by block number.
+// ubtBlockRootKey = ubtBlockRootPrefix + blockNumber (8 bytes big-endian)
+func ubtBlockRootKey(blockNumber uint64) []byte {
+	key := make([]byte, len(ubtBlockRootPrefix)+8)
+	copy(key, ubtBlockRootPrefix)
+	binary.BigEndian.PutUint64(key[len(ubtBlockRootPrefix):], blockNumber)
+	return key
+}
+
+// ubtBlockHashKey creates the key for canonical block hash by block number.
+// ubtBlockHashKey = ubtBlockHashPrefix + blockNumber (8 bytes big-endian)
+func ubtBlockHashKey(blockNumber uint64) []byte {
+	key := make([]byte, len(ubtBlockHashPrefix)+8)
+	copy(key, ubtBlockHashPrefix)
+	binary.BigEndian.PutUint64(key[len(ubtBlockHashPrefix):], blockNumber)
+	return key
+}
+
+// ubtBlockParentHashKey creates the key for canonical parent hash by block number.
+// ubtBlockParentHashKey = ubtBlockParentHashPrefix + blockNumber (8 bytes big-endian)
+func ubtBlockParentHashKey(blockNumber uint64) []byte {
+	key := make([]byte, len(ubtBlockParentHashPrefix)+8)
+	copy(key, ubtBlockParentHashPrefix)
+	binary.BigEndian.PutUint64(key[len(ubtBlockParentHashPrefix):], blockNumber)
+	return key
+}
+
+// ubtBlockNumberByHashKey creates the key for canonical block number by block hash.
+// ubtBlockNumberByHashKey = ubtBlockNumberByHashPrefix + block hash
+func ubtBlockNumberByHashKey(hash common.Hash) []byte {
+	key := make([]byte, len(ubtBlockNumberByHashPrefix)+common.HashLength)
+	copy(key, ubtBlockNumberByHashPrefix)
+	copy(key[len(ubtBlockNumberByHashPrefix):], hash.Bytes())
+	return key
+}
+
+// ubtAnchorSnapshotKey creates the key for an anchor snapshot by index.
+// ubtAnchorSnapshotKey = ubtAnchorSnapshotPrefix + index (8 bytes big-endian)
+func ubtAnchorSnapshotKey(index uint64) []byte {
+	key := make([]byte, len(ubtAnchorSnapshotPrefix)+8)
+	copy(key, ubtAnchorSnapshotPrefix)
+	binary.BigEndian.PutUint64(key[len(ubtAnchorSnapshotPrefix):], index)
+	return key
 }

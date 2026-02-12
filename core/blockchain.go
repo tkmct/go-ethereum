@@ -43,6 +43,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/stateless"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/ubtemit"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
@@ -361,6 +362,12 @@ type BlockChain struct {
 	processor  Processor // Block transaction processor interface
 	logger     *tracing.Hooks
 	stateSizer *state.SizeTracker // State size tracking
+	emitter                *ubtemit.Service // UBT conversion emitter (optional)
+	ubtReorgMarkerEnabled  bool            // Whether to emit reorg markers (default: true when emitter is set)
+
+	// Pending UBT diff buffer for canonical-only emission.
+	// Key: block hash, Value: diff data. Protected by chainmu.
+	pendingUBTDiffs map[common.Hash]*pendingUBTDiff
 
 	lastForkReadyAlert time.Time     // Last time there was a fork readiness print out
 	slowBlockThreshold time.Duration // Block execution time threshold beyond which detailed statistics will be logged
@@ -412,6 +419,7 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 		engine:             engine,
 		logger:             cfg.VmConfig.Tracer,
 		slowBlockThreshold: cfg.SlowBlockThreshold,
+		pendingUBTDiffs:    make(map[common.Hash]*pendingUBTDiff),
 	}
 	bc.hc, err = NewHeaderChain(db, chainConfig, engine, bc.insertStopped)
 	if err != nil {
@@ -1666,8 +1674,9 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		isCancun      = bc.chainConfig.IsCancun(block.Number(), block.Time())
 		hasStateHook  = bc.logger != nil && bc.logger.OnStateUpdate != nil
 		hasStateSizer = bc.stateSizer != nil
+		hasEmitter    = bc.emitter != nil
 	)
-	if hasStateHook || hasStateSizer {
+	if hasStateHook || hasStateSizer || hasEmitter {
 		r, update, err := statedb.CommitWithUpdate(block.NumberU64(), isEIP158, isCancun)
 		if err != nil {
 			return err
@@ -1681,6 +1690,22 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		}
 		if hasStateSizer {
 			bc.stateSizer.Notify(update)
+		}
+		if hasEmitter {
+			ubtDiff, err := update.ToUBTDiff()
+			if err != nil {
+				bc.emitter.MarkRawKeyFailure(block.NumberU64(), err)
+			} else {
+				// Buffer the diff for canonical-only emission.
+				// Emission happens in writeBlockAndSetHead or SetCanonical
+				// AFTER reorg markers, ensuring correct ordering.
+				bc.pendingUBTDiffs[block.Hash()] = &pendingUBTDiff{
+					blockNumber: block.NumberU64(),
+					blockHash:   block.Hash(),
+					parentHash:  block.ParentHash(),
+					diff:        ubtDiff,
+				}
+			}
 		}
 		root = r
 	} else {
@@ -1766,6 +1791,34 @@ func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types
 
 	// Set new head.
 	bc.writeHeadBlock(block)
+
+	// Emit buffered UBT diff now that this block is canonical.
+	// This runs AFTER reorg markers (emitted in bc.reorg above),
+	// ensuring correct marker-before-diff ordering.
+	if bc.emitter != nil {
+		if pending, ok := bc.pendingUBTDiffs[block.Hash()]; ok {
+			bc.emitter.EmitDiff(pending.blockNumber, pending.blockHash, pending.parentHash, pending.diff)
+			delete(bc.pendingUBTDiffs, block.Hash())
+		}
+	}
+
+	// Clean up stale pending diffs — only remove those significantly behind current block.
+	// During reorgs, valid new-branch diffs may be buffered but not yet canonicalized,
+	// so we must preserve recent entries. Use block number distance instead of map size.
+	if len(bc.pendingUBTDiffs) > 64 {
+		currentBlock := block.NumberU64()
+		const maxDiffAge = uint64(256) // keep diffs within 256 blocks of head
+		pruned := 0
+		for hash, pending := range bc.pendingUBTDiffs {
+			if currentBlock > maxDiffAge && pending.blockNumber < currentBlock-maxDiffAge {
+				delete(bc.pendingUBTDiffs, hash)
+				pruned++
+			}
+		}
+		if pruned > 0 {
+			log.Warn("Pruned stale pending UBT diffs", "pruned", pruned, "remaining", len(bc.pendingUBTDiffs), "headBlock", currentBlock)
+		}
+	}
 
 	bc.chainFeed.Send(ChainEvent{
 		Header:       block.Header(),
@@ -2645,6 +2698,16 @@ func (bc *BlockChain) reorg(oldHead *types.Header, newHead *types.Header) error 
 	// Release the tx-lookup lock after mutation.
 	bc.txLookupLock.Unlock()
 
+	// Emit reorg marker if UBT emitter is configured and reorg markers are enabled
+	if bc.emitter != nil && bc.ubtReorgMarkerEnabled && len(oldChain) > 0 && len(newChain) > 0 {
+		marker := ubtemit.NewReorgMarker(
+			oldChain[0].Number.Uint64(), oldChain[0].Hash(),
+			newChain[0].Number.Uint64(), newChain[0].Hash(),
+			commonBlock.Number.Uint64(), commonBlock.Hash(),
+		)
+		bc.emitter.EmitReorg(marker)
+	}
+
 	return nil
 }
 
@@ -2687,6 +2750,14 @@ func (bc *BlockChain) SetCanonical(head *types.Block) (common.Hash, error) {
 		}
 	}
 	bc.writeHeadBlock(head)
+
+	// Emit buffered UBT diff for newly canonical block.
+	if bc.emitter != nil {
+		if pending, ok := bc.pendingUBTDiffs[head.Hash()]; ok {
+			bc.emitter.EmitDiff(pending.blockNumber, pending.blockHash, pending.parentHash, pending.diff)
+			delete(bc.pendingUBTDiffs, head.Hash())
+		}
+	}
 
 	// Emit events
 	receipts, logs := bc.collectReceiptsAndLogs(head, false)
@@ -2926,4 +2997,19 @@ func (bc *BlockChain) GetTrieFlushInterval() time.Duration {
 // StateSizer returns the state size tracker, or nil if it's not initialized
 func (bc *BlockChain) StateSizer() *state.SizeTracker {
 	return bc.stateSizer
+}
+
+// pendingUBTDiff holds a buffered UBT diff waiting for canonical confirmation.
+type pendingUBTDiff struct {
+	blockNumber uint64
+	blockHash   common.Hash
+	parentHash  common.Hash
+	diff        *ubtemit.QueuedDiffV1
+}
+
+// SetUBTEmitter sets the UBT emitter service for the blockchain.
+// If reorgMarkerEnabled is false, diff emission continues but reorg markers are suppressed.
+func (bc *BlockChain) SetUBTEmitter(emitter *ubtemit.Service, reorgMarkerEnabled bool) {
+	bc.emitter = emitter
+	bc.ubtReorgMarkerEnabled = reorgMarkerEnabled
 }

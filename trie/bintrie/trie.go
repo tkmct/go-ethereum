@@ -232,6 +232,94 @@ func (t *BinaryTrie) GetAccount(addr common.Address) (*types.StateAccount, error
 	return acc, nil
 }
 
+// GetCode reconstructs the full contract bytecode from the chunked form stored
+// in the trie. Code is stored as 32-byte chunks where byte[0] is a pushdata
+// prefix and bytes[1:32] contain 31 bytes of actual code. Returns nil if the
+// account has no code.
+func (t *BinaryTrie) GetCode(addr common.Address) ([]byte, error) {
+	// Read header stem values to get code size from basicData
+	var (
+		values [][]byte
+		err    error
+		key    = GetBinaryTreeKey(addr, zero[:])
+	)
+	switch r := t.root.(type) {
+	case *InternalNode:
+		values, err = r.GetValuesAtStem(key[:StemSize], t.nodeResolver)
+	case *StemNode:
+		values = r.Values
+	case Empty:
+		return nil, nil
+	default:
+		return nil, errInvalidRootType
+	}
+	if err != nil {
+		return nil, fmt.Errorf("GetCode (%x) error: %v", addr, err)
+	}
+	if values == nil || values[BasicDataLeafKey] == nil {
+		return nil, nil
+	}
+
+	// Extract code size from basicData[4:8] (BigEndian uint32)
+	codeSize := binary.BigEndian.Uint32(values[BasicDataLeafKey][BasicDataCodeSizeOffset-1 : BasicDataCodeSizeOffset+3])
+	if codeSize == 0 {
+		return nil, nil
+	}
+
+	// Reconstruct code from chunks.
+	// Mirrors the storage layout from UpdateContractCode:
+	// - Chunks 0-127: stem from offset LE(128), at group offsets 128-255
+	// - Chunks 128-383: stem from offset LE(256), at group offsets 0-255
+	// - Chunks 384+: new stem every 256 chunks
+	code := make([]byte, 0, codeSize)
+	remaining := int(codeSize)
+	chunkCount := (int(codeSize) + StemSize - 1) / StemSize
+
+	var currentValues [][]byte
+
+	for chunknr := 0; chunknr < chunkCount; chunknr++ {
+		groupOffset := (uint64(chunknr) + 128) % StemNodeWidth
+
+		// Load new stem values when starting a new group (same condition as UpdateContractCode)
+		if groupOffset == 0 || chunknr == 0 {
+			var offset [HashSize]byte
+			binary.LittleEndian.PutUint64(offset[24:], uint64(chunknr)+128)
+			stemKey := GetBinaryTreeKey(addr, offset[:])
+
+			switch r := t.root.(type) {
+			case *InternalNode:
+				currentValues, err = r.GetValuesAtStem(stemKey[:StemSize], t.nodeResolver)
+			case *StemNode:
+				if bytes.Equal(r.Stem, stemKey[:StemSize]) {
+					currentValues = r.Values
+				} else {
+					currentValues = nil
+				}
+			default:
+				return nil, fmt.Errorf("GetCode: unexpected root type %T", t.root)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("GetCode (%x) stem load at chunk %d: %v", addr, chunknr, err)
+			}
+		}
+
+		if currentValues == nil {
+			return nil, fmt.Errorf("GetCode (%x): no stem found for chunk %d", addr, chunknr)
+		}
+		chunk := currentValues[groupOffset]
+		if chunk == nil {
+			return nil, fmt.Errorf("GetCode (%x): missing chunk %d at offset %d", addr, chunknr, groupOffset)
+		}
+
+		// Skip byte[0] (pushdata prefix), copy bytes[1:1+min(31, remaining)]
+		n := min(StemSize, remaining)
+		code = append(code, chunk[1:1+n]...)
+		remaining -= n
+	}
+
+	return code, nil
+}
+
 // GetStorage returns the value for key stored in the trie. The value bytes must
 // not be modified by the caller. If a node was not found in the database, a
 // trie.MissingNodeError is returned.
@@ -250,14 +338,9 @@ func (t *BinaryTrie) UpdateAccount(addr common.Address, acc *types.StateAccount,
 	binary.BigEndian.PutUint32(basicData[BasicDataCodeSizeOffset-1:], uint32(codeLen))
 	binary.BigEndian.PutUint64(basicData[BasicDataNonceOffset:], acc.Nonce)
 
-	// Because the balance is a max of 16 bytes, truncate
-	// the extra values. This happens in devmode, where
-	// 0xff**HashSize is allocated to the developer account.
 	balanceBytes := acc.Balance.Bytes()
-	// TODO: reduce the size of the allocation in devmode, then panic instead
-	// of truncating.
 	if len(balanceBytes) > 16 {
-		balanceBytes = balanceBytes[16:]
+		return fmt.Errorf("BinaryTrie: balance exceeds 128-bit limit for %s: %d bytes", addr, len(balanceBytes))
 	}
 	copy(basicData[HashSize-len(balanceBytes):], balanceBytes[:])
 	values[BasicDataLeafKey] = basicData[:]
@@ -349,7 +432,78 @@ func (t *BinaryTrie) NodeIterator(startKey []byte) (trie.NodeIterator, error) {
 // nodes of the longest existing prefix of the key (at least the root), ending
 // with the node that proves the absence of the key.
 func (t *BinaryTrie) Prove(key []byte, proofDb ethdb.KeyValueWriter) error {
-	panic("not implemented")
+	// Validate key length - binary trie keys must be exactly 32 bytes
+	if len(key) != HashSize {
+		return fmt.Errorf("binary trie key must be %d bytes, got %d", HashSize, len(key))
+	}
+
+	// Walk the trie from root to leaf, collecting all nodes on the path
+	node := t.root
+	depth := 0
+
+	for {
+		if node == nil {
+			// Reached end of path without finding a leaf
+			break
+		}
+
+		switch n := node.(type) {
+		case *InternalNode:
+			// Serialize and store this internal node in the proof
+			encoded := SerializeNode(n)
+			hash := n.Hash()
+			if err := proofDb.Put(hash[:], encoded); err != nil {
+				return fmt.Errorf("failed to store internal node at depth %d: %w", depth, err)
+			}
+
+			// Follow the key bit to the next node
+			bit := key[n.depth/8] >> (7 - (n.depth % 8)) & 1
+			if bit == 0 {
+				node = n.left
+			} else {
+				node = n.right
+			}
+			depth = n.depth + 1
+
+		case *StemNode:
+			// Serialize and store the stem node in the proof
+			encoded := SerializeNode(n)
+			hash := n.Hash()
+			if err := proofDb.Put(hash[:], encoded); err != nil {
+				return fmt.Errorf("failed to store stem node: %w", err)
+			}
+			// Reached leaf - proof is complete
+			return nil
+
+		case HashedNode:
+			// Need to resolve the hashed node first
+			path, err := keyToPath(depth, key)
+			if err != nil {
+				return fmt.Errorf("failed to generate path at depth %d: %w", depth, err)
+			}
+			data, err := t.nodeResolver(path, common.Hash(n))
+			if err != nil {
+				return fmt.Errorf("failed to resolve hashed node at depth %d: %w", depth, err)
+			}
+			resolved, err := DeserializeNode(data, depth)
+			if err != nil {
+				return fmt.Errorf("failed to deserialize node at depth %d: %w", depth, err)
+			}
+			// Replace with resolved node and continue
+			node = resolved
+			continue
+
+		case Empty:
+			// Absence proof - the key doesn't exist
+			// For empty nodes, we've already stored all nodes on the path up to this point
+			return nil
+
+		default:
+			return fmt.Errorf("unknown node type at depth %d: %T", depth, node)
+		}
+	}
+
+	return nil
 }
 
 // Copy creates a deep copy of the trie.
