@@ -17,6 +17,7 @@
 package ubtemit
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -155,12 +156,16 @@ func (s *Service) MarkRawKeyFailure(blockNumber uint64, err error) {
 		return
 	}
 
+	reasonCode := "unknown"
+	if err != nil && strings.Contains(err.Error(), "ErrRawStorageKeyMissing") {
+		reasonCode = "ErrRawStorageKeyMissing"
+	}
 	s.degraded.Store(true)
 	emitterDegradedTotal.Inc(1)
 	emitterDegradedGauge.Update(1)
 	emitterRawKeyFailures.Inc(1)
 	emitterAppendErrors.Inc(1)
-	log.Error("UBT invariant violation: raw storage key unavailable", "block", blockNumber, "err", err)
+	log.Error("UBT invariant violation: raw storage key unavailable", "block", blockNumber, "reasonCode", reasonCode, "err", err)
 
 	// Persist failure checkpoint for diagnostics and restart awareness
 	s.store.PersistFailureCheckpoint(blockNumber, err)

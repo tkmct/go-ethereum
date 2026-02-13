@@ -117,34 +117,68 @@ func (r *OutboxReader) connectLocked() error {
 
 // getClient returns the current RPC client, connecting if necessary.
 func (r *OutboxReader) getClient() (*rpc.Client, error) {
-	// Keep lock scope narrow: only wait/retry on reconnection outside critical section.
-	r.mu.Lock()
-	for {
-		if r.client != nil {
-			c := r.client
-			r.mu.Unlock()
-			return c, nil
-		}
-		if r.closed {
-			r.mu.Unlock()
-			return nil, fmt.Errorf("outbox reader is closed")
-		}
+	return r.acquireClient()
+}
 
-		timeSinceReconnect := time.Since(r.lastReconnect)
-		if timeSinceReconnect < r.reconnectDelay {
-			waitTime := r.reconnectDelay - timeSinceReconnect
+// dialWithBackoff establishes a connection while honoring reconnectDelay.
+func (r *OutboxReader) dialWithBackoff() error {
+	for {
+		var (
+			waitTime time.Duration
+			closed   bool
+		)
+		r.mu.Lock()
+		if r.client != nil {
 			r.mu.Unlock()
-			log.Debug("Throttling reconnection attempt", "wait", waitTime)
+			return nil
+		}
+		closed = r.closed
+		if !closed {
+			timeSinceReconnect := time.Since(r.lastReconnect)
+			if timeSinceReconnect < r.reconnectDelay {
+				waitTime = r.reconnectDelay - timeSinceReconnect
+			}
+		}
+		r.mu.Unlock()
+		if closed {
+			return fmt.Errorf("outbox reader is closed")
+		}
+		if waitTime > 0 {
+			log.Debug("Throttling reconnection attempt", "endpoint", r.endpoint, "wait", waitTime)
 			time.Sleep(waitTime)
-			r.mu.Lock()
 			continue
 		}
 
+		r.mu.Lock()
 		err := r.connectLocked()
+		r.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+}
+
+// acquireClient returns an active client, reconnecting if needed.
+func (r *OutboxReader) acquireClient() (*rpc.Client, error) {
+	r.mu.Lock()
+	if r.client != nil {
 		c := r.client
 		r.mu.Unlock()
-		return c, err
+		return c, nil
 	}
+	r.mu.Unlock()
+
+	if err := r.dialWithBackoff(); err != nil {
+		return nil, err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.client == nil {
+		return nil, fmt.Errorf("outbox reader has no active RPC client")
+	}
+	return r.client, nil
 }
 
 // ReadEvent reads an outbox event by sequence number.
@@ -160,7 +194,7 @@ func (r *OutboxReader) ReadEvent(seq uint64) (*ubtemit.OutboxEnvelope, error) {
 	var result *rpcOutboxEvent
 	err = client.CallContext(ctx, &result, "ubt_getEvent", hexutil.Uint64(seq))
 	if err != nil {
-		r.resetClient(err)
+		r.resetConnection(err, "ubt_getEvent")
 		return nil, fmt.Errorf("ubt_getEvent(%d): %w", seq, err)
 	}
 	if result == nil {
@@ -181,7 +215,7 @@ func (r *OutboxReader) ReadRange(fromSeq, toSeq uint64) ([]*ubtemit.OutboxEnvelo
 	var results []rpcOutboxEvent
 	err = client.CallContext(ctx, &results, "ubt_getEvents", hexutil.Uint64(fromSeq), hexutil.Uint64(toSeq))
 	if err != nil {
-		r.resetClient(err)
+		r.resetConnection(err, "ubt_getEvents")
 		return nil, fmt.Errorf("ubt_getEvents(%d, %d): %w", fromSeq, toSeq, err)
 	}
 	envs := make([]*ubtemit.OutboxEnvelope, len(results))
@@ -203,7 +237,7 @@ func (r *OutboxReader) LatestSeq() (uint64, error) {
 	var result hexutil.Uint64
 	err = client.CallContext(ctx, &result, "ubt_latestSeq")
 	if err != nil {
-		r.resetClient(err)
+		r.resetConnection(err, "ubt_latestSeq")
 		return 0, fmt.Errorf("ubt_latestSeq: %w", err)
 	}
 	return uint64(result), nil
@@ -226,22 +260,22 @@ func (r *OutboxReader) ReadAccountRange(
 	var result rpcStateDump
 	err = client.CallContext(ctx, &result, "debug_accountRange", blockNrOrHash, start, maxResults, nocode, nostorage, incompletes)
 	if err != nil {
-		r.resetClient(err)
+		r.resetConnection(err, "debug_accountRange")
 		return nil, fmt.Errorf("debug_accountRange: %w", err)
 	}
 	return &result, nil
 }
 
-// resetClient closes the current client to force reconnection on next call.
-// This handles scenarios where the RPC server was restarted or the
-// network connection dropped.
-func (r *OutboxReader) resetClient(err error) {
+// resetConnection closes the current client to force reconnection on next call.
+// This handles scenarios where the RPC server was restarted or the network dropped.
+func (r *OutboxReader) resetConnection(err error, reason string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.client != nil {
 		r.client.Close()
 		r.client = nil
-		log.Warn("UBT outbox RPC connection reset due to error", "err", err)
+		r.lastReconnect = time.Now()
+		log.Warn("UBT outbox RPC connection reset", "endpoint", r.endpoint, "reason", reason, "err", err, "ts", r.lastReconnect)
 	}
 }
 

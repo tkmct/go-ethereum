@@ -356,14 +356,14 @@ type BlockChain struct {
 	stopping      atomic.Bool // false if chain is running, true when stopped
 	procInterrupt atomic.Bool // interrupt signaler for block processing
 
-	engine     consensus.Engine
-	validator  Validator // Block and state validator interface
-	prefetcher Prefetcher
-	processor  Processor // Block transaction processor interface
-	logger     *tracing.Hooks
-	stateSizer *state.SizeTracker // State size tracking
-	emitter                *ubtemit.Service // UBT conversion emitter (optional)
-	ubtReorgMarkerEnabled  bool            // Whether to emit reorg markers (default: true when emitter is set)
+	engine                consensus.Engine
+	validator             Validator // Block and state validator interface
+	prefetcher            Prefetcher
+	processor             Processor // Block transaction processor interface
+	logger                *tracing.Hooks
+	stateSizer            *state.SizeTracker // State size tracking
+	emitter               *ubtemit.Service   // UBT conversion emitter (optional)
+	ubtReorgMarkerEnabled bool               // Whether to emit reorg markers (default: true when emitter is set)
 
 	// Pending UBT diff buffer for canonical-only emission.
 	// Key: block hash, Value: diff data. Protected by chainmu.
@@ -1699,12 +1699,7 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 				// Buffer the diff for canonical-only emission.
 				// Emission happens in writeBlockAndSetHead or SetCanonical
 				// AFTER reorg markers, ensuring correct ordering.
-				bc.pendingUBTDiffs[block.Hash()] = &pendingUBTDiff{
-					blockNumber: block.NumberU64(),
-					blockHash:   block.Hash(),
-					parentHash:  block.ParentHash(),
-					diff:        ubtDiff,
-				}
+				bc.bufferPendingOutboxDiff(block, ubtDiff)
 			}
 		}
 		root = r
@@ -1795,30 +1790,8 @@ func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types
 	// Emit buffered UBT diff now that this block is canonical.
 	// This runs AFTER reorg markers (emitted in bc.reorg above),
 	// ensuring correct marker-before-diff ordering.
-	if bc.emitter != nil {
-		if pending, ok := bc.pendingUBTDiffs[block.Hash()]; ok {
-			bc.emitter.EmitDiff(pending.blockNumber, pending.blockHash, pending.parentHash, pending.diff)
-			delete(bc.pendingUBTDiffs, block.Hash())
-		}
-	}
-
-	// Clean up stale pending diffs — only remove those significantly behind current block.
-	// During reorgs, valid new-branch diffs may be buffered but not yet canonicalized,
-	// so we must preserve recent entries. Use block number distance instead of map size.
-	if len(bc.pendingUBTDiffs) > 64 {
-		currentBlock := block.NumberU64()
-		const maxDiffAge = uint64(256) // keep diffs within 256 blocks of head
-		pruned := 0
-		for hash, pending := range bc.pendingUBTDiffs {
-			if currentBlock > maxDiffAge && pending.blockNumber < currentBlock-maxDiffAge {
-				delete(bc.pendingUBTDiffs, hash)
-				pruned++
-			}
-		}
-		if pruned > 0 {
-			log.Warn("Pruned stale pending UBT diffs", "pruned", pruned, "remaining", len(bc.pendingUBTDiffs), "headBlock", currentBlock)
-		}
-	}
+	bc.emitPendingOutboxDiff(block.Hash())
+	bc.pruneStalePendingOutboxDiffs(block.NumberU64())
 
 	bc.chainFeed.Send(ChainEvent{
 		Header:       block.Header(),
@@ -2752,12 +2725,7 @@ func (bc *BlockChain) SetCanonical(head *types.Block) (common.Hash, error) {
 	bc.writeHeadBlock(head)
 
 	// Emit buffered UBT diff for newly canonical block.
-	if bc.emitter != nil {
-		if pending, ok := bc.pendingUBTDiffs[head.Hash()]; ok {
-			bc.emitter.EmitDiff(pending.blockNumber, pending.blockHash, pending.parentHash, pending.diff)
-			delete(bc.pendingUBTDiffs, head.Hash())
-		}
-	}
+	bc.emitPendingOutboxDiff(head.Hash())
 
 	// Emit events
 	receipts, logs := bc.collectReceiptsAndLogs(head, false)
@@ -3005,6 +2973,44 @@ type pendingUBTDiff struct {
 	blockHash   common.Hash
 	parentHash  common.Hash
 	diff        *ubtemit.QueuedDiffV1
+}
+
+func (bc *BlockChain) bufferPendingOutboxDiff(block *types.Block, diff *ubtemit.QueuedDiffV1) {
+	bc.pendingUBTDiffs[block.Hash()] = &pendingUBTDiff{
+		blockNumber: block.NumberU64(),
+		blockHash:   block.Hash(),
+		parentHash:  block.ParentHash(),
+		diff:        diff,
+	}
+}
+
+func (bc *BlockChain) emitPendingOutboxDiff(blockHash common.Hash) {
+	if bc.emitter == nil {
+		return
+	}
+	if pending, ok := bc.pendingUBTDiffs[blockHash]; ok {
+		bc.emitter.EmitDiff(pending.blockNumber, pending.blockHash, pending.parentHash, pending.diff)
+		delete(bc.pendingUBTDiffs, blockHash)
+	}
+}
+
+func (bc *BlockChain) pruneStalePendingOutboxDiffs(headBlock uint64) {
+	// During reorgs, valid new-branch diffs may be buffered but not yet canonicalized,
+	// so preserve recent entries and only prune old ones.
+	if len(bc.pendingUBTDiffs) <= 64 {
+		return
+	}
+	const maxDiffAge = uint64(256) // keep diffs within 256 blocks of head
+	pruned := 0
+	for hash, pending := range bc.pendingUBTDiffs {
+		if headBlock > maxDiffAge && pending.blockNumber < headBlock-maxDiffAge {
+			delete(bc.pendingUBTDiffs, hash)
+			pruned++
+		}
+	}
+	if pruned > 0 {
+		log.Warn("Pruned stale pending UBT diffs", "pruned", pruned, "remaining", len(bc.pendingUBTDiffs), "headBlock", headBlock)
+	}
 }
 
 // SetUBTEmitter sets the UBT emitter service for the blockchain.

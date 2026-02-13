@@ -614,3 +614,52 @@ func TestOutboxStore_ConcurrentAppends(t *testing.T) {
 		t.Fatalf("expected latest seq 9, got %d", store.LatestSeq())
 	}
 }
+
+func TestOutboxStore_CompactBelow_AllowsLatestPlusOne(t *testing.T) {
+	store, dir := newTestOutboxStore(t)
+	defer os.RemoveAll(dir)
+	defer store.Close()
+
+	for i := 0; i < 3; i++ {
+		if _, err := store.Append(&OutboxEnvelope{
+			Version: EnvelopeVersionV1,
+			Kind:    KindDiff,
+			Payload: []byte{byte(i)},
+		}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	// latest=2, safeSeq=3 should compact all persisted events [0,2].
+	count, err := store.CompactBelow(3)
+	if err != nil {
+		t.Fatalf("CompactBelow latest+1 failed: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("expected 3 pruned events, got %d", count)
+	}
+	for seq := uint64(0); seq <= 2; seq++ {
+		if _, err := store.Read(seq); !errors.Is(err, ErrEventNotFound) {
+			t.Fatalf("expected seq %d to be pruned, got err=%v", seq, err)
+		}
+	}
+}
+
+func TestOutboxStore_CompactBelow_RejectsBeyondLatestPlusOne(t *testing.T) {
+	store, dir := newTestOutboxStore(t)
+	defer os.RemoveAll(dir)
+	defer store.Close()
+
+	for i := 0; i < 3; i++ {
+		if _, err := store.Append(&OutboxEnvelope{
+			Version: EnvelopeVersionV1,
+			Kind:    KindDiff,
+			Payload: []byte{byte(i)},
+		}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	// latest=2, safeSeq=4 exceeds allowed latest+1 boundary.
+	if _, err := store.CompactBelow(4); err == nil {
+		t.Fatal("expected boundary error for safeSeq beyond latest+1")
+	}
+}

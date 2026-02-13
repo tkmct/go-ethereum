@@ -23,8 +23,8 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/rpc"
 )
 
 // TestQueryAPI_CallUBT_NoApplier tests that CallUBT returns error when applier is nil.
@@ -38,7 +38,7 @@ func TestQueryAPI_CallUBT_NoApplier(t *testing.T) {
 		"data": "0xabcdef",
 	}
 
-	result, err := api.CallUBT(ctx, args)
+	result, err := api.CallUBT(ctx, args, nil, nil, nil)
 	if err == nil {
 		t.Fatal("Expected error for CallUBT without applier, got nil")
 	}
@@ -56,9 +56,8 @@ func TestQueryAPI_ExecutionWitnessUBT_NoApplier(t *testing.T) {
 	api := NewQueryAPI(consumer)
 	ctx := context.Background()
 
-	blockNumber := hexutil.Uint64(12345)
-
-	result, err := api.ExecutionWitnessUBT(ctx, blockNumber)
+	latest := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
+	result, err := api.ExecutionWitnessUBT(ctx, &latest)
 	if err == nil {
 		t.Fatal("Expected error for ExecutionWitnessUBT without applier, got nil")
 	}
@@ -70,7 +69,48 @@ func TestQueryAPI_ExecutionWitnessUBT_NoApplier(t *testing.T) {
 	}
 }
 
-// TestCallUBT_SimpleBalance tests CallUBT to read balance of a funded account.
+func TestQueryAPI_CallUBT_Disabled(t *testing.T) {
+	applier := newTestApplier(t)
+	defer applier.Close()
+
+	consumer := &Consumer{
+		cfg:     &Config{ExecutionClassRPCEnabled: false},
+		applier: applier,
+	}
+	api := NewQueryAPI(consumer)
+
+	_, err := api.CallUBT(context.Background(), map[string]any{
+		"to": "0x1234567890123456789012345678901234567890",
+	}, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected disabled error")
+	}
+	if !strings.Contains(err.Error(), "execution-class RPC disabled") {
+		t.Fatalf("expected disabled error, got: %v", err)
+	}
+}
+
+func TestQueryAPI_ExecutionWitnessUBT_Disabled(t *testing.T) {
+	applier := newTestApplier(t)
+	defer applier.Close()
+
+	consumer := &Consumer{
+		cfg:     &Config{ExecutionClassRPCEnabled: false},
+		applier: applier,
+	}
+	api := NewQueryAPI(consumer)
+
+	latest := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
+	_, err := api.ExecutionWitnessUBT(context.Background(), &latest)
+	if err == nil {
+		t.Fatal("expected disabled error")
+	}
+	if !strings.Contains(err.Error(), "execution-class RPC disabled") {
+		t.Fatalf("expected disabled error, got: %v", err)
+	}
+}
+
+// TestCallUBT_SimpleBalance tests CallUBT success when execution RPC is enabled.
 func TestCallUBT_SimpleBalance(t *testing.T) {
 	applier := newTestApplier(t)
 	defer applier.Close()
@@ -86,7 +126,7 @@ func TestCallUBT_SimpleBalance(t *testing.T) {
 	}
 
 	consumer := &Consumer{
-		cfg:     &Config{ChainID: 1},
+		cfg:     &Config{ChainID: 1, ExecutionClassRPCEnabled: true},
 		applier: applier,
 		state: ConsumerState{
 			AppliedSeq:   1,
@@ -100,7 +140,7 @@ func TestCallUBT_SimpleBalance(t *testing.T) {
 	// Call to the funded address (no data = just check it doesn't error)
 	result, err := api.CallUBT(ctx, map[string]any{
 		"to": addr.Hex(),
-	})
+	}, nil, nil, nil)
 	// A simple call to an EOA with no code should succeed with empty result
 	if err != nil {
 		t.Fatalf("CallUBT should succeed for EOA call: %v", err)
@@ -127,7 +167,7 @@ func TestCallUBT_NonExistentAccount(t *testing.T) {
 	}
 
 	consumer := &Consumer{
-		cfg:     &Config{ChainID: 1},
+		cfg:     &Config{ChainID: 1, ExecutionClassRPCEnabled: true},
 		applier: applier,
 		state: ConsumerState{
 			AppliedSeq:   1,
@@ -141,7 +181,7 @@ func TestCallUBT_NonExistentAccount(t *testing.T) {
 	nonExistent := common.HexToAddress("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
 	result, err := api.CallUBT(ctx, map[string]any{
 		"to": nonExistent.Hex(),
-	})
+	}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("CallUBT to non-existent should succeed: %v", err)
 	}
@@ -150,39 +190,78 @@ func TestCallUBT_NonExistentAccount(t *testing.T) {
 	}
 }
 
-// TestExecutionWitnessUBT_Basic tests that ExecutionWitnessUBT returns pre/post state roots.
-func TestExecutionWitnessUBT_Basic(t *testing.T) {
+func TestCallUBT_OverridesUnsupported(t *testing.T) {
+	applier := newTestApplier(t)
+	defer applier.Close()
+
+	consumer := &Consumer{
+		cfg: &Config{
+			ExecutionClassRPCEnabled: true,
+		},
+		applier: applier,
+		state: ConsumerState{
+			AppliedBlock: 1,
+			AppliedRoot:  applier.Root(),
+		},
+	}
+	api := NewQueryAPI(consumer)
+	ctx := context.Background()
+
+	_, err := api.CallUBT(ctx, map[string]any{
+		"to": "0x1234567890123456789012345678901234567890",
+	}, nil, map[string]any{"0xabc": map[string]any{}}, nil)
+	if err == nil {
+		t.Fatal("expected stateOverrides unsupported error")
+	}
+	if !strings.Contains(err.Error(), "stateOverrides are not yet supported") {
+		t.Fatalf("unexpected stateOverrides error: %v", err)
+	}
+
+	_, err = api.CallUBT(ctx, map[string]any{
+		"to": "0x1234567890123456789012345678901234567890",
+	}, nil, nil, map[string]any{"number": "0x1"})
+	if err == nil {
+		t.Fatal("expected blockOverrides unsupported error")
+	}
+	if !strings.Contains(err.Error(), "blockOverrides are not yet supported") {
+		t.Fatalf("unexpected blockOverrides error: %v", err)
+	}
+}
+
+func TestCallUBT_BlockSelectorVariants(t *testing.T) {
 	applier := newTestApplier(t)
 	defer applier.Close()
 
 	addr := common.HexToAddress("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-
-	// Block 1: create account
-	diff1 := makeDiff(addr, 1, big.NewInt(1000))
-	if _, err := applier.ApplyDiff(diff1); err != nil {
-		t.Fatalf("ApplyDiff #1: %v", err)
+	if _, err := applier.ApplyDiff(makeDiff(addr, 1, big.NewInt(1000))); err != nil {
+		t.Fatalf("ApplyDiff block1: %v", err)
 	}
 	if err := applier.CommitAt(1); err != nil {
-		t.Fatalf("Commit #1: %v", err)
+		t.Fatalf("Commit block1: %v", err)
 	}
 	root1 := applier.Root()
 
-	// Block 2: update balance
-	diff2 := makeDiff(addr, 2, big.NewInt(2000))
-	if _, err := applier.ApplyDiff(diff2); err != nil {
-		t.Fatalf("ApplyDiff #2: %v", err)
+	if _, err := applier.ApplyDiff(makeDiff(addr, 2, big.NewInt(2000))); err != nil {
+		t.Fatalf("ApplyDiff block2: %v", err)
 	}
 	if err := applier.CommitAt(2); err != nil {
-		t.Fatalf("Commit #2: %v", err)
+		t.Fatalf("Commit block2: %v", err)
 	}
 	root2 := applier.Root()
 
-	// Write UBT block roots
 	db := rawdb.NewMemoryDatabase()
 	rawdb.WriteUBTBlockRoot(db, 1, root1)
 	rawdb.WriteUBTBlockRoot(db, 2, root2)
+	hash1 := common.HexToHash("0x1111")
+	hash2 := common.HexToHash("0x2222")
+	rawdb.WriteUBTCanonicalBlock(db, 1, hash1, common.Hash{})
+	rawdb.WriteUBTCanonicalBlock(db, 2, hash2, hash1)
 
 	consumer := &Consumer{
+		cfg: &Config{
+			ExecutionClassRPCEnabled: true,
+			TrieDBStateHistory:       128,
+		},
 		applier: applier,
 		db:      db,
 		state: ConsumerState{
@@ -192,23 +271,95 @@ func TestExecutionWitnessUBT_Basic(t *testing.T) {
 		},
 	}
 	api := NewQueryAPI(consumer)
+	callArgs := map[string]any{"to": addr.Hex()}
+
+	t.Run("nil selector uses latest", func(t *testing.T) {
+		res, err := api.CallUBT(context.Background(), callArgs, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("CallUBT nil selector: %v", err)
+		}
+		if len(res) != 0 {
+			t.Fatalf("expected empty return for EOA call, got %x", res)
+		}
+	})
+
+	t.Run("latest selector", func(t *testing.T) {
+		latest := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
+		res, err := api.CallUBT(context.Background(), callArgs, &latest, nil, nil)
+		if err != nil {
+			t.Fatalf("CallUBT latest selector: %v", err)
+		}
+		if len(res) != 0 {
+			t.Fatalf("expected empty return for EOA call, got %x", res)
+		}
+	})
+
+	t.Run("number selector", func(t *testing.T) {
+		block1 := rpc.BlockNumberOrHashWithNumber(1)
+		res, err := api.CallUBT(context.Background(), callArgs, &block1, nil, nil)
+		if err != nil {
+			t.Fatalf("CallUBT number selector: %v", err)
+		}
+		if len(res) != 0 {
+			t.Fatalf("expected empty return for EOA call, got %x", res)
+		}
+	})
+
+	t.Run("hash selector", func(t *testing.T) {
+		selector := rpc.BlockNumberOrHashWithHash(hash1, true)
+		res, err := api.CallUBT(context.Background(), callArgs, &selector, nil, nil)
+		if err != nil {
+			t.Fatalf("CallUBT hash selector: %v", err)
+		}
+		if len(res) != 0 {
+			t.Fatalf("expected empty return for EOA call, got %x", res)
+		}
+	})
+}
+
+// TestExecutionWitnessUBT_Basic verifies ExecutionWitnessUBT returns deterministic partial witness.
+func TestExecutionWitnessUBT_Basic(t *testing.T) {
+	applier := newTestApplier(t)
+	defer applier.Close()
+
+	addr := common.HexToAddress("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+	diff := makeDiff(addr, 1, big.NewInt(1000))
+	if _, err := applier.ApplyDiff(diff); err != nil {
+		t.Fatalf("ApplyDiff: %v", err)
+	}
+	if err := applier.CommitAt(1); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	db := rawdb.NewMemoryDatabase()
+	rawdb.WriteUBTBlockRoot(db, 1, applier.Root())
+
+	consumer := &Consumer{
+		cfg: &Config{
+			ExecutionClassRPCEnabled: true,
+			TrieDBStateHistory:       128,
+		},
+		applier: applier,
+		db:      db,
+		state: ConsumerState{
+			AppliedSeq:   2,
+			AppliedBlock: 2,
+			AppliedRoot:  applier.Root(),
+		},
+	}
+	api := NewQueryAPI(consumer)
 	ctx := context.Background()
 
-	result, err := api.ExecutionWitnessUBT(ctx, hexutil.Uint64(2))
+	block1 := rpc.BlockNumberOrHashWithNumber(1)
+	result, err := api.ExecutionWitnessUBT(ctx, &block1)
 	if err != nil {
-		t.Fatalf("ExecutionWitnessUBT: %v", err)
+		t.Fatalf("ExecutionWitnessUBT should succeed: %v", err)
 	}
-	if result == nil {
-		t.Fatal("expected non-nil result")
+	if status, ok := result["status"].(string); !ok || status == "" {
+		t.Fatalf("expected witness status field, got: %#v", result)
 	}
-	if result["blockNumber"] != uint64(2) {
-		t.Errorf("expected blockNumber=2, got %v", result["blockNumber"])
-	}
-	if result["preStateRoot"] != root1 {
-		t.Errorf("expected preStateRoot=%s, got %v", root1, result["preStateRoot"])
-	}
-	if result["postStateRoot"] != root2 {
-		t.Errorf("expected postStateRoot=%s, got %v", root2, result["postStateRoot"])
+	if root, ok := result["stateRoot"].(common.Hash); !ok || root == (common.Hash{}) {
+		t.Fatalf("expected non-zero stateRoot, got: %#v", result["stateRoot"])
 	}
 }
 
@@ -218,6 +369,7 @@ func TestExecutionWitnessUBT_AheadOfHead(t *testing.T) {
 	defer applier.Close()
 
 	consumer := &Consumer{
+		cfg:     &Config{ExecutionClassRPCEnabled: true},
 		applier: applier,
 		state: ConsumerState{
 			AppliedSeq:   5,
@@ -228,12 +380,41 @@ func TestExecutionWitnessUBT_AheadOfHead(t *testing.T) {
 	api := NewQueryAPI(consumer)
 	ctx := context.Background()
 
-	_, err := api.ExecutionWitnessUBT(ctx, hexutil.Uint64(10))
+	block10 := rpc.BlockNumberOrHashWithNumber(10)
+	_, err := api.ExecutionWitnessUBT(ctx, &block10)
 	if err == nil {
 		t.Fatal("expected error for ahead-of-head block")
 	}
-	if !strings.Contains(err.Error(), "not yet applied") {
-		t.Errorf("expected 'not yet applied' error, got: %v", err)
+	if !strings.Contains(err.Error(), "state not yet available") {
+		t.Errorf("expected state not yet available error, got: %v", err)
+	}
+}
+
+func TestExecutionWitnessUBT_HistoryPruned(t *testing.T) {
+	applier := newTestApplier(t)
+	defer applier.Close()
+
+	consumer := &Consumer{
+		cfg: &Config{
+			ExecutionClassRPCEnabled: true,
+			TrieDBStateHistory:       1,
+		},
+		applier: applier,
+		state: ConsumerState{
+			AppliedSeq:   5,
+			AppliedBlock: 5,
+			AppliedRoot:  common.Hash{0xab},
+		},
+	}
+	api := NewQueryAPI(consumer)
+
+	block3 := rpc.BlockNumberOrHashWithNumber(3)
+	_, err := api.ExecutionWitnessUBT(context.Background(), &block3)
+	if err == nil {
+		t.Fatal("expected history-pruned error")
+	}
+	if !strings.Contains(err.Error(), "outside retained UBT state history window") {
+		t.Fatalf("expected history window error, got: %v", err)
 	}
 }
 
@@ -433,7 +614,7 @@ func TestCallUBT_ChainID(t *testing.T) {
 		}
 	})
 
-	// End-to-end: CallUBT with non-default chain ID doesn't error
+	// End-to-end: CallUBT works with non-default chain ID when execution RPC is enabled.
 	t.Run("CallUBT with sepolia chain ID", func(t *testing.T) {
 		applier := newTestApplier(t)
 		defer applier.Close()
@@ -448,7 +629,7 @@ func TestCallUBT_ChainID(t *testing.T) {
 		}
 
 		consumer := &Consumer{
-			cfg:     &Config{ChainID: 11155111},
+			cfg:     &Config{ChainID: 11155111, ExecutionClassRPCEnabled: true},
 			applier: applier,
 			state: ConsumerState{
 				AppliedSeq:   1,
@@ -460,7 +641,7 @@ func TestCallUBT_ChainID(t *testing.T) {
 
 		result, err := api.CallUBT(context.Background(), map[string]any{
 			"to": addr.Hex(),
-		})
+		}, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("CallUBT with sepolia chain ID should succeed: %v", err)
 		}

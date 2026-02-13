@@ -691,3 +691,51 @@ func TestStatus_WithEmitterService(t *testing.T) {
 		t.Errorf("degraded should be false initially, got true")
 	}
 }
+
+func TestCompactOutboxBelow_AllowsLatestPlusOne(t *testing.T) {
+	store, dir := newTestOutboxStore(t)
+	defer os.RemoveAll(dir)
+	defer store.Close()
+
+	for i := 0; i < 3; i++ {
+		if _, err := store.Append(&ubtemit.OutboxEnvelope{
+			Version: ubtemit.EnvelopeVersionV1,
+			Kind:    ubtemit.KindDiff,
+			Payload: []byte{byte(i)},
+		}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	api := NewUBTOutboxAPI(&Ethereum{outboxStore: store})
+	// latest=2, safeSeq=3 should be accepted.
+	result, err := api.CompactOutboxBelow(context.Background(), hexutil.Uint64(3))
+	if err != nil {
+		t.Fatalf("CompactOutboxBelow latest+1 should succeed: %v", err)
+	}
+	if deleted, ok := result["deleted"].(int); !ok || deleted != 3 {
+		t.Fatalf("expected deleted=3, got %v (%T)", result["deleted"], result["deleted"])
+	}
+}
+
+func TestCompactOutboxBelow_RejectsBeyondLatestPlusOne(t *testing.T) {
+	store, dir := newTestOutboxStore(t)
+	defer os.RemoveAll(dir)
+	defer store.Close()
+
+	for i := 0; i < 2; i++ {
+		if _, err := store.Append(&ubtemit.OutboxEnvelope{
+			Version: ubtemit.EnvelopeVersionV1,
+			Kind:    ubtemit.KindDiff,
+			Payload: []byte{byte(i)},
+		}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	api := NewUBTOutboxAPI(&Ethereum{outboxStore: store})
+	// latest=1, safeSeq=4 should fail.
+	if _, err := api.CompactOutboxBelow(context.Background(), hexutil.Uint64(4)); err == nil {
+		t.Fatal("expected CompactOutboxBelow error beyond latest+1")
+	}
+}

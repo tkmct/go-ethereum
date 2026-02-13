@@ -187,19 +187,21 @@ func (api *UBTDebugAPI) GetUBTAccountProof(ctx context.Context, addr common.Addr
 	return &result, nil
 }
 
-// CallUBT executes a call against the UBT daemon state (Phase 7).
-func (api *UBTDebugAPI) CallUBT(ctx context.Context, args map[string]any) (hexutil.Bytes, error) {
+// CallUBT executes a call against the UBT daemon state.
+// Signature mirrors eth_call:
+//   debug_callUBT(callObject, blockNumberOrHash?, stateOverrides?, blockOverrides?)
+func (api *UBTDebugAPI) CallUBT(ctx context.Context, args map[string]any, blockNrOrHash *rpc.BlockNumberOrHash, stateOverrides map[string]any, blockOverrides map[string]any) (hexutil.Bytes, error) {
 	var result hexutil.Bytes
-	if err := api.callWithMetrics(ctx, &result, "ubt_callUBT", args); err != nil {
+	if err := api.callWithMetrics(ctx, &result, "ubt_callUBT", args, blockNrOrHash, stateOverrides, blockOverrides); err != nil {
 		return nil, err
 	}
 	return result, nil
 }
 
-// ExecutionWitnessUBT generates an execution witness from the UBT daemon (Phase 7).
-func (api *UBTDebugAPI) ExecutionWitnessUBT(ctx context.Context, blockNumber hexutil.Uint64) (map[string]any, error) {
+// ExecutionWitnessUBT generates an execution witness from the UBT daemon.
+func (api *UBTDebugAPI) ExecutionWitnessUBT(ctx context.Context, blockNrOrHash *rpc.BlockNumberOrHash) (map[string]any, error) {
 	var result map[string]any
-	if err := api.callWithMetrics(ctx, &result, "ubt_executionWitnessUBT", blockNumber); err != nil {
+	if err := api.callWithMetrics(ctx, &result, "ubt_executionWitnessUBT", blockNrOrHash); err != nil {
 		return nil, err
 	}
 	return result, nil

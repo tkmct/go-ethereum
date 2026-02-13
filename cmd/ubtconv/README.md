@@ -29,7 +29,7 @@ geth (outbox) --> [RPC] --> OutboxReader --> Consumer --> Applier --> UBT Trie D
                                                  |
                                                  v
                                          Consumer State DB
-                                         (checkpoint: pendingSeq, appliedSeq, appliedRoot)
+                                         (checkpoint: pendingSeq, pendingState, appliedSeq, appliedRoot)
 ```
 
 ### Consumer State Management
@@ -37,15 +37,31 @@ geth (outbox) --> [RPC] --> OutboxReader --> Consumer --> Applier --> UBT Trie D
 The consumer maintains crash-consistent state with these fields:
 
 - **PendingSeq**: The sequence number currently being processed (0 if none)
+- **PendingState**: `none` or `inflight` (explicit pending state machine)
+- **PendingUpdatedAt**: Unix timestamp of the last pending state transition
 - **AppliedSeq**: The last fully applied sequence number
 - **AppliedRoot**: The UBT root hash after applying AppliedSeq
 - **AppliedBlock**: The block number corresponding to AppliedSeq
 
 On startup, the consumer:
 1. Loads the checkpoint from disk
-2. If PendingSeq > 0, it means the last consume was interrupted - restart from AppliedSeq + 1
+2. If `PendingState=inflight`, the last consume was interrupted - clear pending metadata and restart from AppliedSeq + 1
 3. If the trie DB root doesn't match AppliedRoot, attempt anchor snapshot recovery
 4. Otherwise, continue from AppliedSeq + 1
+
+### Sequence and Compaction Semantics
+
+- **latestSeq**: The highest persisted outbox sequence (`nextSeq - 1`)
+- **nextSeq**: The next sequence ID to assign on append
+- **safeSeq (compaction)**: Delete events with `seq < safeSeq`
+- **Boundary rule**: `safeSeq <= latestSeq + 1`
+- `safeSeq = latestSeq + 1` means "compact all currently persisted events"
+
+### Error Categories
+
+- **Stop-class errors**: invariant failures that require operator action (for example deep reorg without archive replay)
+- **Degraded-class errors**: emitter/consumer continues canonical progress while surfacing alerts and checkpoints
+- **Raw key missing code**: `ErrRawStorageKeyMissing` is emitted as a structured reason code for pre-Cancun raw-key unavailability
 
 ### Commit Policy
 
@@ -78,7 +94,8 @@ When `--query-rpc-enabled` is set, the daemon exposes a JSON-RPC server with the
 | `ubt_getProof` | Merkle inclusion proof for an account |
 | `ubt_verifyProof` | Verify a proof against a given root |
 | `ubt_safeCompactSeq` | Safe sequence for outbox compaction |
-| `ubt_executionWitnessUBT` | Execution witness for a block |
+| `ubt_callUBT` | Execution-class call RPC (disabled unless `--execution-class-rpc-enabled` is set) |
+| `ubt_executionWitnessUBT` | Execution witness RPC (disabled unless `--execution-class-rpc-enabled` is set) |
 
 ## Validation Modes
 
@@ -166,6 +183,9 @@ ubtconv \
 | `--query-rpc-enabled` | `true` | Enable UBT query RPC server |
 | `--query-rpc-listen-addr` | `localhost:8560` | Listen address for UBT query RPC server |
 | `--query-rpc-max-batch` | `100` | Maximum batch size for list-style UBT RPC methods |
+| `--execution-class-rpc-enabled` | `false` | Enable execution-class RPC methods (`ubt_callUBT`, `ubt_executionWitnessUBT`) |
+| `--validation-sample-rate` | `0` | Validate every Nth block (`0` disables sampled validation) |
+| `--backpressure-lag-threshold` | `1000` | Force commit when `outboxLag > threshold` (`0` disables backpressure commits) |
 | `--outbox-disk-budget-bytes` | `0` (unlimited) | Maximum disk usage for outbox events |
 | `--outbox-alert-threshold-pct` | `80` | Disk usage percentage to trigger compaction alert |
 | `--slot-index-mode` | `auto` | Slot index mode: `auto`, `on`, or `off` |

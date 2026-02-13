@@ -19,7 +19,6 @@ package eth
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -125,8 +124,8 @@ func (api *UBTOutboxAPI) CompactOutboxBelow(ctx context.Context, safeSeq hexutil
 		return nil, errors.New("UBT outbox not enabled")
 	}
 	latest := store.LatestSeq()
-	if uint64(safeSeq) > latest {
-		return nil, fmt.Errorf("safeSeq %d exceeds latest outbox seq %d", uint64(safeSeq), latest)
+	if err := ubtemit.ValidateCompactBelowBounds(uint64(safeSeq), latest); err != nil {
+		return nil, err
 	}
 	count, err := store.CompactBelow(uint64(safeSeq))
 	if err != nil {

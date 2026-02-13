@@ -259,6 +259,10 @@ func (s *OutboxStore) LatestSeq() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.latestSeqLocked()
+}
+
+func (s *OutboxStore) latestSeqLocked() uint64 {
 	if s.nextSeq == 0 {
 		return 0
 	}
@@ -275,8 +279,11 @@ func (s *OutboxStore) CompactBelow(safeSeq uint64) (int, error) {
 	if safeSeq == 0 {
 		return 0, nil
 	}
-	if safeSeq > s.nextSeq {
-		return 0, fmt.Errorf("compact below seq %d exceeds latest seq %d", safeSeq, s.nextSeq)
+	latestSeq := s.latestSeqLocked()
+	// Allow safeSeq == latest+1, which means "compact everything currently persisted".
+	// This keeps compaction semantics aligned with "below safeSeq" boundaries.
+	if err := ValidateCompactBelowBounds(safeSeq, latestSeq); err != nil {
+		return 0, fmt.Errorf("compact below seq %d: %w", safeSeq, err)
 	}
 
 	if safeSeq <= s.lowestSeq {

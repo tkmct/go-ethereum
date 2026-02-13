@@ -23,6 +23,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/rpc"
 )
 
 // TestNewUBTDebugAPI tests that NewUBTDebugAPI creates a valid instance.
@@ -171,7 +172,7 @@ func TestUBTDebugAPI_CallUBT_NoConnection(t *testing.T) {
 		"to":   "0x1234567890123456789012345678901234567890",
 		"data": "0xabcdef",
 	}
-	_, err := api.CallUBT(ctx, args)
+	_, err := api.CallUBT(ctx, args, nil, nil, nil)
 	if err == nil {
 		t.Fatal("Expected error when calling CallUBT without valid connection")
 	}
@@ -182,7 +183,8 @@ func TestUBTDebugAPI_ExecutionWitnessUBT_NoConnection(t *testing.T) {
 	api := NewUBTDebugAPI("http://invalid-host:99999", 1*time.Second)
 	ctx := context.Background()
 
-	_, err := api.ExecutionWitnessUBT(ctx, 12345)
+	latest := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
+	_, err := api.ExecutionWitnessUBT(ctx, &latest)
 	if err == nil {
 		t.Fatal("Expected error when calling ExecutionWitnessUBT without valid connection")
 	}

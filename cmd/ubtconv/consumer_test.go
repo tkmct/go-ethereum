@@ -19,6 +19,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/ethereum/go-ethereum/core/rawdb"
 )
 
 // TestShouldCommit_BlockThreshold verifies commit triggered by block count.
@@ -258,7 +260,7 @@ func TestShouldCommit_NeverCommitScenarios(t *testing.T) {
 	// This test verifies the "never commit" case when both thresholds are very high
 	c := &Consumer{
 		cfg: &Config{
-			ApplyCommitInterval:   1000000,      // Very high block threshold
+			ApplyCommitInterval:   1000000,        // Very high block threshold
 			ApplyCommitMaxLatency: 24 * time.Hour, // Very high time threshold
 		},
 		uncommittedBlocks: 100,
@@ -616,6 +618,29 @@ func TestConsumerState_Isolation(t *testing.T) {
 	zeroState := ConsumerState{}
 	if zeroState.PendingSeq != 0 || zeroState.AppliedSeq != 0 {
 		t.Errorf("zero state should have zero sequences")
+	}
+}
+
+func TestPendingSeq_SeqZeroPersistsWithActiveFlag(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	c := &Consumer{db: db}
+
+	c.markPendingSeq(0)
+	state := rawdb.ReadUBTConsumerState(db)
+	if state == nil {
+		t.Fatal("expected persisted state after markPendingSeq(0)")
+	}
+	if state.PendingSeq != 0 {
+		t.Fatalf("expected pending seq 0, got %d", state.PendingSeq)
+	}
+	if !state.PendingSeqActive {
+		t.Fatal("expected PendingSeqActive=true for seq 0")
+	}
+	if state.PendingStatus != rawdb.UBTConsumerPendingInFlight {
+		t.Fatalf("expected PendingStatus=inflight, got %v", state.PendingStatus)
+	}
+	if state.PendingUpdatedAt == 0 {
+		t.Fatal("expected PendingUpdatedAt to be set")
 	}
 }
 

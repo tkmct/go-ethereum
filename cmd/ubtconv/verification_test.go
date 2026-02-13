@@ -34,7 +34,7 @@ package main
 //   6. Block selector resolution and history-window behavior
 //   7. Proof generation returns deterministic result for same root/key
 //   8. getCode behavior for no-code account and code account
-//   9. Phase 7 RPCs return explicit not-available errors
+//   9. Execution-class RPCs return explicit errors when prerequisites are not met
 
 import (
 	"bytes"
@@ -886,9 +886,9 @@ func TestVerify_GetCodeBehavior(t *testing.T) {
 	})
 }
 
-// --- Scenario 9: Phase 7 RPCs return explicit not-available errors ---
+// --- Scenario 9: Execution-class RPCs return explicit prerequisite errors ---
 
-func TestVerify_Phase7RPCsExplicitErrors(t *testing.T) {
+func TestVerify_ExecutionRPCsExplicitErrors(t *testing.T) {
 	// CallUBT and ExecutionWitnessUBT must return explicit errors when
 	// the applier is not initialized.
 
@@ -901,7 +901,7 @@ func TestVerify_Phase7RPCsExplicitErrors(t *testing.T) {
 	// Test CallUBT without applier
 	t.Run("CallUBT returns not-initialized error", func(t *testing.T) {
 		args := map[string]any{"to": "0x1234", "data": "0xabcd"}
-		result, err := api.CallUBT(ctx, args)
+		result, err := api.CallUBT(ctx, args, nil, nil, nil)
 		if err == nil {
 			t.Fatal("CallUBT should return error")
 		}
@@ -915,7 +915,8 @@ func TestVerify_Phase7RPCsExplicitErrors(t *testing.T) {
 
 	// Test ExecutionWitnessUBT without applier
 	t.Run("ExecutionWitnessUBT returns not-initialized error", func(t *testing.T) {
-		result, err := api.ExecutionWitnessUBT(ctx, hexutil.Uint64(12345))
+		latest := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
+		result, err := api.ExecutionWitnessUBT(ctx, &latest)
 		if err == nil {
 			t.Fatal("ExecutionWitnessUBT should return error")
 		}
@@ -940,7 +941,8 @@ func TestVerify_Phase7RPCsExplicitErrors(t *testing.T) {
 
 		// ExecutionWitnessUBT via RPC - should fail because no state index
 		var witnessResult map[string]any
-		err := client.CallContext(rpcCtx, &witnessResult, "ubt_executionWitnessUBT", hexutil.Uint64(100))
+		block100 := rpc.BlockNumberOrHashWithNumber(100)
+		err := client.CallContext(rpcCtx, &witnessResult, "ubt_executionWitnessUBT", block100)
 		if err == nil {
 			t.Fatal("ExecutionWitnessUBT via RPC should return error for ahead-of-head")
 		}
@@ -1080,7 +1082,7 @@ func TestApplyDiff_BalanceOverflow(t *testing.T) {
 
 	// Create a balance that overflows uint256 (2^256 + 1)
 	overflowBalance := new(big.Int).Lsh(big.NewInt(1), 256) // 2^256
-	overflowBalance.Add(overflowBalance, big.NewInt(1))      // 2^256 + 1
+	overflowBalance.Add(overflowBalance, big.NewInt(1))     // 2^256 + 1
 
 	addr := common.HexToAddress("0xdeadbeef")
 	diff := makeDiff(addr, 1, overflowBalance)

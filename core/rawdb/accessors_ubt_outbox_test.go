@@ -24,6 +24,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/ethdb/memorydb"
+	"github.com/ethereum/go-ethereum/rlp"
 )
 
 // -- Error-injecting mocks for TDD -----------------------------------------
@@ -33,7 +34,7 @@ type errKeyValueReader struct {
 	err error
 }
 
-func (e *errKeyValueReader) Has(key []byte) (bool, error) { return false, e.err }
+func (e *errKeyValueReader) Has(key []byte) (bool, error)   { return false, e.err }
 func (e *errKeyValueReader) Get(key []byte) ([]byte, error) { return nil, e.err }
 
 // errIterator yields items then returns an error after exhaustion.
@@ -50,10 +51,10 @@ func (it *errIterator) Next() bool {
 	}
 	return false
 }
-func (it *errIterator) Error() error { return it.err }
-func (it *errIterator) Key() []byte  { return it.items[it.pos-1].k }
+func (it *errIterator) Error() error  { return it.err }
+func (it *errIterator) Key() []byte   { return it.items[it.pos-1].k }
 func (it *errIterator) Value() []byte { return it.items[it.pos-1].v }
-func (it *errIterator) Release()     {}
+func (it *errIterator) Release()      {}
 
 // errIteratee returns an errIterator that has data but ends with an error.
 type errIteratee struct {
@@ -142,10 +143,13 @@ func TestUBTConsumerState(t *testing.T) {
 
 	// Write and read state
 	testState := &UBTConsumerState{
-		PendingSeq:   5,
-		AppliedSeq:   4,
-		AppliedRoot:  common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"),
-		AppliedBlock: 1000,
+		PendingSeq:       5,
+		PendingSeqActive: true,
+		PendingStatus:    UBTConsumerPendingInFlight,
+		PendingUpdatedAt: 1700000000,
+		AppliedSeq:       4,
+		AppliedRoot:      common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"),
+		AppliedBlock:     1000,
 	}
 
 	WriteUBTConsumerState(db, testState)
@@ -157,6 +161,15 @@ func TestUBTConsumerState(t *testing.T) {
 	if readState.PendingSeq != testState.PendingSeq {
 		t.Fatalf("Expected PendingSeq %d, got %d", testState.PendingSeq, readState.PendingSeq)
 	}
+	if readState.PendingSeqActive != testState.PendingSeqActive {
+		t.Fatalf("Expected PendingSeqActive %v, got %v", testState.PendingSeqActive, readState.PendingSeqActive)
+	}
+	if readState.PendingStatus != testState.PendingStatus {
+		t.Fatalf("Expected PendingStatus %v, got %v", testState.PendingStatus, readState.PendingStatus)
+	}
+	if readState.PendingUpdatedAt != testState.PendingUpdatedAt {
+		t.Fatalf("Expected PendingUpdatedAt %d, got %d", testState.PendingUpdatedAt, readState.PendingUpdatedAt)
+	}
 	if readState.AppliedSeq != testState.AppliedSeq {
 		t.Fatalf("Expected AppliedSeq %d, got %d", testState.AppliedSeq, readState.AppliedSeq)
 	}
@@ -165,6 +178,46 @@ func TestUBTConsumerState(t *testing.T) {
 	}
 	if readState.AppliedBlock != testState.AppliedBlock {
 		t.Fatalf("Expected AppliedBlock %d, got %d", testState.AppliedBlock, readState.AppliedBlock)
+	}
+}
+
+func TestUBTConsumerState_BackwardCompatibleDecode(t *testing.T) {
+	db := memorydb.New()
+
+	// Legacy payload without PendingStatus/PendingUpdatedAt fields.
+	legacy := struct {
+		PendingSeq       uint64
+		PendingSeqActive bool
+		AppliedSeq       uint64
+		AppliedRoot      common.Hash
+		AppliedBlock     uint64
+	}{
+		PendingSeq:       7,
+		PendingSeqActive: true,
+		AppliedSeq:       6,
+		AppliedRoot:      common.HexToHash("0x01"),
+		AppliedBlock:     42,
+	}
+	data, err := rlp.EncodeToBytes(&legacy)
+	if err != nil {
+		t.Fatalf("encode legacy state: %v", err)
+	}
+	if err := db.Put(ubtOutboxConsumerStateKey, data); err != nil {
+		t.Fatalf("write legacy state: %v", err)
+	}
+
+	state := ReadUBTConsumerState(db)
+	if state == nil {
+		t.Fatal("expected decoded state")
+	}
+	if state.PendingSeq != legacy.PendingSeq {
+		t.Fatalf("pending seq mismatch: got %d want %d", state.PendingSeq, legacy.PendingSeq)
+	}
+	if state.PendingStatus != UBTConsumerPendingNone {
+		t.Fatalf("expected default pending status none, got %v", state.PendingStatus)
+	}
+	if state.PendingUpdatedAt != 0 {
+		t.Fatalf("expected zero PendingUpdatedAt for legacy state, got %d", state.PendingUpdatedAt)
 	}
 }
 

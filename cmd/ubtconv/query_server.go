@@ -22,6 +22,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -263,13 +264,30 @@ func (api *QueryAPI) Status(ctx context.Context) (map[string]any, error) {
 	appliedSeq := api.consumer.state.AppliedSeq
 	appliedBlock := api.consumer.state.AppliedBlock
 	appliedRoot := api.consumer.state.AppliedRoot
+	pendingSeq := api.consumer.state.PendingSeq
+	pendingStatus := api.consumer.state.PendingStatus
+	pendingUpdatedAt := api.consumer.state.PendingUpdatedAt
+	outboxLag := api.consumer.outboxLag
+	backpressureLagThreshold := uint64(0)
+	executionClassRPCEnabled := false
+	if api.consumer.cfg != nil {
+		backpressureLagThreshold = api.consumer.cfg.BackpressureLagThreshold
+		executionClassRPCEnabled = api.consumer.cfg.ExecutionClassRPCEnabled
+	}
 	tracker := api.consumer.phaseTracker
 	api.consumer.mu.Unlock()
 
 	result := map[string]any{
-		"appliedSeq":   appliedSeq,
-		"appliedBlock": appliedBlock,
-		"appliedRoot":  appliedRoot,
+		"appliedSeq":               appliedSeq,
+		"appliedBlock":             appliedBlock,
+		"appliedRoot":              appliedRoot,
+		"pendingSeq":               pendingSeq,
+		"pendingState":             pendingStatus.String(),
+		"pendingUpdatedAt":         pendingUpdatedAt,
+		"outboxLag":                outboxLag,
+		"backpressureLagThreshold": backpressureLagThreshold,
+		"backpressureTriggered":    backpressureLagThreshold > 0 && outboxLag > backpressureLagThreshold,
+		"executionClassRPCEnabled": executionClassRPCEnabled,
 	}
 
 	// Phase tracker methods are safe to call without the consumer lock
@@ -445,20 +463,37 @@ func (api *QueryAPI) GetAccountProof(ctx context.Context, addr common.Address, s
 	}, nil
 }
 
-// CallUBT executes a read-only call against the UBT state.
-// Accepts a map with keys: "from", "to", "data", "value", "gas".
-func (api *QueryAPI) CallUBT(ctx context.Context, args map[string]any) (hexutil.Bytes, error) {
+// CallUBT executes a call against UBT state.
+// Signature is kept close to eth_call:
+//   ubt_callUBT(callObject, blockNumberOrHash?, stateOverrides?, blockOverrides?)
+func (api *QueryAPI) CallUBT(ctx context.Context, args map[string]any, blockNrOrHash *rpc.BlockNumberOrHash, stateOverrides map[string]any, blockOverrides map[string]any) (hexutil.Bytes, error) {
 	// Snapshot state under lock
 	api.consumer.mu.Lock()
 	if api.consumer.applier == nil {
 		api.consumer.mu.Unlock()
 		return nil, fmt.Errorf("UBT trie not initialized")
 	}
-	root := api.latestStateRef().root
-	blockNumber := api.consumer.state.AppliedBlock
+	if api.consumer.cfg == nil || !api.consumer.cfg.ExecutionClassRPCEnabled {
+		api.consumer.mu.Unlock()
+		return nil, fmt.Errorf("ubt_callUBT: execution-class RPC disabled (set --execution-class-rpc-enabled)")
+	}
+	if len(stateOverrides) > 0 {
+		api.consumer.mu.Unlock()
+		return nil, fmt.Errorf("ubt_callUBT: stateOverrides are not yet supported")
+	}
+	if len(blockOverrides) > 0 {
+		api.consumer.mu.Unlock()
+		return nil, fmt.Errorf("ubt_callUBT: blockOverrides are not yet supported")
+	}
+	cfg := api.consumer.cfg
+	stateRef, err := api.resolveBlockSelector(blockNrOrHash)
+	if err != nil {
+		api.consumer.mu.Unlock()
+		return nil, err
+	}
 	db := api.consumer.db // for GetHash lookups
-	gasCap := api.consumer.cfg.effectiveRPCGasCap()
-	chainConfig := api.consumer.cfg.resolveChainConfig()
+	gasCap := cfg.effectiveRPCGasCap()
+	chainConfig := cfg.resolveChainConfig()
 	api.consumer.mu.Unlock()
 
 	// Parse call arguments with gas cap enforcement
@@ -468,7 +503,7 @@ func (api *QueryAPI) CallUBT(ctx context.Context, args map[string]any) (hexutil.
 	}
 
 	// Create StateDB from UBT (outside the lock)
-	stateDB, err := api.createStateDB(root)
+	stateDB, err := api.createStateDB(stateRef.root)
 	if err != nil {
 		return nil, fmt.Errorf("ubt_callUBT: %w", err)
 	}
@@ -490,7 +525,7 @@ func (api *QueryAPI) CallUBT(ctx context.Context, args map[string]any) (hexutil.
 			return common.Hash{}
 		},
 		Coinbase:    common.Address{},
-		BlockNumber: new(big.Int).SetUint64(blockNumber),
+		BlockNumber: new(big.Int).SetUint64(stateRef.blockNumber),
 		Time:        uint64(time.Now().Unix()),
 		Difficulty:  new(big.Int),
 		BaseFee:     new(big.Int),
@@ -513,61 +548,55 @@ func (api *QueryAPI) CallUBT(ctx context.Context, args map[string]any) (hexutil.
 	return result.ReturnData, nil
 }
 
-// ExecutionWitnessUBT generates an execution witness for a block against UBT state.
-// This requires re-executing all transactions in the block against the pre-block UBT
-// state and collecting the accessed state nodes. The block data is fetched from the
-// connected geth node.
-func (api *QueryAPI) ExecutionWitnessUBT(ctx context.Context, blockNumber hexutil.Uint64) (map[string]any, error) {
-	bn := uint64(blockNumber)
-
-	// Snapshot state under lock
+// ExecutionWitnessUBT returns a deterministic, execution-class witness snapshot for a selected block.
+// Current implementation is root-bound and intentionally partial until full tx re-execution wiring is completed.
+func (api *QueryAPI) ExecutionWitnessUBT(ctx context.Context, blockNrOrHash *rpc.BlockNumberOrHash) (map[string]any, error) {
 	api.consumer.mu.Lock()
 	if api.consumer.applier == nil {
 		api.consumer.mu.Unlock()
 		return nil, fmt.Errorf("UBT trie not initialized")
 	}
-	latest := api.latestStateRef()
-	db := api.consumer.db
-	api.consumer.mu.Unlock()
-
-	if bn > latest.blockNumber {
-		return nil, fmt.Errorf("ubt_executionWitnessUBT: block %d not yet applied (head=%d)", bn, latest.blockNumber)
+	if api.consumer.cfg == nil || !api.consumer.cfg.ExecutionClassRPCEnabled {
+		api.consumer.mu.Unlock()
+		return nil, fmt.Errorf("ubt_executionWitnessUBT: execution-class RPC disabled (set --execution-class-rpc-enabled)")
 	}
-	if bn == 0 {
-		return nil, fmt.Errorf("ubt_executionWitnessUBT: cannot generate witness for genesis block")
-	}
-
-	// We need the pre-block root (state at block N-1) to re-execute block N.
-	// Look up the root for the previous block.
-	if db == nil {
-		return nil, fmt.Errorf("ubt_executionWitnessUBT: historical state index unavailable")
-	}
-	preRoot := rawdb.ReadUBTBlockRoot(db, bn-1)
-	if preRoot == (common.Hash{}) && bn > 1 {
-		return nil, fmt.Errorf("ubt_executionWitnessUBT: missing pre-block root for block %d", bn)
-	}
-
-	// Create StateDB at pre-block root (outside the lock)
-	stateDB, err := api.createStateDB(preRoot)
+	stateRef, err := api.resolveBlockSelector(blockNrOrHash)
 	if err != nil {
-		return nil, fmt.Errorf("ubt_executionWitnessUBT: %w", err)
+		api.consumer.mu.Unlock()
+		return nil, err
+	}
+	blockHash := common.Hash{}
+	if api.consumer.db != nil {
+		blockHash = rawdb.ReadUBTCanonicalBlockHash(api.consumer.db, stateRef.blockNumber)
 	}
 
-	// Return the pre-execution state root and trie witness.
-	// Full block re-execution requires fetching the complete block from geth
-	// (transactions, headers) which is not yet wired. For now, return the
-	// trie nodes accessed during state opening as a basic witness.
-	witness := stateDB.Database().TrieDB()
-	_ = witness
-
-	postRoot := rawdb.ReadUBTBlockRoot(db, bn)
+	accountsTouched := make([]string, 0)
+	storageTouched := make([]string, 0)
+	codeTouched := make([]string, 0)
+	if api.consumer.lastDiff != nil && api.consumer.lastDiff.Root == stateRef.root && stateRef.blockNumber == api.consumer.state.AppliedBlock {
+		for _, acct := range api.consumer.lastDiff.Accounts {
+			accountsTouched = append(accountsTouched, acct.Address.Hex())
+		}
+		for _, slot := range api.consumer.lastDiff.Storage {
+			storageTouched = append(storageTouched, fmt.Sprintf("%s:%s", slot.Address.Hex(), slot.SlotKeyRaw.Hex()))
+		}
+		for _, code := range api.consumer.lastDiff.Codes {
+			codeTouched = append(codeTouched, code.Address.Hex())
+		}
+	}
+	api.consumer.mu.Unlock()
+	sort.Strings(accountsTouched)
+	sort.Strings(storageTouched)
+	sort.Strings(codeTouched)
 
 	return map[string]any{
-		"blockNumber":    bn,
-		"preStateRoot":   preRoot,
-		"postStateRoot":  postRoot,
-		"status":         "partial",
-		"note":           "Full block re-execution requires transaction data from geth. Pre/post state roots are verified.",
+		"blockNumber":     hexutil.Uint64(stateRef.blockNumber),
+		"blockHash":       blockHash,
+		"stateRoot":       stateRef.root,
+		"accountsTouched": accountsTouched,
+		"storageTouched":  storageTouched,
+		"codeTouched":     codeTouched,
+		"status":          "partial",
 	}, nil
 }
 

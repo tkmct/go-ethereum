@@ -26,12 +26,32 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
+// UBTConsumerPendingStatus defines durable pending state transitions for crash recovery.
+type UBTConsumerPendingStatus uint8
+
+const (
+	UBTConsumerPendingNone UBTConsumerPendingStatus = iota
+	UBTConsumerPendingInFlight
+)
+
+func (s UBTConsumerPendingStatus) String() string {
+	switch s {
+	case UBTConsumerPendingInFlight:
+		return "inflight"
+	default:
+		return "none"
+	}
+}
+
 // UBTConsumerState holds the durable consumer checkpoint.
 type UBTConsumerState struct {
-	PendingSeq   uint64      // Sequence currently being processed (0 if none)
-	AppliedSeq   uint64      // Last fully applied sequence
-	AppliedRoot  common.Hash // UBT root after last applied sequence
-	AppliedBlock uint64      // Last applied block number
+	PendingSeq       uint64                   // Sequence currently being processed (valid only when PendingStatus=UBTConsumerPendingInFlight)
+	PendingSeqActive bool                     // Deprecated compatibility flag for seq=0 support; mirrored from PendingStatus.
+	AppliedSeq       uint64                   // Last fully applied sequence
+	AppliedRoot      common.Hash              // UBT root after last applied sequence
+	AppliedBlock     uint64                   // Last applied block number
+	PendingStatus    UBTConsumerPendingStatus `rlp:"optional"` // Explicit pending status state machine.
+	PendingUpdatedAt uint64                   `rlp:"optional"` // Unix timestamp of last pending status transition.
 }
 
 // WriteUBTOutboxEvent writes an outbox event at the given sequence number.

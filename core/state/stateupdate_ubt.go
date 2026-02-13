@@ -18,6 +18,7 @@ package state
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -28,6 +29,10 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 )
+
+// ErrRawStorageKeyMissing indicates that the update cannot be converted to UBT
+// because raw storage keys are unavailable for at least one touched slot.
+var ErrRawStorageKeyMissing = errors.New("ErrRawStorageKeyMissing")
 
 // ToUBTDiff converts the internal stateUpdate to a QueuedDiffV1 for UBT emission.
 // This is the orchestration boundary where unexported state types are converted
@@ -74,7 +79,7 @@ func (sc *stateUpdate) ToUBTDiff() (*ubtemit.QueuedDiffV1, error) {
 	if !sc.rawStorageKey {
 		// Pre-Cancun blocks lack raw storage keys - this is expected behavior.
 		// UBT diffs will resume once Cancun is activated and raw keys become available.
-		return nil, fmt.Errorf("UBT diff conversion requires raw storage keys (pre-Cancun block, UBT diffs will resume at Cancun activation)")
+		return nil, fmt.Errorf("%w: UBT diff conversion requires raw storage keys (pre-Cancun block, UBT diffs will resume at Cancun activation)", ErrRawStorageKeyMissing)
 	}
 	for addr, slots := range sc.storagesOrigin {
 		addrHash := crypto.Keccak256Hash(addr.Bytes())

@@ -808,7 +808,7 @@ func TestTC_MetricsDefined(t *testing.T) {
 // TC-C6: Block selector → TestVerify_BlockSelectorValidation
 // TC-C7: Proof determinism → TestVerify_ProofDeterminism
 // TC-C8: getCode → TestVerify_GetCodeBehavior
-// TC-C9: Phase 7 RPCs → TestVerify_Phase7RPCsExplicitErrors
+// TC-C9: Execution RPCs prerequisite errors → TestVerify_ExecutionRPCsExplicitErrors
 // TC-C10: Full pipeline → TestVerify_FullPipelineIntegration
 // TC-C11: Balance overflow → TestApplyDiff_BalanceOverflow
 // TC-C12: Balance 128-bit → TestApplyDiff_Balance128BitLimit

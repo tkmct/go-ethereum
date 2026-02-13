@@ -70,10 +70,13 @@ func (e *errReorgReplayRequired) Unwrap() error { return e.err }
 
 // ConsumerState tracks the consumer's durable checkpoint.
 type ConsumerState struct {
-	PendingSeq   uint64
-	AppliedSeq   uint64
-	AppliedRoot  common.Hash
-	AppliedBlock uint64
+	PendingSeq       uint64
+	PendingSeqActive bool
+	PendingStatus    rawdb.UBTConsumerPendingStatus
+	PendingUpdatedAt uint64
+	AppliedSeq       uint64
+	AppliedRoot      common.Hash
+	AppliedBlock     uint64
 }
 
 // pendingBlockRoot tracks per-block UBT roots within a commit batch.
@@ -84,12 +87,17 @@ type pendingBlockRoot struct {
 	parentHash common.Hash
 }
 
+type consumeDecision struct {
+	targetSeq uint64
+	env       *ubtemit.OutboxEnvelope
+}
+
 // Consumer reads outbox events and applies them to the UBT.
 type Consumer struct {
-	cfg       *Config
-	db        ethdb.Database // Local consumer state DB
-	applier   *Applier
-	reader    *OutboxReader
+	cfg          *Config
+	db           ethdb.Database // Local consumer state DB
+	applier      *Applier
+	reader       *OutboxReader
 	validator    *Validator    // Cross-checks UBT against MPT (nil if validation disabled)
 	replayClient *ReplayClient // Archive replay for deep recovery (nil if not configured)
 
@@ -149,11 +157,11 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 	}
 
 	c := &Consumer{
-		cfg:          cfg,
-		db:           db,
-		reader:       reader,
-		validator:    validator,
-		replayClient: replayClient,
+		cfg:            cfg,
+		db:             db,
+		reader:         reader,
+		validator:      validator,
+		replayClient:   replayClient,
 		lastCommitTime: time.Now(),
 	}
 
@@ -230,23 +238,42 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 func (c *Consumer) loadState() error {
 	state := rawdb.ReadUBTConsumerState(c.db)
 	if state != nil {
-		c.state = ConsumerState{
-			PendingSeq:   state.PendingSeq,
-			AppliedSeq:   state.AppliedSeq,
-			AppliedRoot:  state.AppliedRoot,
-			AppliedBlock: state.AppliedBlock,
+		hasAppliedCheckpoint := state.AppliedSeq > 0 || state.AppliedBlock > 0 || state.AppliedRoot != (common.Hash{})
+		pendingStatus := state.PendingStatus
+		if pendingStatus == rawdb.UBTConsumerPendingNone && (state.PendingSeqActive || state.PendingSeq > 0) {
+			// Backward compatibility for checkpoints persisted before PendingStatus existed.
+			pendingStatus = rawdb.UBTConsumerPendingInFlight
 		}
-		c.hasState = true
-		if state.PendingSeq > 0 {
+		pendingSeqActive := pendingStatus == rawdb.UBTConsumerPendingInFlight
+		c.state = ConsumerState{
+			PendingSeq:       state.PendingSeq,
+			PendingSeqActive: pendingSeqActive,
+			PendingStatus:    pendingStatus,
+			PendingUpdatedAt: state.PendingUpdatedAt,
+			AppliedSeq:       state.AppliedSeq,
+			AppliedRoot:      state.AppliedRoot,
+			AppliedBlock:     state.AppliedBlock,
+		}
+		c.hasState = hasAppliedCheckpoint
+		pendingActive := c.pendingInFlight()
+		if pendingActive {
 			log.Warn("Detected incomplete apply from previous run (crash recovery)",
 				"pendingSeq", state.PendingSeq, "appliedSeq", state.AppliedSeq,
-				"appliedBlock", state.AppliedBlock, "appliedRoot", state.AppliedRoot)
+				"appliedBlock", state.AppliedBlock, "appliedRoot", state.AppliedRoot,
+				"pendingStatus", c.state.PendingStatus, "pendingUpdatedAt", c.state.PendingUpdatedAt)
 			// Clear pendingSeq — the trie was opened at appliedRoot (clean state),
 			// and processedSeq will be set to appliedSeq, so the pending event
 			// will be replayed automatically by the next ConsumeNext call.
-			c.state.PendingSeq = 0
+			c.clearPendingMetadata()
+			if hasAppliedCheckpoint {
+				c.persistState()
+			}
 		}
-		log.Info("Loaded consumer state", "applied", c.state.AppliedSeq, "block", c.state.AppliedBlock, "root", c.state.AppliedRoot)
+		if hasAppliedCheckpoint {
+			log.Info("Loaded consumer state", "applied", c.state.AppliedSeq, "block", c.state.AppliedBlock, "root", c.state.AppliedRoot)
+		} else {
+			log.Info("No durable applied checkpoint found, starting from genesis")
+		}
 	} else {
 		c.hasState = false
 		log.Info("No existing consumer state found, starting from genesis")
@@ -260,128 +287,151 @@ func (c *Consumer) ConsumeNext() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Use processedSeq (in-memory) to determine next target, NOT AppliedSeq (durable)
-	targetSeq := c.processedSeq + 1
-
-	// Read from outbox via RPC
-	env, err := c.reader.ReadEvent(targetSeq)
+	decision, err := c.decideNextAction()
 	if err != nil {
-		consumerErrorsTotal.Inc(1)
-		return fmt.Errorf("read event %d: %w", targetSeq, err)
+		return err
 	}
-	if env == nil {
-		consumerErrorsTotal.Inc(1)
-		return fmt.Errorf("no event at seq %d", targetSeq)
+	handled, err := c.executeTransition(decision, start)
+	if err != nil {
+		return err
 	}
-
-	// §11 R9: Detect implicit reorg via parent-hash mismatch
-	if env.Kind == ubtemit.KindDiff && c.pendingBlockHash != (common.Hash{}) && env.ParentHash != c.pendingBlockHash {
-		log.Warn("UBT parent-hash mismatch detected (implicit reorg)",
-			"expected", c.pendingBlockHash, "got", env.ParentHash,
-			"block", env.BlockNumber, "seq", targetSeq)
-		// Treat as reorg: revert to last committed state
-		if c.uncommittedBlocks > 0 {
-			if err := c.applier.Revert(c.state.AppliedRoot); err != nil {
-				return fmt.Errorf("revert on parent-hash mismatch: %w", err)
-			}
-			c.pendingRoot = c.state.AppliedRoot
-			c.pendingBlock = c.state.AppliedBlock
-			c.pendingBlockHash = rawdb.ReadUBTCanonicalBlockHash(c.db, c.state.AppliedBlock)
-			c.pendingParentHash = rawdb.ReadUBTCanonicalParentHash(c.db, c.state.AppliedBlock)
-			c.uncommittedBlocks = 0
-			c.pendingBlockRoots = c.pendingBlockRoots[:0]
-		}
-		consumerReorgTotal.Inc(1)
-		// Re-read the event will happen on next ConsumeNext cycle
+	if handled {
 		return nil
-	}
-
-	// Process based on kind
-	switch env.Kind {
-	case ubtemit.KindDiff:
-		diff, err := ubtemit.DecodeDiff(env.Payload)
-		if err != nil {
-			consumerErrorsTotal.Inc(1)
-			return fmt.Errorf("decode diff at seq %d: %w", targetSeq, err)
-		}
-		// Crash-consistency: persist pendingSeq AFTER decode validation but BEFORE apply (plan §12).
-		c.markPendingSeq(targetSeq)
-		root, err := c.applier.ApplyDiff(diff, env.BlockNumber)
-		if err != nil {
-			consumerErrorsTotal.Inc(1)
-			return fmt.Errorf("apply diff at seq %d: %w", targetSeq, err)
-		}
-		// Collect addresses for validation sampling
-		for _, acct := range diff.Accounts {
-			c.recentAddresses = append(c.recentAddresses, acct.Address)
-		}
-		// Track in-memory state (NOT persisted until commit)
-		c.pendingRoot = root
-		c.pendingBlock = env.BlockNumber
-		c.pendingBlockHash = env.BlockHash
-		c.pendingParentHash = env.ParentHash
-		c.lastDiff = diff
-		c.pendingBlockRoots = append(c.pendingBlockRoots, pendingBlockRoot{
-			block:      env.BlockNumber,
-			root:       root,
-			blockHash:  env.BlockHash,
-			parentHash: env.ParentHash,
-		})
-		consumerAppliedTotal.Inc(1)
-		consumerAppliedLatency.UpdateSince(start)
-
-		// Strict validation: cross-check ALL accounts/storage in diff against MPT
-		if c.cfg.ValidationStrictMode && c.validator != nil {
-			if err := c.validator.ValidateStrict(c.applier.Trie(), env.BlockNumber, diff); err != nil {
-				if c.cfg.ValidationHaltOnMismatch {
-					return &errValidationHalt{err: err}
-				}
-				log.Error("Strict validation mismatch (continuing)", "block", env.BlockNumber, "err", err)
-			}
-		}
-
-	case ubtemit.KindReorg:
-		marker, err := ubtemit.DecodeReorgMarker(env.Payload)
-		if err != nil {
-			consumerErrorsTotal.Inc(1)
-			return fmt.Errorf("decode reorg marker at seq %d: %w", targetSeq, err)
-		}
-		// Crash-consistency: persist pendingSeq AFTER decode validation but BEFORE apply (plan §12).
-		c.markPendingSeq(targetSeq)
-		if err := c.handleReorg(marker); err != nil {
-			consumerErrorsTotal.Inc(1)
-			return fmt.Errorf("handle reorg at seq %d: %w", targetSeq, err)
-		}
-		// handleReorg already reverted to the ancestor, set pending* fields,
-		// and committed the clean state. Do NOT overwrite pendingBlock/Hash
-		// with the reorg envelope values — those refer to the NEW chain tip,
-		// not the ancestor we reverted to.
-		//
-		// Advance processedSeq so the next call fetches the correct event,
-		// clear PendingSeq (event fully handled), and persist.
-		c.processedSeq = targetSeq
-		c.clearPendingSeq()
-		consumerReorgTotal.Inc(1)
-		log.Debug("UBT event applied", "seq", targetSeq, "kind", env.Kind, "block", env.BlockNumber)
-		return nil
-
-	default:
-		consumerErrorsTotal.Inc(1)
-		return fmt.Errorf("unknown event kind %q at seq %d", env.Kind, targetSeq)
 	}
 
 	// Advance in-memory processed counter (NOT persisted)
-	c.processedSeq = targetSeq
+	c.processedSeq = decision.targetSeq
 	c.uncommittedBlocks++
 
 	// Check commit policy
 	if c.shouldCommit() {
 		if err := c.commit(); err != nil {
-			return fmt.Errorf("commit at seq %d: %w", targetSeq, err)
+			return fmt.Errorf("commit at seq %d: %w", decision.targetSeq, err)
 		}
 	}
 
-	log.Debug("UBT event applied", "seq", targetSeq, "kind", env.Kind, "block", env.BlockNumber)
+	log.Debug("UBT event applied", "seq", decision.targetSeq, "kind", decision.env.Kind, "block", decision.env.BlockNumber)
+	return nil
+}
+
+func (c *Consumer) decideNextAction() (*consumeDecision, error) {
+	// Use processedSeq (in-memory) to determine next target, NOT AppliedSeq (durable).
+	targetSeq := c.processedSeq + 1
+	env, err := c.reader.ReadEvent(targetSeq)
+	if err != nil {
+		consumerErrorsTotal.Inc(1)
+		return nil, fmt.Errorf("read event %d: %w", targetSeq, err)
+	}
+	if env == nil {
+		consumerErrorsTotal.Inc(1)
+		return nil, fmt.Errorf("no event at seq %d", targetSeq)
+	}
+	return &consumeDecision{targetSeq: targetSeq, env: env}, nil
+}
+
+func (c *Consumer) executeTransition(decision *consumeDecision, start time.Time) (bool, error) {
+	handled, err := c.handleImplicitReorg(decision)
+	if handled || err != nil {
+		return handled, err
+	}
+	switch decision.env.Kind {
+	case ubtemit.KindDiff:
+		return false, c.executeDiffTransition(decision, start)
+	case ubtemit.KindReorg:
+		return true, c.executeReorgTransition(decision)
+	default:
+		consumerErrorsTotal.Inc(1)
+		return false, fmt.Errorf("unknown event kind %q at seq %d", decision.env.Kind, decision.targetSeq)
+	}
+}
+
+func (c *Consumer) handleImplicitReorg(decision *consumeDecision) (bool, error) {
+	env := decision.env
+	// §11 R9: Detect implicit reorg via parent-hash mismatch
+	if env.Kind != ubtemit.KindDiff || c.pendingBlockHash == (common.Hash{}) || env.ParentHash == c.pendingBlockHash {
+		return false, nil
+	}
+	log.Warn("UBT parent-hash mismatch detected (implicit reorg)",
+		"expected", c.pendingBlockHash, "got", env.ParentHash,
+		"block", env.BlockNumber, "seq", decision.targetSeq)
+	// Treat as reorg: revert to last committed state
+	if c.uncommittedBlocks > 0 {
+		if err := c.applier.Revert(c.state.AppliedRoot); err != nil {
+			return false, fmt.Errorf("revert on parent-hash mismatch: %w", err)
+		}
+		c.pendingRoot = c.state.AppliedRoot
+		c.pendingBlock = c.state.AppliedBlock
+		c.pendingBlockHash = rawdb.ReadUBTCanonicalBlockHash(c.db, c.state.AppliedBlock)
+		c.pendingParentHash = rawdb.ReadUBTCanonicalParentHash(c.db, c.state.AppliedBlock)
+		c.uncommittedBlocks = 0
+		c.pendingBlockRoots = c.pendingBlockRoots[:0]
+	}
+	consumerReorgTotal.Inc(1)
+	// Re-read the event will happen on the next ConsumeNext cycle.
+	return true, nil
+}
+
+func (c *Consumer) executeDiffTransition(decision *consumeDecision, start time.Time) error {
+	diff, err := ubtemit.DecodeDiff(decision.env.Payload)
+	if err != nil {
+		consumerErrorsTotal.Inc(1)
+		return fmt.Errorf("decode diff at seq %d: %w", decision.targetSeq, err)
+	}
+	// Crash-consistency: persist pendingSeq AFTER decode validation but BEFORE apply (plan §12).
+	c.markPendingSeq(decision.targetSeq)
+	root, err := c.applier.ApplyDiff(diff, decision.env.BlockNumber)
+	if err != nil {
+		consumerErrorsTotal.Inc(1)
+		return fmt.Errorf("apply diff at seq %d: %w", decision.targetSeq, err)
+	}
+	// Collect addresses for validation sampling.
+	for _, acct := range diff.Accounts {
+		c.recentAddresses = append(c.recentAddresses, acct.Address)
+	}
+	// Track in-memory state (NOT persisted until commit).
+	c.pendingRoot = root
+	c.pendingBlock = decision.env.BlockNumber
+	c.pendingBlockHash = decision.env.BlockHash
+	c.pendingParentHash = decision.env.ParentHash
+	c.lastDiff = diff
+	c.pendingBlockRoots = append(c.pendingBlockRoots, pendingBlockRoot{
+		block:      decision.env.BlockNumber,
+		root:       root,
+		blockHash:  decision.env.BlockHash,
+		parentHash: decision.env.ParentHash,
+	})
+	consumerAppliedTotal.Inc(1)
+	consumerAppliedLatency.UpdateSince(start)
+
+	// Strict validation: cross-check ALL accounts/storage in diff against MPT.
+	if c.cfg.ValidationStrictMode && c.validator != nil {
+		if err := c.validator.ValidateStrict(c.applier.Trie(), decision.env.BlockNumber, diff); err != nil {
+			if c.cfg.ValidationHaltOnMismatch {
+				return &errValidationHalt{err: err}
+			}
+			log.Error("Strict validation mismatch (continuing)", "block", decision.env.BlockNumber, "err", err)
+		}
+	}
+	return nil
+}
+
+func (c *Consumer) executeReorgTransition(decision *consumeDecision) error {
+	marker, err := ubtemit.DecodeReorgMarker(decision.env.Payload)
+	if err != nil {
+		consumerErrorsTotal.Inc(1)
+		return fmt.Errorf("decode reorg marker at seq %d: %w", decision.targetSeq, err)
+	}
+	// Crash-consistency: persist pendingSeq AFTER decode validation but BEFORE apply (plan §12).
+	c.markPendingSeq(decision.targetSeq)
+	if err := c.handleReorg(marker); err != nil {
+		consumerErrorsTotal.Inc(1)
+		return fmt.Errorf("handle reorg at seq %d: %w", decision.targetSeq, err)
+	}
+	// handleReorg already reverted to the ancestor and committed the clean state.
+	c.processedSeq = decision.targetSeq
+	c.clearPendingSeq()
+	consumerReorgTotal.Inc(1)
+	log.Debug("UBT event applied", "seq", decision.targetSeq, "kind", decision.env.Kind, "block", decision.env.BlockNumber)
 	return nil
 }
 
@@ -393,7 +443,7 @@ func (c *Consumer) shouldCommit() bool {
 	if time.Since(c.lastCommitTime) >= c.cfg.ApplyCommitMaxLatency {
 		return true
 	}
-	// Backpressure: if lag exceeds threshold, commit more aggressively (every block)
+	// Backpressure: if outboxLag > threshold, commit more aggressively (every block).
 	if c.cfg.BackpressureLagThreshold > 0 && c.outboxLag > c.cfg.BackpressureLagThreshold {
 		return true
 	}
@@ -411,7 +461,7 @@ func (c *Consumer) commit() error {
 	c.state.AppliedSeq = c.processedSeq
 	c.state.AppliedRoot = c.pendingRoot
 	c.state.AppliedBlock = c.pendingBlock
-	c.state.PendingSeq = 0
+	c.clearPendingMetadata()
 	c.persistState()
 	c.hasState = true
 
@@ -729,7 +779,7 @@ func (c *Consumer) ConsumeNextValidateOnly() error {
 func (c *Consumer) persistValidateOnlyProgress() {
 	c.state.AppliedSeq = c.processedSeq
 	c.state.AppliedBlock = c.pendingBlock
-	c.state.PendingSeq = 0
+	c.clearPendingMetadata()
 	// NOTE: Do NOT update c.state.AppliedRoot — validate-only never modifies the trie
 	c.persistState()
 	c.hasState = true
@@ -739,28 +789,45 @@ func (c *Consumer) persistValidateOnlyProgress() {
 // persistState writes the consumer state to the database.
 func (c *Consumer) persistState() {
 	rawdb.WriteUBTConsumerState(c.db, &rawdb.UBTConsumerState{
-		PendingSeq:   c.state.PendingSeq,
-		AppliedSeq:   c.state.AppliedSeq,
-		AppliedRoot:  c.state.AppliedRoot,
-		AppliedBlock: c.state.AppliedBlock,
+		PendingSeq:       c.state.PendingSeq,
+		PendingSeqActive: c.state.PendingSeqActive,
+		PendingStatus:    c.state.PendingStatus,
+		PendingUpdatedAt: c.state.PendingUpdatedAt,
+		AppliedSeq:       c.state.AppliedSeq,
+		AppliedRoot:      c.state.AppliedRoot,
+		AppliedBlock:     c.state.AppliedBlock,
 	})
+}
+
+func (c *Consumer) pendingInFlight() bool {
+	return c.state.PendingStatus == rawdb.UBTConsumerPendingInFlight
+}
+
+func (c *Consumer) clearPendingMetadata() {
+	c.state.PendingSeq = 0
+	c.state.PendingSeqActive = false
+	c.state.PendingStatus = rawdb.UBTConsumerPendingNone
+	c.state.PendingUpdatedAt = uint64(time.Now().Unix())
 }
 
 // markPendingSeq records an in-flight event sequence for crash recovery.
 func (c *Consumer) markPendingSeq(seq uint64) {
-	if !c.hasState || c.state.PendingSeq == seq {
+	if c.pendingInFlight() && c.state.PendingSeq == seq {
 		return
 	}
 	c.state.PendingSeq = seq
+	c.state.PendingSeqActive = true
+	c.state.PendingStatus = rawdb.UBTConsumerPendingInFlight
+	c.state.PendingUpdatedAt = uint64(time.Now().Unix())
 	c.persistState()
 }
 
 // clearPendingSeq clears in-flight event markers once the event is fully handled.
 func (c *Consumer) clearPendingSeq() {
-	if !c.hasState || c.state.PendingSeq == 0 {
+	if !c.pendingInFlight() && c.state.PendingSeq == 0 {
 		return
 	}
-	c.state.PendingSeq = 0
+	c.clearPendingMetadata()
 	c.persistState()
 }
 

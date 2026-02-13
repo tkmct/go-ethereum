@@ -243,7 +243,8 @@ func (r *Runner) bootstrapTail() error {
 	return nil
 }
 
-// refreshOutboxLag queries the latest outbox seq and updates the consumer's lag metric.
+// refreshOutboxLag queries latest outbox seq and updates lag:
+// outboxLag = max(latestSeq-processedSeq, 0).
 func (r *Runner) refreshOutboxLag() {
 	latestSeq, err := r.consumer.reader.LatestSeq()
 	if err != nil {

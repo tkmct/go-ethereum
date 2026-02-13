@@ -102,6 +102,10 @@ func (a *Applier) ApplyDiff(diff *ubtemit.QueuedDiffV1, blockNumber ...uint64) (
 	if len(blockNumber) > 0 {
 		blkNum = blockNumber[0]
 	}
+	codeByAddr := make(map[common.Address][]byte, len(diff.Codes))
+	for i := range diff.Codes {
+		codeByAddr[diff.Codes[i].Address] = diff.Codes[i].Code
+	}
 	// Apply accounts
 	for _, acct := range diff.Accounts {
 		if acct.Alive {
@@ -119,13 +123,7 @@ func (a *Applier) ApplyDiff(diff *ubtemit.QueuedDiffV1, blockNumber ...uint64) (
 				Root:     types.EmptyRootHash, // UBT doesn't use per-account storage roots
 				CodeHash: acct.CodeHash.Bytes(),
 			}
-			codeLen := 0
-			for _, code := range diff.Codes {
-				if code.Address == acct.Address {
-					codeLen = len(code.Code)
-					break
-				}
-			}
+			codeLen := len(codeByAddr[acct.Address])
 			if err := a.trie.UpdateAccount(acct.Address, stateAcct, codeLen); err != nil {
 				return common.Hash{}, fmt.Errorf("update account %s: %w", acct.Address, err)
 			}

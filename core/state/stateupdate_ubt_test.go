@@ -18,6 +18,7 @@ package state
 
 import (
 	"bytes"
+	"errors"
 	"math/big"
 	"testing"
 
@@ -252,7 +253,10 @@ func TestToUBTDiff_RawKeyRequired(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for non-raw storage keys")
 	}
-	if err.Error() != "UBT diff conversion requires raw storage keys (pre-Cancun block, UBT diffs will resume at Cancun activation)" {
+	if !errors.Is(err, ErrRawStorageKeyMissing) {
+		t.Fatalf("expected ErrRawStorageKeyMissing, got: %v", err)
+	}
+	if err.Error() == "ErrRawStorageKeyMissing" {
 		t.Fatalf("unexpected error message: %v", err)
 	}
 }

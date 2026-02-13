@@ -267,3 +267,17 @@ func TestConfigValidate_EdgeCases(t *testing.T) {
 		}
 	})
 }
+
+func TestConfig_ExecutionClassRPCEnabled_DefaultFalse(t *testing.T) {
+	cfg := &Config{}
+	if cfg.ExecutionClassRPCEnabled {
+		t.Fatalf("expected ExecutionClassRPCEnabled default false")
+	}
+}
+
+func TestConfig_ExecutionClassRPCEnabled_ExplicitTrue(t *testing.T) {
+	cfg := &Config{ExecutionClassRPCEnabled: true}
+	if !cfg.ExecutionClassRPCEnabled {
+		t.Fatalf("expected ExecutionClassRPCEnabled true when explicitly set")
+	}
+}

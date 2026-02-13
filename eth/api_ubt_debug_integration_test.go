@@ -36,8 +36,9 @@ import (
 
 // mockDaemonAPI implements the ubt_* namespace that the debug proxy forwards to.
 type mockDaemonAPI struct {
-	balances map[common.Address]*big.Int
-	status   map[string]any
+	balances         map[common.Address]*big.Int
+	status           map[string]any
+	executionEnabled bool
 }
 
 func validateMockSelector(blockNrOrHash *rpc.BlockNumberOrHash) error {
@@ -118,16 +119,22 @@ func (m *mockDaemonAPI) GetAccountProof(_ context.Context, addr common.Address, 
 	}, nil
 }
 
-func (m *mockDaemonAPI) CallUBT(_ context.Context, _ map[string]any) (hexutil.Bytes, error) {
-	return nil, fmt.Errorf("ubt_callUBT: execution-class RPC not yet available (Phase 7)")
+func (m *mockDaemonAPI) CallUBT(_ context.Context, _ map[string]any, _ *rpc.BlockNumberOrHash, _ map[string]any, _ map[string]any) (hexutil.Bytes, error) {
+	if !m.executionEnabled {
+		return nil, fmt.Errorf("ubt_callUBT: execution-class RPC disabled (set --execution-class-rpc-enabled)")
+	}
+	return hexutil.Bytes{0xaa, 0xbb}, nil
 }
 
-func (m *mockDaemonAPI) ExecutionWitnessUBT(_ context.Context, _ hexutil.Uint64) (map[string]any, error) {
-	return nil, fmt.Errorf("ubt_executionWitnessUBT: execution-class RPC not yet available (Phase 7)")
+func (m *mockDaemonAPI) ExecutionWitnessUBT(_ context.Context, _ *rpc.BlockNumberOrHash) (map[string]any, error) {
+	if !m.executionEnabled {
+		return nil, fmt.Errorf("ubt_executionWitnessUBT: execution-class RPC disabled (set --execution-class-rpc-enabled)")
+	}
+	return map[string]any{"status": "partial"}, nil
 }
 
 // startMockDaemon starts a mock UBT daemon RPC server and returns the endpoint URL.
-func startMockDaemon(t *testing.T) (string, func()) {
+func startMockDaemon(t *testing.T, executionEnabled bool) (string, func()) {
 	t.Helper()
 
 	server := rpc.NewServer()
@@ -137,10 +144,12 @@ func startMockDaemon(t *testing.T) (string, func()) {
 			common.HexToAddress("0x2222222222222222222222222222222222222222"): big.NewInt(99000),
 		},
 		status: map[string]any{
-			"appliedSeq":   uint64(100),
-			"appliedBlock": uint64(200),
-			"appliedRoot":  common.HexToHash("0xbeef"),
+			"appliedSeq":               uint64(100),
+			"appliedBlock":             uint64(200),
+			"appliedRoot":              common.HexToHash("0xbeef"),
+			"executionClassRPCEnabled": executionEnabled,
 		},
+		executionEnabled: executionEnabled,
 	}
 
 	if err := server.RegisterName("ubt", daemon); err != nil {
@@ -165,7 +174,7 @@ func startMockDaemon(t *testing.T) (string, func()) {
 // TestDebugProxyWiring verifies the full proxy chain:
 // UBTDebugAPI.GetUBTBalance → RPC call → mock daemon → response.
 func TestDebugProxyWiring(t *testing.T) {
-	endpoint, cleanup := startMockDaemon(t)
+	endpoint, cleanup := startMockDaemon(t, false)
 	defer cleanup()
 
 	api := NewUBTDebugAPI(endpoint, 5*time.Second)
@@ -290,33 +299,34 @@ func TestDebugProxyWiring(t *testing.T) {
 		}
 	})
 
-	// Test CallUBT returns Phase 7 error through proxy
-	t.Run("CallUBT Phase 7", func(t *testing.T) {
+	// Test CallUBT returns disabled error through proxy
+	t.Run("CallUBT disabled", func(t *testing.T) {
 		args := map[string]any{"to": "0x1234"}
-		_, err := api.CallUBT(ctx, args)
+		_, err := api.CallUBT(ctx, args, nil, nil, nil)
 		if err == nil {
 			t.Fatal("CallUBT should return error")
 		}
-		if !strings.Contains(err.Error(), "Phase 7") {
-			t.Errorf("expected Phase 7 error, got: %v", err)
+		if !strings.Contains(err.Error(), "disabled") {
+			t.Errorf("expected disabled error, got: %v", err)
 		}
 	})
 
-	// Test ExecutionWitnessUBT returns Phase 7 error through proxy
-	t.Run("ExecutionWitnessUBT Phase 7", func(t *testing.T) {
-		_, err := api.ExecutionWitnessUBT(ctx, 12345)
+	// Test ExecutionWitnessUBT returns disabled error through proxy
+	t.Run("ExecutionWitnessUBT disabled", func(t *testing.T) {
+		latest := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
+		_, err := api.ExecutionWitnessUBT(ctx, &latest)
 		if err == nil {
 			t.Fatal("ExecutionWitnessUBT should return error")
 		}
-		if !strings.Contains(err.Error(), "Phase 7") {
-			t.Errorf("expected Phase 7 error, got: %v", err)
+		if !strings.Contains(err.Error(), "disabled") {
+			t.Errorf("expected disabled error, got: %v", err)
 		}
 	})
 }
 
 // TestDebugProxyReconnect verifies that the proxy recovers from connection errors.
 func TestDebugProxyReconnect(t *testing.T) {
-	endpoint, cleanup := startMockDaemon(t)
+	endpoint, cleanup := startMockDaemon(t, false)
 	api := NewUBTDebugAPI(endpoint, 2*time.Second)
 	ctx := context.Background()
 
@@ -340,7 +350,7 @@ func TestDebugProxyReconnect(t *testing.T) {
 	}
 
 	// Start a new daemon on a different port
-	endpoint2, cleanup2 := startMockDaemon(t)
+	endpoint2, cleanup2 := startMockDaemon(t, false)
 	defer cleanup2()
 
 	// Create a new API pointing to the new endpoint
@@ -356,7 +366,7 @@ func TestDebugProxyReconnect(t *testing.T) {
 
 // TestDebugProxyBlockSelector verifies block selector is forwarded to daemon.
 func TestDebugProxyBlockSelector(t *testing.T) {
-	endpoint, cleanup := startMockDaemon(t)
+	endpoint, cleanup := startMockDaemon(t, false)
 	defer cleanup()
 
 	api := NewUBTDebugAPI(endpoint, 5*time.Second)
@@ -410,4 +420,31 @@ func TestDebugProxyBlockSelector(t *testing.T) {
 			t.Fatalf("hash selector should succeed: %v", err)
 		}
 	})
+}
+
+func TestDebugProxyExecutionRPCEnabled(t *testing.T) {
+	endpoint, cleanup := startMockDaemon(t, true)
+	defer cleanup()
+
+	api := NewUBTDebugAPI(endpoint, 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	args := map[string]any{"to": "0x1234567890123456789012345678901234567890", "data": "0x"}
+	ret, err := api.CallUBT(ctx, args, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("CallUBT should succeed when execution RPC is enabled: %v", err)
+	}
+	if len(ret) == 0 {
+		t.Fatal("CallUBT returned empty result unexpectedly")
+	}
+
+	latest := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
+	w, err := api.ExecutionWitnessUBT(ctx, &latest)
+	if err != nil {
+		t.Fatalf("ExecutionWitnessUBT should succeed when execution RPC is enabled: %v", err)
+	}
+	if status, ok := w["status"].(string); !ok || status == "" {
+		t.Fatalf("ExecutionWitnessUBT status missing: %#v", w)
+	}
 }

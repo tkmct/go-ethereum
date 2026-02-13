@@ -44,10 +44,10 @@ type Config struct {
 	// in production and provides consistent validation coverage.
 	ValidationSampleRate     uint64
 	QueryRPCEnabled          bool   // Enable query RPC server
-	QueryRPCListenAddr       string // Listen address for query RPC (default ":8546")
+	QueryRPCListenAddr       string // Listen address for query RPC (default: "localhost:8560")
 	ChainID                  uint64 // Chain ID for EVM execution (default: 1 = mainnet)
 	RPCGasCap                uint64 // Gas cap for CallUBT RPC (default: 50_000_000, same as geth)
-	BackpressureLagThreshold uint64 // Seq lag threshold to trigger faster commits (0 = disabled)
+	BackpressureLagThreshold uint64 // If outboxLag > threshold, commit is forced each loop (0 = disabled)
 
 	// Outbox disk budget (Chunk 2)
 	OutboxDiskBudgetBytes   uint64 // 0 = unlimited
@@ -62,13 +62,17 @@ type Config struct {
 	QueryRPCMaxBatch uint64 // Max batch size for list-style RPC methods (default: 100)
 
 	// Strict validation (Chunk 5)
-	ValidationStrictMode    bool // Validate ALL accounts/storage in diff against MPT
+	ValidationStrictMode     bool // Validate ALL accounts/storage in diff against MPT
 	ValidationHaltOnMismatch bool // Halt daemon on strict validation mismatch
 
 	// Migration workflow (Chunk 7)
 	ValidateOnlyMode       bool          // Shadow verification without trie modification
 	SyncedLagThreshold     uint64        // Blocks behind head to consider synced (default: 10)
 	ProductionReadinessMin time.Duration // Duration synced before production-ready (default: 10m)
+
+	// Execution-class RPC gate.
+	// Default false; must be explicitly enabled by operator.
+	ExecutionClassRPCEnabled bool
 }
 
 // Validate checks if the configuration is valid.

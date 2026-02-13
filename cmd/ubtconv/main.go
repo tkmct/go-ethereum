@@ -178,6 +178,11 @@ var (
 		Usage: "Duration synced before production-ready",
 		Value: 10 * time.Minute,
 	}
+	executionClassRPCEnabledFlag = &cli.BoolFlag{
+		Name:  "execution-class-rpc-enabled",
+		Usage: "Enable execution-class RPC methods (ubt_callUBT, ubt_executionWitnessUBT)",
+		Value: false,
+	}
 )
 
 func init() {
@@ -212,6 +217,7 @@ func init() {
 		validateOnlyModeFlag,
 		syncedLagThresholdFlag,
 		productionReadinessMinFlag,
+		executionClassRPCEnabledFlag,
 	}
 }
 
@@ -226,8 +232,39 @@ func runDaemon(ctx *cli.Context) error {
 	// Set up logging
 	log.SetDefault(log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelInfo, true)))
 
-	// Build config from flags
-	cfg := &Config{
+	cfg := buildConfigFromCLI(ctx)
+
+	// Validate config
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid config: %w", err)
+	}
+
+	// Create and start runner
+	runner, err := NewRunner(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create runner: %w", err)
+	}
+
+	// Handle signals
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	// Start
+	if err := runner.Start(); err != nil {
+		return fmt.Errorf("failed to start: %w", err)
+	}
+
+	log.Info("UBT conversion daemon started", "endpoint", cfg.OutboxRPCEndpoint, "datadir", cfg.DataDir)
+
+	// Wait for signal
+	sig := <-sigCh
+	log.Info("Received signal, shutting down", "signal", sig)
+
+	return runner.Stop()
+}
+
+func buildConfigFromCLI(ctx *cli.Context) *Config {
+	return &Config{
 		OutboxRPCEndpoint:        ctx.String(outboxRPCEndpointFlag.Name),
 		DataDir:                  ctx.String(dataDirectoryFlag.Name),
 		ApplyCommitInterval:      ctx.Uint64(applyCommitIntervalFlag.Name),
@@ -257,33 +294,6 @@ func runDaemon(ctx *cli.Context) error {
 		ValidateOnlyMode:         ctx.Bool(validateOnlyModeFlag.Name),
 		SyncedLagThreshold:       ctx.Uint64(syncedLagThresholdFlag.Name),
 		ProductionReadinessMin:   ctx.Duration(productionReadinessMinFlag.Name),
+		ExecutionClassRPCEnabled: ctx.Bool(executionClassRPCEnabledFlag.Name),
 	}
-
-	// Validate config
-	if err := cfg.Validate(); err != nil {
-		return fmt.Errorf("invalid config: %w", err)
-	}
-
-	// Create and start runner
-	runner, err := NewRunner(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to create runner: %w", err)
-	}
-
-	// Handle signals
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	// Start
-	if err := runner.Start(); err != nil {
-		return fmt.Errorf("failed to start: %w", err)
-	}
-
-	log.Info("UBT conversion daemon started", "endpoint", cfg.OutboxRPCEndpoint, "datadir", cfg.DataDir)
-
-	// Wait for signal
-	sig := <-sigCh
-	log.Info("Received signal, shutting down", "signal", sig)
-
-	return runner.Stop()
 }

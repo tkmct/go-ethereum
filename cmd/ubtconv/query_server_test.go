@@ -34,10 +34,16 @@ import (
 func TestQueryAPI_Status(t *testing.T) {
 	// Create a minimal consumer with no applier to test status reporting
 	consumer := &Consumer{
+		cfg: &Config{
+			ExecutionClassRPCEnabled: true,
+		},
 		state: ConsumerState{
-			AppliedSeq:   123,
-			AppliedBlock: 456,
-			AppliedRoot:  common.HexToHash("0xabc"),
+			AppliedSeq:       123,
+			AppliedBlock:     456,
+			AppliedRoot:      common.HexToHash("0xabc"),
+			PendingSeq:       124,
+			PendingStatus:    rawdb.UBTConsumerPendingInFlight,
+			PendingUpdatedAt: 1700000000,
 		},
 	}
 
@@ -57,6 +63,27 @@ func TestQueryAPI_Status(t *testing.T) {
 	}
 	if status["appliedRoot"] != common.HexToHash("0xabc") {
 		t.Errorf("Expected appliedRoot=0xabc, got %v", status["appliedRoot"])
+	}
+	if status["outboxLag"] != uint64(0) {
+		t.Errorf("Expected outboxLag=0, got %v", status["outboxLag"])
+	}
+	if status["pendingSeq"] != uint64(124) {
+		t.Errorf("Expected pendingSeq=124, got %v", status["pendingSeq"])
+	}
+	if status["pendingState"] != "inflight" {
+		t.Errorf("Expected pendingState=inflight, got %v", status["pendingState"])
+	}
+	if status["pendingUpdatedAt"] != uint64(1700000000) {
+		t.Errorf("Expected pendingUpdatedAt=1700000000, got %v", status["pendingUpdatedAt"])
+	}
+	if status["backpressureLagThreshold"] != uint64(0) {
+		t.Errorf("Expected backpressureLagThreshold=0, got %v", status["backpressureLagThreshold"])
+	}
+	if status["backpressureTriggered"] != false {
+		t.Errorf("Expected backpressureTriggered=false, got %v", status["backpressureTriggered"])
+	}
+	if status["executionClassRPCEnabled"] != true {
+		t.Errorf("Expected executionClassRPCEnabled=true, got %v", status["executionClassRPCEnabled"])
 	}
 }
 
