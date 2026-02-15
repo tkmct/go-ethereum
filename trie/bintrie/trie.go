@@ -324,7 +324,30 @@ func (t *BinaryTrie) GetCode(addr common.Address) ([]byte, error) {
 // not be modified by the caller. If a node was not found in the database, a
 // trie.MissingNodeError is returned.
 func (t *BinaryTrie) GetStorage(addr common.Address, key []byte) ([]byte, error) {
-	return t.root.Get(GetBinaryTreeKey(addr, key), t.nodeResolver)
+	storageKey := GetBinaryTreeKeyStorageSlot(addr, key)
+	stem := storageKey[:StemSize]
+	slot := storageKey[StemSize]
+
+	switch r := t.root.(type) {
+	case *InternalNode:
+		values, err := r.GetValuesAtStem(stem, t.nodeResolver)
+		if err != nil {
+			return nil, fmt.Errorf("GetStorage (%x) error: %v", addr, err)
+		}
+		if values == nil {
+			return nil, nil
+		}
+		return values[slot], nil
+	case *StemNode:
+		if !bytes.Equal(r.Stem, stem) {
+			return nil, nil
+		}
+		return r.Values[slot], nil
+	case Empty:
+		return nil, nil
+	default:
+		return nil, errInvalidRootType
+	}
 }
 
 // UpdateAccount updates the account information for the given address.

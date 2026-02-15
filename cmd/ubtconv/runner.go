@@ -30,10 +30,9 @@ import (
 
 // Runner manages the daemon lifecycle.
 type Runner struct {
-	cfg          *Config
-	consumer     *Consumer
-	queryServer  *QueryServer
-	phaseTracker *PhaseTracker
+	cfg         *Config
+	consumer    *Consumer
+	queryServer *QueryServer
 
 	stopCh          chan struct{}
 	wg              sync.WaitGroup
@@ -49,24 +48,10 @@ func NewRunner(cfg *Config) (*Runner, error) {
 		return nil, err
 	}
 
-	syncedLag := cfg.SyncedLagThreshold
-	if syncedLag == 0 {
-		syncedLag = 10
-	}
-	prodMin := cfg.ProductionReadinessMin
-	if prodMin == 0 {
-		prodMin = 10 * time.Minute
-	}
-	phaseTracker := NewPhaseTracker(syncedLag, prodMin, cfg.ValidateOnlyMode)
-
-	// Set phase tracker reference on consumer for status reporting
-	consumer.phaseTracker = phaseTracker
-
 	return &Runner{
-		cfg:          cfg,
-		consumer:     consumer,
-		phaseTracker: phaseTracker,
-		stopCh:       make(chan struct{}),
+		cfg:      cfg,
+		consumer: consumer,
+		stopCh:   make(chan struct{}),
 	}, nil
 }
 
@@ -125,19 +110,7 @@ func (r *Runner) Stop() error {
 func (r *Runner) loop() {
 	defer r.wg.Done()
 
-	// Handle bootstrap mode on first start (only if no persisted state exists)
-	r.consumer.mu.Lock()
-	needsBootstrap := !r.consumer.hasState
-	r.consumer.mu.Unlock()
-
-	if needsBootstrap {
-		if err := r.bootstrap(); err != nil {
-			log.Error("Bootstrap failed", "err", err)
-			return
-		}
-	}
-
-	log.Info("UBT consumer loop started", "mode", r.cfg.BootstrapMode, "appliedSeq", r.consumer.state.AppliedSeq)
+	log.Info("UBT consumer loop started", "appliedSeq", r.consumer.state.AppliedSeq)
 
 	backoff := time.Second
 	maxBackoff := 30 * time.Second
@@ -150,13 +123,7 @@ func (r *Runner) loop() {
 			log.Info("UBT consumer loop stopped")
 			return
 		default:
-			// Choose consume mode based on configuration
-			var consumeErr error
-			if r.cfg.ValidateOnlyMode {
-				consumeErr = r.consumer.ConsumeNextValidateOnly()
-			} else {
-				consumeErr = r.consumer.ConsumeNext()
-			}
+			consumeErr := r.consumer.ConsumeNext()
 
 			if consumeErr != nil {
 				// Check for fatal validation halt — stop the daemon, don't retry
@@ -180,7 +147,6 @@ func (r *Runner) loop() {
 				// Log and backoff on transient error
 				log.Debug("UBT consume backoff", "err", consumeErr, "backoff", backoff)
 				consumerBackoffGauge.Update(backoff.Milliseconds())
-				r.phaseTracker.UpdatePhase(r.consumer.outboxLag, false, true)
 				select {
 				case <-r.stopCh:
 					return
@@ -201,46 +167,9 @@ func (r *Runner) loop() {
 					r.refreshOutboxLag()
 					lastLagCheck = time.Now()
 				}
-
-				// Update phase tracker
-				r.phaseTracker.UpdatePhase(r.consumer.outboxLag, true, false)
 			}
 		}
 	}
-}
-
-// bootstrap handles initial bootstrap based on the configured mode.
-func (r *Runner) bootstrap() error {
-	switch r.cfg.BootstrapMode {
-	case "tail":
-		return r.bootstrapTail()
-	case "backfill-direct":
-		return r.bootstrapBackfillDirect()
-	default:
-		return fmt.Errorf("unknown bootstrap mode: %s", r.cfg.BootstrapMode)
-	}
-}
-
-// bootstrapTail skips to the latest outbox event for tail mode.
-func (r *Runner) bootstrapTail() error {
-	// Get the latest seq from the outbox via RPC
-	latestSeq, err := r.consumer.reader.LatestSeq()
-	if err != nil {
-		return fmt.Errorf("failed to get latest seq for tail bootstrap: %w", err)
-	}
-
-	// Set the consumer to start from the latest seq (skip all past events).
-	// Must update both durable state (AppliedSeq) and in-memory state (processedSeq)
-	// so ConsumeNext targets latestSeq+1 correctly.
-	r.consumer.mu.Lock()
-	r.consumer.state.AppliedSeq = latestSeq
-	r.consumer.processedSeq = latestSeq
-	r.consumer.hasState = true
-	r.consumer.persistState()
-	r.consumer.mu.Unlock()
-
-	log.Info("Bootstrap tail: skipping to latest seq", "seq", latestSeq)
-	return nil
 }
 
 // refreshOutboxLag queries latest outbox seq and updates lag:
@@ -298,10 +227,6 @@ const (
 // compactionLoop periodically triggers outbox compaction via geth RPC.
 func (r *Runner) compactionLoop() {
 	defer r.wg.Done()
-
-	if r.cfg.ValidateOnlyMode {
-		return // No compaction in validate-only mode
-	}
 
 	ticker := time.NewTicker(compactionInterval)
 	defer ticker.Stop()

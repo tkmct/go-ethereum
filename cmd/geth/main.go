@@ -105,8 +105,6 @@ var (
 		utils.UBTOutboxRetentionWindowFlag,
 		utils.UBTDebugEndpointFlag,
 		utils.UBTDebugTimeoutFlag,
-		utils.UBTReplayRPCEnabledFlag,
-		utils.UBTReplayRPCEndpointFlag,
 		utils.UBTDebugRPCProxyEnabledFlag,
 		utils.LightKDFFlag,
 		utils.EthRequiredBlocksFlag,

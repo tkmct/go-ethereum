@@ -128,9 +128,6 @@ type Consumer struct {
 
 	// Last diff for strict validation (retained between ConsumeNext and commit)
 	lastDiff *ubtemit.QueuedDiffV1
-
-	// Phase tracker reference (set by runner for status reporting)
-	phaseTracker *PhaseTracker
 }
 
 // NewConsumer creates a new outbox consumer.
@@ -147,7 +144,7 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 	reader := NewOutboxReader(cfg.OutboxRPCEndpoint)
 
 	var validator *Validator
-	if (cfg.ValidationEnabled && cfg.ValidationSampleRate > 0) || cfg.ValidationStrictMode || cfg.ValidateOnlyMode {
+	if (cfg.ValidationEnabled && cfg.ValidationSampleRate > 0) || cfg.ValidationStrictMode {
 		validator = NewValidator(reader)
 	}
 
@@ -213,23 +210,21 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 	}
 	c.applier = applier
 
-	// Wire slot index if configured
-	if cfg.SlotIndexMode != "" && cfg.SlotIndexMode != "off" {
-		cancunBlock := cfg.CancunBlock
-		if cancunBlock == 0 {
-			// No explicit Cancun block provided — estimate from chain config timestamp.
-			// This is approximate (assumes ~12s blocks from genesis). For production use,
-			// set --cancun-block explicitly for correctness.
-			chainCfg := cfg.resolveChainConfig()
-			if chainCfg.CancunTime != nil {
-				cancunBlock = *chainCfg.CancunTime / 12
-				log.Warn("Cancun block estimated from timestamp (use --cancun-block for precision)",
-					"estimated", cancunBlock, "cancunTime", *chainCfg.CancunTime)
-			}
+	// Wire slot index in fixed pre-Cancun tracking mode.
+	cancunBlock := cfg.CancunBlock
+	if cancunBlock == 0 {
+		// No explicit Cancun block provided — estimate from chain config timestamp.
+		// This is approximate (assumes ~12s blocks from genesis). For production use,
+		// set --cancun-block explicitly for correctness.
+		chainCfg := cfg.resolveChainConfig()
+		if chainCfg.CancunTime != nil {
+			cancunBlock = *chainCfg.CancunTime / 12
+			log.Warn("Cancun block estimated from timestamp (use --cancun-block for precision)",
+				"estimated", cancunBlock, "cancunTime", *chainCfg.CancunTime)
 		}
-		si := NewSlotIndex(c.db, cfg.SlotIndexMode, cancunBlock, cfg.SlotIndexDiskBudget, 80)
-		applier.SetSlotIndex(si)
 	}
+	si := NewSlotIndex(c.db, cancunBlock, cfg.SlotIndexDiskBudget, 80)
+	applier.SetSlotIndex(si)
 
 	return c, nil
 }
@@ -724,68 +719,6 @@ func (c *Consumer) restoreFromAnchor(targetBlock uint64) error {
 	return nil
 }
 
-// ConsumeNextValidateOnly reads the next event and validates diff values against MPT
-// without applying to the trie. Used in validate-only mode for shadow verification.
-func (c *Consumer) ConsumeNextValidateOnly() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	targetSeq := c.processedSeq + 1
-	env, err := c.reader.ReadEvent(targetSeq)
-	if err != nil {
-		consumerErrorsTotal.Inc(1)
-		return fmt.Errorf("read event %d: %w", targetSeq, err)
-	}
-	if env == nil {
-		consumerErrorsTotal.Inc(1)
-		return fmt.Errorf("no event at seq %d", targetSeq)
-	}
-
-	if env.Kind == ubtemit.KindDiff {
-		diff, err := ubtemit.DecodeDiff(env.Payload)
-		if err != nil {
-			return fmt.Errorf("decode diff at seq %d: %w", targetSeq, err)
-		}
-		// Crash-consistency: persist pendingSeq AFTER decode validation but BEFORE validation (plan §12).
-		c.markPendingSeq(targetSeq)
-
-		// Validate diff values directly against MPT (not the local trie,
-		// which doesn't advance in validate-only mode).
-		if c.validator != nil {
-			if err := c.validator.ValidateDiffAgainstMPT(env.BlockNumber, diff); err != nil {
-				log.Error("Validate-only mode: validation failed", "block", env.BlockNumber, "err", err)
-				validationMismatches.Inc(1)
-				return &errValidationHalt{err: err}
-			}
-			validationChecksTotal.Inc(1)
-		}
-	}
-
-	c.processedSeq = targetSeq
-	c.pendingBlock = env.BlockNumber
-
-	// Persist progress periodically so restarts don't re-validate from the beginning
-	c.uncommittedBlocks++
-	if c.uncommittedBlocks >= c.cfg.ApplyCommitInterval {
-		c.persistValidateOnlyProgress()
-	}
-
-	log.Debug("Validate-only event processed", "seq", targetSeq, "kind", env.Kind, "block", env.BlockNumber)
-	return nil
-}
-
-// persistValidateOnlyProgress persists seq/block checkpoint for validate-only mode
-// WITHOUT touching AppliedRoot or calling trie commit.
-func (c *Consumer) persistValidateOnlyProgress() {
-	c.state.AppliedSeq = c.processedSeq
-	c.state.AppliedBlock = c.pendingBlock
-	c.clearPendingMetadata()
-	// NOTE: Do NOT update c.state.AppliedRoot — validate-only never modifies the trie
-	c.persistState()
-	c.hasState = true
-	c.uncommittedBlocks = 0
-}
-
 // persistState writes the consumer state to the database.
 func (c *Consumer) persistState() {
 	rawdb.WriteUBTConsumerState(c.db, &rawdb.UBTConsumerState{
@@ -835,9 +768,7 @@ func (c *Consumer) clearPendingSeq() {
 func (c *Consumer) Close() error {
 	c.mu.Lock()
 	if c.uncommittedBlocks > 0 {
-		if c.cfg.ValidateOnlyMode {
-			c.persistValidateOnlyProgress()
-		} else if c.safeToCommit() {
+		if c.safeToCommit() {
 			if err := c.commit(); err != nil {
 				log.Error("Failed to commit on close", "err", err)
 			}

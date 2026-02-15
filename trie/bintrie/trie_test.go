@@ -341,6 +341,46 @@ func TestGetCode_NonExistentAccount(t *testing.T) {
 	}
 }
 
+func TestGetStorage_RoundTrip(t *testing.T) {
+	tr := &BinaryTrie{
+		root:   NewBinaryNode(),
+		tracer: trie.NewPrevalueTracer(),
+	}
+	addr := common.HexToAddress("0xcccccccccccccccccccccccccccccccccccccccc")
+
+	tests := []struct {
+		name  string
+		slot  common.Hash
+		value common.Hash
+	}{
+		{
+			name:  "slot zero",
+			slot:  common.Hash{},
+			value: common.HexToHash("0x2a"),
+		},
+		{
+			name:  "non-zero slot",
+			slot:  common.HexToHash("0x1234"),
+			value: common.HexToHash("0xabcd"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tr.UpdateStorage(addr, tt.slot.Bytes(), tt.value.Bytes()); err != nil {
+				t.Fatalf("UpdateStorage(%s): %v", tt.name, err)
+			}
+			got, err := tr.GetStorage(addr, tt.slot.Bytes())
+			if err != nil {
+				t.Fatalf("GetStorage(%s): %v", tt.name, err)
+			}
+			if !bytes.Equal(got, tt.value.Bytes()) {
+				t.Fatalf("GetStorage(%s) mismatch: got %x want %x", tt.name, got, tt.value.Bytes())
+			}
+		})
+	}
+}
+
 func sha256Sum(data []byte) common.Hash {
 	h := sha256.New()
 	h.Write(data)

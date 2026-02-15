@@ -20,7 +20,7 @@ package main
 // Scenarios are from verification_process.md Section 2 "Integration Test Matrix".
 //
 // Matrix dimensions:
-//   - Bootstrap mode: tail, backfill-direct
+//   - Full-sync startup and resume behavior
 //   - State: fresh start vs restart with persisted state
 //   - Chain behavior: linear import vs reorg
 //   - RPC target: daemon direct (ubt_*) vs geth proxy (debug_getUBT*)
@@ -249,49 +249,7 @@ func TestVerify_FreshStartConsumesSeqZero(t *testing.T) {
 	}
 }
 
-// --- Scenario 2: Tail bootstrap skips historical backlog ---
-
-func TestVerify_TailBootstrapSkipsBacklog(t *testing.T) {
-	// Tail mode should skip all past events and set processedSeq to latestSeq.
-	// After bootstrap, the consumer should target latestSeq+1.
-
-	latestSeq := uint64(500)
-
-	c := &Consumer{
-		cfg: &Config{
-			ApplyCommitInterval:   100,
-			ApplyCommitMaxLatency: time.Hour,
-			BootstrapMode:         "tail",
-		},
-		hasState:       false,
-		processedSeq:   ^uint64(0),
-		lastCommitTime: time.Now(),
-	}
-
-	// Simulate bootstrapTail behavior (without real RPC)
-	c.state.AppliedSeq = latestSeq
-	c.processedSeq = latestSeq
-	c.hasState = true
-
-	// After tail bootstrap, next target should be latestSeq+1
-	nextTarget := c.processedSeq + 1
-	if nextTarget != latestSeq+1 {
-		t.Fatalf("after tail bootstrap, next target should be %d, got %d", latestSeq+1, nextTarget)
-	}
-
-	// hasState should be true to prevent re-bootstrap on restart
-	if !c.hasState {
-		t.Fatal("hasState should be true after tail bootstrap")
-	}
-
-	// Verify bootstrap would not trigger again (runner.loop checks !hasState)
-	needsBootstrap := !c.hasState
-	if needsBootstrap {
-		t.Fatal("bootstrap should not trigger again after tail bootstrap")
-	}
-}
-
-// --- Scenario 3: Restart after consuming seq=0 starts at seq=1 ---
+// --- Scenario 2: Restart after consuming seq=0 starts at seq=1 ---
 
 func TestVerify_RestartAfterSeqZero(t *testing.T) {
 	// After consuming and committing seq=0, a restart should load AppliedSeq=0
@@ -1034,17 +992,14 @@ func TestVerify_FullPipelineIntegration(t *testing.T) {
 	})
 
 	// Query storage for addr2.
-	// Note: Binary trie storage querying has known limitations with the unified
-	// key space. The method should succeed without error/panic. Value correctness
-	// depends on the binary trie's storage stem implementation.
 	t.Run("storage for addr2", func(t *testing.T) {
 		var value hexutil.Bytes
 		if err := client.CallContext(ctx, &value, "ubt_getStorageAt", addr2, slot); err != nil {
-			t.Fatalf("ubt_getStorageAt should not error: %v", err)
+			t.Fatalf("ubt_getStorageAt: %v", err)
 		}
-		// Verify we got a 32-byte response (the method doesn't crash/panic)
-		if len(value) != 32 {
-			t.Errorf("expected 32-byte storage value, got %d bytes", len(value))
+		want := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000deadbeef")
+		if common.BytesToHash(value) != want {
+			t.Errorf("expected storage=%s, got %s", want.Hex(), common.BytesToHash(value).Hex())
 		}
 	})
 

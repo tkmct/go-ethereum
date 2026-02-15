@@ -190,7 +190,6 @@ func TestTC_StartupRecovery(t *testing.T) {
 		ApplyCommitInterval:   128,
 		ApplyCommitMaxLatency: time.Hour,
 		OutboxRPCEndpoint:     "http://localhost:9999",
-		BootstrapMode:         "tail",
 	}
 
 	// Create applier, commit state, close — verifies clean shutdown.
@@ -284,45 +283,36 @@ func TestTC_ValidateStrict_HaltOnMismatch(t *testing.T) {
 
 // ===== Gap 3: Slot Index =====
 
-func TestTC_SlotIndex_AutoMode_FreezesAtCancun(t *testing.T) {
+func TestTC_SlotIndex_FreezesAtCancun(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
-	si := NewSlotIndex(db, "auto", 1000, 0, 80) // Cancun at block 1000
+	si := NewSlotIndex(db, 1000, 0, 80) // Cancun at block 1000
 
 	if !si.ShouldIndex(999) {
-		t.Error("auto mode should index before Cancun")
+		t.Error("slot index should index before Cancun")
 	}
 	if si.ShouldIndex(1000) {
-		t.Error("auto mode should not index at Cancun block")
+		t.Error("slot index should not index at Cancun block")
 	}
 	if si.ShouldIndex(1001) {
-		t.Error("auto mode should not index after Cancun")
+		t.Error("slot index should not index after Cancun")
 	}
 }
 
-func TestTC_SlotIndex_OnMode_AlwaysIndexes(t *testing.T) {
+func TestTC_SlotIndex_NoCancunBoundary_AlwaysIndexes(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
-	si := NewSlotIndex(db, "on", 1000, 0, 80)
+	si := NewSlotIndex(db, 0, 0, 80)
 
-	if !si.ShouldIndex(999) {
-		t.Error("on mode should always index before Cancun")
+	if !si.ShouldIndex(1) {
+		t.Error("slot index should index without Cancun boundary")
 	}
-	if !si.ShouldIndex(1001) {
-		t.Error("on mode should always index after Cancun")
-	}
-}
-
-func TestTC_SlotIndex_OffMode_NeverIndexes(t *testing.T) {
-	db := rawdb.NewMemoryDatabase()
-	si := NewSlotIndex(db, "off", 1000, 0, 80)
-
-	if si.ShouldIndex(500) {
-		t.Error("off mode should never index")
+	if !si.ShouldIndex(1000000) {
+		t.Error("slot index should keep indexing without Cancun boundary")
 	}
 }
 
 func TestTC_SlotIndex_BudgetExhaustion(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
-	si := NewSlotIndex(db, "on", 0, 128, 80) // tiny budget
+	si := NewSlotIndex(db, 0, 128, 80) // tiny budget
 
 	addr := common.HexToAddress("0x1111")
 	// Fill up the budget
@@ -342,7 +332,7 @@ func TestTC_SlotIndex_BudgetExhaustion(t *testing.T) {
 
 func TestTC_SlotIndex_DeleteSlotsForAccount(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
-	si := NewSlotIndex(db, "on", 0, 0, 80)
+	si := NewSlotIndex(db, 0, 0, 80)
 
 	addr := common.HexToAddress("0x2222")
 	for i := 0; i < 5; i++ {
@@ -474,95 +464,6 @@ func TestTC_VerifyProof_InvalidProof(t *testing.T) {
 	_, err := bintrie.VerifyProof(root, key, db)
 	if err == nil {
 		t.Fatal("expected error for missing proof nodes")
-	}
-}
-
-// ===== Gap 7: Phase Tracker =====
-
-func TestTC_PhaseTracker_Transitions(t *testing.T) {
-	pt := NewPhaseTracker(10, 10*time.Minute, false)
-
-	if pt.Current() != PhaseInitializing {
-		t.Errorf("expected initializing, got %s", pt.Current())
-	}
-
-	// Catching up (high lag)
-	pt.UpdatePhase(100, true, false)
-	if pt.Current() != PhaseCatchingUp {
-		t.Errorf("expected catching-up, got %s", pt.Current())
-	}
-
-	// Synced (low lag)
-	pt.UpdatePhase(5, true, false)
-	if pt.Current() != PhaseSynced {
-		t.Errorf("expected synced, got %s", pt.Current())
-	}
-
-	// Error causes diverged
-	pt.UpdatePhase(5, false, true)
-	if pt.Current() != PhaseDiverged {
-		t.Errorf("expected diverged, got %s", pt.Current())
-	}
-
-	// Recovery back to catching-up
-	pt.UpdatePhase(100, true, false)
-	if pt.Current() != PhaseCatchingUp {
-		t.Errorf("expected catching-up after recovery, got %s", pt.Current())
-	}
-}
-
-func TestTC_PhaseTracker_ProductionReady(t *testing.T) {
-	pt := NewPhaseTracker(10, 100*time.Millisecond, false)
-
-	if pt.IsProductionReady() {
-		t.Error("should not be production ready initially")
-	}
-
-	// Get to synced state with many validations
-	pt.UpdatePhase(0, true, false)
-	for i := 0; i < 101; i++ {
-		pt.UpdatePhase(0, true, false)
-	}
-
-	// Wait for production readiness duration
-	time.Sleep(150 * time.Millisecond)
-
-	if !pt.IsProductionReady() {
-		t.Error("should be production ready after synced duration + validations")
-	}
-}
-
-func TestTC_ValidateOnlyMode_NoTrieModification(t *testing.T) {
-	// In validate-only mode, ConsumeNextValidateOnly should not modify the trie.
-	// We can verify by checking that the root doesn't change.
-
-	applier := newTestApplier(t)
-	defer applier.Close()
-
-	rootBefore := applier.Root()
-
-	cfg := &Config{
-		ApplyCommitInterval:   100,
-		ApplyCommitMaxLatency: time.Hour,
-		ValidateOnlyMode:      true,
-	}
-
-	c := &Consumer{
-		cfg:            cfg,
-		applier:        applier,
-		lastCommitTime: time.Now(),
-		processedSeq:   ^uint64(0),
-	}
-
-	// The consumer's trie root should not change since we don't call ConsumeNextValidateOnly
-	// (which requires a real reader). We verify the validate-only mode flag is set correctly.
-	if !c.cfg.ValidateOnlyMode {
-		t.Error("ValidateOnlyMode should be true")
-	}
-
-	rootAfter := applier.Root()
-	if rootBefore != rootAfter {
-		t.Error("trie root should not change in validate-only mode")
 	}
 }
 

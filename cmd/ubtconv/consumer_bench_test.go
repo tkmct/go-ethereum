@@ -79,7 +79,6 @@ func BenchmarkConfigValidate(b *testing.B) {
 		DataDir:               "/tmp/ubtconv",
 		ApplyCommitInterval:   100,
 		ApplyCommitMaxLatency: 5 * time.Minute,
-		BootstrapMode:         "tail",
 		TrieDBScheme:          "path",
 		TrieDBStateHistory:    90000,
 	}
@@ -97,7 +96,6 @@ func BenchmarkConfigValidate_Parallel(b *testing.B) {
 		DataDir:               "/tmp/ubtconv",
 		ApplyCommitInterval:   100,
 		ApplyCommitMaxLatency: 5 * time.Minute,
-		BootstrapMode:         "tail",
 		TrieDBScheme:          "path",
 	}
 

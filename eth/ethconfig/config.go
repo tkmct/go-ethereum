@@ -50,31 +50,31 @@ var FullNodeGPO = gasprice.Config{
 
 // Defaults contains default settings for use on the Ethereum main net.
 var Defaults = Config{
-	HistoryMode:             history.KeepAll,
-	SyncMode:                SnapSync,
-	NetworkId:               0, // enable auto configuration of networkID == chainID
-	TxLookupLimit:           2350000,
-	TransactionHistory:      2350000,
-	LogHistory:              2350000,
-	StateHistory:            pathdb.Defaults.StateHistory,
-	TrienodeHistory:         pathdb.Defaults.TrienodeHistory,
-	NodeFullValueCheckpoint: pathdb.Defaults.FullValueCheckpoint,
-	DatabaseCache:           512,
-	TrieCleanCache:          154,
-	TrieDirtyCache:          256,
-	TrieTimeout:             60 * time.Minute,
-	SnapshotCache:           102,
-	FilterLogCacheSize:      32,
-	LogQueryLimit:           1000,
-	Miner:                   miner.DefaultConfig,
-	TxPool:                  legacypool.DefaultConfig,
-	BlobPool:                blobpool.DefaultConfig,
-	RPCGasCap:               50000000,
-	RPCEVMTimeout:           5 * time.Second,
-	GPO:                     FullNodeGPO,
-	RPCTxFeeCap:             1, // 1 ether
-	TxSyncDefaultTimeout:    20 * time.Second,
-	TxSyncMaxTimeout:        1 * time.Minute,
+	HistoryMode:              history.KeepAll,
+	SyncMode:                 SnapSync,
+	NetworkId:                0, // enable auto configuration of networkID == chainID
+	TxLookupLimit:            2350000,
+	TransactionHistory:       2350000,
+	LogHistory:               2350000,
+	StateHistory:             pathdb.Defaults.StateHistory,
+	TrienodeHistory:          pathdb.Defaults.TrienodeHistory,
+	NodeFullValueCheckpoint:  pathdb.Defaults.FullValueCheckpoint,
+	DatabaseCache:            512,
+	TrieCleanCache:           154,
+	TrieDirtyCache:           256,
+	TrieTimeout:              60 * time.Minute,
+	SnapshotCache:            102,
+	FilterLogCacheSize:       32,
+	LogQueryLimit:            1000,
+	Miner:                    miner.DefaultConfig,
+	TxPool:                   legacypool.DefaultConfig,
+	BlobPool:                 blobpool.DefaultConfig,
+	RPCGasCap:                50000000,
+	RPCEVMTimeout:            5 * time.Second,
+	GPO:                      FullNodeGPO,
+	RPCTxFeeCap:              1, // 1 ether
+	TxSyncDefaultTimeout:     20 * time.Second,
+	TxSyncMaxTimeout:         1 * time.Minute,
 	SlowBlockThreshold:       -1, // Disabled by default; set via --debug.logslowblock flag
 	RangeLimit:               0,
 	UBTReorgMarkerEnabled:    true,
@@ -130,18 +130,16 @@ type Config struct {
 	StateScheme string `toml:",omitempty"`
 
 	// UBT conversion options
-	UBTConversionEnabled       bool          // Enable UBT outbox emission
-	UBTDecoupledMode           bool          // Use decoupled outbox+daemon architecture
-	UBTOutboxDBPath            string        // Path for dedicated outbox DB (default: <datadir>/ubt-outbox)
-	UBTOutboxWriteTimeout      time.Duration // Outbox write timeout
-	UBTReorgMarkerEnabled      bool          // Emit reorg markers (default: true)
-	UBTOutboxReadRPCEnabled    bool          // Enable outbox-read RPC (default: true)
-	UBTOutboxRetentionWindow   uint64        // Keep last N sequences (0 = unlimited)
-	UBTDebugEndpoint            string        // UBT daemon RPC endpoint for debug proxy (empty = disabled)
-	UBTDebugTimeout             time.Duration // Timeout for UBT debug RPC calls (default: 5s)
-	UBTReplayRPCEnabled         bool          // Enable replay RPC for archive-based recovery
-	UBTReplayRPCEndpoint        string        // Endpoint for replay RPC (default: same as main RPC)
-	UBTDebugRPCProxyEnabled     bool          // Explicitly enable UBT debug RPC proxy (default: false; also enabled when UBTDebugEndpoint is set)
+	UBTConversionEnabled     bool          // Enable UBT outbox emission
+	UBTDecoupledMode         bool          // Use decoupled outbox+daemon architecture
+	UBTOutboxDBPath          string        // Path for dedicated outbox DB (default: <datadir>/ubt-outbox)
+	UBTOutboxWriteTimeout    time.Duration // Outbox write timeout
+	UBTReorgMarkerEnabled    bool          // Emit reorg markers (default: true)
+	UBTOutboxReadRPCEnabled  bool          // Enable outbox-read RPC (default: true)
+	UBTOutboxRetentionWindow uint64        // Keep last N sequences (0 = unlimited)
+	UBTDebugEndpoint         string        // UBT daemon RPC endpoint for debug proxy (empty = disabled)
+	UBTDebugTimeout          time.Duration // Timeout for UBT debug RPC calls (default: 5s)
+	UBTDebugRPCProxyEnabled  bool          // Explicitly enable UBT debug RPC proxy (default: false; also enabled when UBTDebugEndpoint is set)
 
 	// RequiredBlocks is a set of block number -> hash mappings which must be in the
 	// canonical chain of all remote peers. Setting the option makes geth verify the

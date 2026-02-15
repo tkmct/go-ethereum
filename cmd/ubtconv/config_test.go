@@ -28,7 +28,6 @@ func TestConfigValidate_MissingRPCEndpoint(t *testing.T) {
 		DataDir:               "/tmp/test",
 		ApplyCommitInterval:   10,
 		ApplyCommitMaxLatency: time.Minute,
-		BootstrapMode:         "tail",
 		TrieDBScheme:          "path",
 	}
 	err := cfg.Validate()
@@ -46,7 +45,6 @@ func TestConfigValidate_MissingDataDir(t *testing.T) {
 		DataDir:               "", // Missing
 		ApplyCommitInterval:   10,
 		ApplyCommitMaxLatency: time.Minute,
-		BootstrapMode:         "tail",
 		TrieDBScheme:          "path",
 	}
 	err := cfg.Validate()
@@ -64,7 +62,6 @@ func TestConfigValidate_ZeroCommitInterval(t *testing.T) {
 		DataDir:               "/tmp/test",
 		ApplyCommitInterval:   0, // Zero not allowed
 		ApplyCommitMaxLatency: time.Minute,
-		BootstrapMode:         "tail",
 		TrieDBScheme:          "path",
 	}
 	err := cfg.Validate()
@@ -73,38 +70,6 @@ func TestConfigValidate_ZeroCommitInterval(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "apply-commit-interval must be > 0") {
 		t.Errorf("unexpected error message: %v", err)
-	}
-}
-
-func TestConfigValidate_InvalidBootstrapMode(t *testing.T) {
-	tests := []struct {
-		name string
-		mode string
-	}{
-		{"empty", ""},
-		{"invalid", "invalid-mode"},
-		{"typo", "tails"},
-		{"backfill", "backfill"}, // Missing "-direct"
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := &Config{
-				OutboxRPCEndpoint:     "http://localhost:8545",
-				DataDir:               "/tmp/test",
-				ApplyCommitInterval:   10,
-				ApplyCommitMaxLatency: time.Minute,
-				BootstrapMode:         tt.mode,
-				TrieDBScheme:          "path",
-			}
-			err := cfg.Validate()
-			if err == nil {
-				t.Fatalf("expected validation error for bootstrap mode %q", tt.mode)
-			}
-			if !strings.Contains(err.Error(), "bootstrap-mode must be") {
-				t.Errorf("unexpected error message: %v", err)
-			}
-		})
 	}
 }
 
@@ -126,7 +91,6 @@ func TestConfigValidate_InvalidTrieDBScheme(t *testing.T) {
 				DataDir:               "/tmp/test",
 				ApplyCommitInterval:   10,
 				ApplyCommitMaxLatency: time.Minute,
-				BootstrapMode:         "tail",
 				TrieDBScheme:          tt.scheme,
 			}
 			err := cfg.Validate()
@@ -146,24 +110,22 @@ func TestConfigValidate_ValidConfigs(t *testing.T) {
 		config *Config
 	}{
 		{
-			name: "tail mode minimal",
+			name: "minimal",
 			config: &Config{
 				OutboxRPCEndpoint:     "http://localhost:8545",
 				DataDir:               "/tmp/ubtconv",
 				ApplyCommitInterval:   10,
 				ApplyCommitMaxLatency: time.Minute,
-				BootstrapMode:         "tail",
 				TrieDBScheme:          "path",
 			},
 		},
 		{
-			name: "backfill-direct mode",
+			name: "high history window",
 			config: &Config{
 				OutboxRPCEndpoint:     "http://localhost:8545",
 				DataDir:               "/tmp/ubtconv",
 				ApplyCommitInterval:   100,
 				ApplyCommitMaxLatency: 5 * time.Minute,
-				BootstrapMode:         "backfill-direct",
 				TrieDBScheme:          "path",
 				TrieDBStateHistory:    90000,
 			},
@@ -175,7 +137,6 @@ func TestConfigValidate_ValidConfigs(t *testing.T) {
 				DataDir:                  "/var/lib/ubtconv",
 				ApplyCommitInterval:      1000,
 				ApplyCommitMaxLatency:    30 * time.Minute,
-				BootstrapMode:            "tail",
 				MaxRecoverableReorgDepth: 128,
 				TrieDBScheme:             "path",
 				TrieDBStateHistory:       90000,
@@ -189,7 +150,6 @@ func TestConfigValidate_ValidConfigs(t *testing.T) {
 				DataDir:               "/data/ubtconv",
 				ApplyCommitInterval:   50,
 				ApplyCommitMaxLatency: 10 * time.Minute,
-				BootstrapMode:         "tail",
 				TrieDBScheme:          "path",
 			},
 		},
@@ -212,7 +172,6 @@ func TestConfigValidate_EdgeCases(t *testing.T) {
 			DataDir:               "/tmp/test",
 			ApplyCommitInterval:   1, // Very small but valid
 			ApplyCommitMaxLatency: time.Second,
-			BootstrapMode:         "tail",
 			TrieDBScheme:          "path",
 		}
 		err := cfg.Validate()
@@ -227,7 +186,6 @@ func TestConfigValidate_EdgeCases(t *testing.T) {
 			DataDir:               "/tmp/test",
 			ApplyCommitInterval:   1000000, // Very large but valid
 			ApplyCommitMaxLatency: 24 * time.Hour,
-			BootstrapMode:         "tail",
 			TrieDBScheme:          "path",
 		}
 		err := cfg.Validate()
@@ -242,7 +200,6 @@ func TestConfigValidate_EdgeCases(t *testing.T) {
 			DataDir:               "/tmp/test",
 			ApplyCommitInterval:   10,
 			ApplyCommitMaxLatency: 0, // Zero latency effectively disables time-based commits
-			BootstrapMode:         "tail",
 			TrieDBScheme:          "path",
 		}
 		err := cfg.Validate()
@@ -257,7 +214,6 @@ func TestConfigValidate_EdgeCases(t *testing.T) {
 			DataDir:               "/tmp/test",
 			ApplyCommitInterval:   10,
 			ApplyCommitMaxLatency: time.Minute,
-			BootstrapMode:         "tail",
 			TrieDBScheme:          "path",
 			TrieDBStateHistory:    0, // No history retained
 		}

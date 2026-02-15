@@ -274,7 +274,6 @@ func (api *QueryAPI) Status(ctx context.Context) (map[string]any, error) {
 		backpressureLagThreshold = api.consumer.cfg.BackpressureLagThreshold
 		executionClassRPCEnabled = api.consumer.cfg.ExecutionClassRPCEnabled
 	}
-	tracker := api.consumer.phaseTracker
 	api.consumer.mu.Unlock()
 
 	result := map[string]any{
@@ -290,14 +289,6 @@ func (api *QueryAPI) Status(ctx context.Context) (map[string]any, error) {
 		"executionClassRPCEnabled": executionClassRPCEnabled,
 	}
 
-	// Phase tracker methods are safe to call without the consumer lock
-	if tracker != nil {
-		result["phase"] = string(tracker.Current())
-		result["productionReady"] = tracker.IsProductionReady()
-		if !tracker.SyncedSince().IsZero() {
-			result["syncedSince"] = tracker.SyncedSince().Unix()
-		}
-	}
 	return result, nil
 }
 
@@ -465,7 +456,8 @@ func (api *QueryAPI) GetAccountProof(ctx context.Context, addr common.Address, s
 
 // CallUBT executes a call against UBT state.
 // Signature is kept close to eth_call:
-//   ubt_callUBT(callObject, blockNumberOrHash?, stateOverrides?, blockOverrides?)
+//
+//	ubt_callUBT(callObject, blockNumberOrHash?, stateOverrides?, blockOverrides?)
 func (api *QueryAPI) CallUBT(ctx context.Context, args map[string]any, blockNrOrHash *rpc.BlockNumberOrHash, stateOverrides map[string]any, blockOverrides map[string]any) (hexutil.Bytes, error) {
 	// Snapshot state under lock
 	api.consumer.mu.Lock()

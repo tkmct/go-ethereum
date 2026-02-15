@@ -185,7 +185,6 @@ func TestQueryServerIntegration(t *testing.T) {
 		}
 	})
 
-	// Note: GetStorageAt has a known issue with querying storage on accounts
-	// that only have basic data but no storage stem in the trie. This will be
-	// fixed in a future update once we handle partial account state properly.
+	// Storage querying behavior is covered in verification tests that assert
+	// deterministic value parity for account+slot reads.
 }

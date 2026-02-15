@@ -53,11 +53,6 @@ var (
 		Usage: "Maximum time between UBT trie commits",
 		Value: 10 * time.Second,
 	}
-	bootstrapModeFlag = &cli.StringFlag{
-		Name:  "bootstrap-mode",
-		Usage: "Bootstrap mode: tail or backfill-direct",
-		Value: "tail",
-	}
 	maxRecoverableReorgDepthFlag = &cli.Uint64Flag{
 		Name:  "max-recoverable-reorg-depth",
 		Usage: "Maximum reorg depth for fast-path recovery",
@@ -138,11 +133,6 @@ var (
 		Usage: "Trigger compaction when outbox disk usage exceeds this percentage",
 		Value: 80,
 	}
-	slotIndexModeFlag = &cli.StringFlag{
-		Name:  "slot-index-mode",
-		Usage: "Slot index mode: auto, on, off",
-		Value: "auto",
-	}
 	slotIndexDiskBudgetFlag = &cli.Uint64Flag{
 		Name:  "slot-index-disk-budget",
 		Usage: "Slot index disk budget in bytes (0 = unlimited)",
@@ -163,21 +153,6 @@ var (
 		Usage: "Halt daemon on strict validation mismatch",
 		Value: false,
 	}
-	validateOnlyModeFlag = &cli.BoolFlag{
-		Name:  "validate-only-mode",
-		Usage: "Shadow verification without trie modification",
-		Value: false,
-	}
-	syncedLagThresholdFlag = &cli.Uint64Flag{
-		Name:  "synced-lag-threshold",
-		Usage: "Blocks behind head to consider synced",
-		Value: 10,
-	}
-	productionReadinessMinFlag = &cli.DurationFlag{
-		Name:  "production-readiness-min",
-		Usage: "Duration synced before production-ready",
-		Value: 10 * time.Minute,
-	}
 	executionClassRPCEnabledFlag = &cli.BoolFlag{
 		Name:  "execution-class-rpc-enabled",
 		Usage: "Enable execution-class RPC methods (ubt_callUBT, ubt_executionWitnessUBT)",
@@ -192,7 +167,6 @@ func init() {
 		dataDirectoryFlag,
 		applyCommitIntervalFlag,
 		applyCommitMaxLatencyFlag,
-		bootstrapModeFlag,
 		maxRecoverableReorgDepthFlag,
 		trieDBSchemeFlag,
 		trieDBStateHistoryFlag,
@@ -209,14 +183,10 @@ func init() {
 		backpressureLagThresholdFlag,
 		outboxDiskBudgetBytesFlag,
 		outboxAlertThresholdPctFlag,
-		slotIndexModeFlag,
 		slotIndexDiskBudgetFlag,
 		cancunBlockFlag,
 		validationStrictFlag,
 		validationHaltOnMismatchFlag,
-		validateOnlyModeFlag,
-		syncedLagThresholdFlag,
-		productionReadinessMinFlag,
 		executionClassRPCEnabledFlag,
 	}
 }
@@ -269,7 +239,6 @@ func buildConfigFromCLI(ctx *cli.Context) *Config {
 		DataDir:                  ctx.String(dataDirectoryFlag.Name),
 		ApplyCommitInterval:      ctx.Uint64(applyCommitIntervalFlag.Name),
 		ApplyCommitMaxLatency:    ctx.Duration(applyCommitMaxLatencyFlag.Name),
-		BootstrapMode:            ctx.String(bootstrapModeFlag.Name),
 		MaxRecoverableReorgDepth: ctx.Uint64(maxRecoverableReorgDepthFlag.Name),
 		TrieDBScheme:             ctx.String(trieDBSchemeFlag.Name),
 		TrieDBStateHistory:       ctx.Uint64(trieDBStateHistoryFlag.Name),
@@ -286,14 +255,10 @@ func buildConfigFromCLI(ctx *cli.Context) *Config {
 		BackpressureLagThreshold: ctx.Uint64(backpressureLagThresholdFlag.Name),
 		OutboxDiskBudgetBytes:    ctx.Uint64(outboxDiskBudgetBytesFlag.Name),
 		OutboxAlertThresholdPct:  ctx.Uint64(outboxAlertThresholdPctFlag.Name),
-		SlotIndexMode:            ctx.String(slotIndexModeFlag.Name),
 		SlotIndexDiskBudget:      ctx.Uint64(slotIndexDiskBudgetFlag.Name),
 		CancunBlock:              ctx.Uint64(cancunBlockFlag.Name),
 		ValidationStrictMode:     ctx.Bool(validationStrictFlag.Name),
 		ValidationHaltOnMismatch: ctx.Bool(validationHaltOnMismatchFlag.Name),
-		ValidateOnlyMode:         ctx.Bool(validateOnlyModeFlag.Name),
-		SyncedLagThreshold:       ctx.Uint64(syncedLagThresholdFlag.Name),
-		ProductionReadinessMin:   ctx.Duration(productionReadinessMinFlag.Name),
 		ExecutionClassRPCEnabled: ctx.Bool(executionClassRPCEnabledFlag.Name),
 	}
 }

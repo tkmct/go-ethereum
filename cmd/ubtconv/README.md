@@ -2,6 +2,8 @@
 
 The `ubtconv` daemon is a separate process that maintains a UBT (Unified Binary Trie) by consuming state diff events from a geth node via RPC.
 
+This branch assumes full-sync operation on geth; snap/bootstrap backfill modes are not supported.
+
 ## Architecture
 
 The daemon consists of the following components:
@@ -16,7 +18,6 @@ The daemon consists of the following components:
 - **outbox_reader.go** - RPC client for reading outbox events from geth
 - **query_server.go** - JSON-RPC server for querying UBT state
 - **validate.go** - Account, storage, and code validation against MPT via geth RPC
-- **phase.go** - Phase state machine for migration workflow
 - **slot_index.go** - Storage slot index for pre-Cancun replay correctness
 - **replay_client.go** - Block replay via `debug_traceBlockByNumber` for deep recovery
 - **state_adapter.go** - StateDB adapter for UBT-backed EVM execution
@@ -87,7 +88,7 @@ When `--query-rpc-enabled` is set, the daemon exposes a JSON-RPC server with the
 
 | Method | Description |
 |--------|-------------|
-| `ubt_status` | Current daemon status, phase, lag, and root |
+| `ubt_status` | Current daemon status, lag, and root |
 | `ubt_getBalance` | Account balance from UBT state |
 | `ubt_getStorageAt` | Storage slot value from UBT state |
 | `ubt_getCode` | Contract bytecode from UBT state |
@@ -105,34 +106,12 @@ By default, the consumer validates each applied diff's root hash against the exp
 ### Strict Validation (`--validation-strict`)
 Cross-checks every account balance, nonce, storage slot, and code against MPT state via geth RPC. Enable `--validation-halt-on-mismatch` to halt on any discrepancy.
 
-### Validate-Only Mode (`--validate-only-mode`)
-Reads outbox events and validates against MPT but does NOT apply changes to the UBT trie. Useful for shadow verification before production cutover.
-
-## Migration Workflow
-
-The daemon tracks its operational phase via a state machine:
-
-| Phase | Meaning |
-|-------|---------|
-| `initializing` | Daemon is starting up |
-| `catching-up` | Processing backlog (lag > threshold) |
-| `synced` | Within threshold of chain head |
-| `diverged` | Error or validation failure detected |
-| `validate-only` | Running in validate-only mode |
-
-**Production readiness** requires: synced phase sustained for `--production-readiness-min` (default: 10m) with >100 consecutive successful validations.
-
 ## Slot Index Policy
 
 The slot index tracks which storage slots were created/modified before the Cancun hard fork. This metadata supports correct replay of pre-Cancun state transitions.
 
-| Mode | Behavior |
-|------|----------|
-| `auto` (default) | Index pre-Cancun slots, freeze at Cancun boundary |
-| `on` | Always index all slots |
-| `off` | Disable slot indexing |
-
-Configure with `--slot-index-mode` and optionally limit disk usage with `--slot-index-disk-budget`.
+The policy is fixed: index pre-Cancun slots, then freeze at Cancun boundary.
+Configure the boundary with `--cancun-block` (or leave at `0` for chain-config estimation), and optionally limit disk usage with `--slot-index-disk-budget`.
 
 ## Usage
 
@@ -146,18 +125,6 @@ ubtconv \
   --datadir ./ubtconv-data \
   --apply-commit-interval 256 \
   --apply-commit-max-latency 30s
-
-# Use backfill mode (requires archive node)
-ubtconv \
-  --outbox-rpc-endpoint http://localhost:8545 \
-  --datadir ./ubtconv-data \
-  --bootstrap-mode backfill-direct
-
-# Validate-only mode (shadow verification)
-ubtconv \
-  --outbox-rpc-endpoint http://localhost:8545 \
-  --datadir ./ubtconv-data \
-  --validate-only-mode
 
 # Strict validation with halt on mismatch
 ubtconv \
@@ -175,7 +142,6 @@ ubtconv \
 | `--datadir` | `./ubtconv-data` | Data directory for UBT trie database |
 | `--apply-commit-interval` | `128` | Number of blocks between UBT trie commits |
 | `--apply-commit-max-latency` | `10s` | Maximum time between UBT trie commits |
-| `--bootstrap-mode` | `tail` | Bootstrap mode: `tail` or `backfill-direct` |
 | `--max-recoverable-reorg-depth` | `128` | Maximum reorg depth for fast-path recovery |
 | `--triedb-scheme` | `path` | Trie database scheme (must be `path`) |
 | `--triedb-state-history` | `90000` | Number of blocks of state history to retain |
@@ -188,13 +154,10 @@ ubtconv \
 | `--backpressure-lag-threshold` | `1000` | Force commit when `outboxLag > threshold` (`0` disables backpressure commits) |
 | `--outbox-disk-budget-bytes` | `0` (unlimited) | Maximum disk usage for outbox events |
 | `--outbox-alert-threshold-pct` | `80` | Disk usage percentage to trigger compaction alert |
-| `--slot-index-mode` | `auto` | Slot index mode: `auto`, `on`, or `off` |
+| `--cancun-block` | `0` | Explicit Cancun fork block (`0` = estimate from chain config timestamp) |
 | `--slot-index-disk-budget` | `0` (unlimited) | Maximum disk usage for slot index |
 | `--validation-strict` | `true` | Enable strict cross-validation against MPT |
 | `--validation-halt-on-mismatch` | `false` | Halt on validation mismatch |
-| `--validate-only-mode` | `false` | Read and validate events without applying |
-| `--synced-lag-threshold` | `10` | Block lag threshold to consider synced |
-| `--production-readiness-min` | `10m` | Duration synced before production ready |
 
 ## Data Directory Structure
 
@@ -220,11 +183,9 @@ go build -o ubtconv .
 - [x] RPC client for reading outbox events
 - [x] Reorg recovery (fast-path + slow-path with anchor snapshots)
 - [x] Query RPC server with state/proof/witness endpoints
-- [x] Bootstrap backfill mode (direct from archive node)
+- [x] Full-sync-first startup flow (`seq=0` from fresh state, resume by checkpoint)
 - [x] Strict validation (account, storage, code cross-check)
-- [x] Validate-only mode for shadow verification
-- [x] Phase state machine for migration workflow
-- [x] Slot index for pre-Cancun storage tracking
+- [x] Fixed slot index policy for pre-Cancun storage tracking
 - [x] Observability metrics (daemon, proxy, recovery)
 - [x] Outbox compaction coordination with disk budget
 - [x] Merkle proof generation and verification

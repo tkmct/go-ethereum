@@ -366,7 +366,6 @@ func defaultTestConfig(endpoint, dataDir string) *Config {
 		DataDir:                  dataDir,
 		ApplyCommitInterval:      100,
 		ApplyCommitMaxLatency:    time.Hour,
-		BootstrapMode:            "backfill-direct",
 		MaxRecoverableReorgDepth: 128,
 		TrieDBScheme:             "path",
 		TrieDBStateHistory:       128,

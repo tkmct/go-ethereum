@@ -30,7 +30,6 @@ type Config struct {
 	DataDir                  string
 	ApplyCommitInterval      uint64
 	ApplyCommitMaxLatency    time.Duration
-	BootstrapMode            string // "tail" or "backfill-direct"
 	MaxRecoverableReorgDepth uint64
 	TrieDBScheme             string // "path"
 	TrieDBStateHistory       uint64
@@ -54,7 +53,6 @@ type Config struct {
 	OutboxAlertThresholdPct uint64 // Trigger compaction when usage exceeds this % (default: 80)
 
 	// Slot index (Chunk 4)
-	SlotIndexMode       string // "auto", "on", "off" (default: "auto")
 	SlotIndexDiskBudget uint64 // 0 = unlimited
 	CancunBlock         uint64 // Explicit Cancun fork block number (0 = auto-detect from chain config)
 
@@ -64,11 +62,6 @@ type Config struct {
 	// Strict validation (Chunk 5)
 	ValidationStrictMode     bool // Validate ALL accounts/storage in diff against MPT
 	ValidationHaltOnMismatch bool // Halt daemon on strict validation mismatch
-
-	// Migration workflow (Chunk 7)
-	ValidateOnlyMode       bool          // Shadow verification without trie modification
-	SyncedLagThreshold     uint64        // Blocks behind head to consider synced (default: 10)
-	ProductionReadinessMin time.Duration // Duration synced before production-ready (default: 10m)
 
 	// Execution-class RPC gate.
 	// Default false; must be explicitly enabled by operator.
@@ -82,9 +75,6 @@ func (c *Config) Validate() error {
 	}
 	if c.DataDir == "" {
 		return fmt.Errorf("datadir is required")
-	}
-	if c.BootstrapMode != "tail" && c.BootstrapMode != "backfill-direct" {
-		return fmt.Errorf("bootstrap-mode must be 'tail' or 'backfill-direct', got %q", c.BootstrapMode)
 	}
 	if c.TrieDBScheme != "path" {
 		return fmt.Errorf("triedb-scheme must be 'path', got %q", c.TrieDBScheme)

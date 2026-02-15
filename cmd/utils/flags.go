@@ -386,16 +386,6 @@ var (
 		Value:    5 * time.Second,
 		Category: flags.StateCategory,
 	}
-	UBTReplayRPCEnabledFlag = &cli.BoolFlag{
-		Name:     "ubt.replay-rpc-enabled",
-		Usage:    "Enable replay RPC endpoint for archive-based UBT recovery",
-		Category: flags.EthCategory,
-	}
-	UBTReplayRPCEndpointFlag = &cli.StringFlag{
-		Name:     "ubt.replay-rpc-endpoint",
-		Usage:    "Replay RPC endpoint URL (default: same as main RPC)",
-		Category: flags.EthCategory,
-	}
 	UBTDebugRPCProxyEnabledFlag = &cli.BoolFlag{
 		Name:     "ubt.debug-rpc-proxy-enabled",
 		Usage:    "Explicitly enable UBT debug RPC proxy",
@@ -1854,12 +1844,6 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	}
 	if ctx.IsSet(UBTDebugTimeoutFlag.Name) {
 		cfg.UBTDebugTimeout = ctx.Duration(UBTDebugTimeoutFlag.Name)
-	}
-	if ctx.IsSet(UBTReplayRPCEnabledFlag.Name) {
-		cfg.UBTReplayRPCEnabled = ctx.Bool(UBTReplayRPCEnabledFlag.Name)
-	}
-	if ctx.IsSet(UBTReplayRPCEndpointFlag.Name) {
-		cfg.UBTReplayRPCEndpoint = ctx.String(UBTReplayRPCEndpointFlag.Name)
 	}
 	if ctx.IsSet(UBTDebugRPCProxyEnabledFlag.Name) {
 		cfg.UBTDebugRPCProxyEnabled = ctx.Bool(UBTDebugRPCProxyEnabledFlag.Name)

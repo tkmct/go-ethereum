@@ -25,15 +25,6 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 )
 
-// SlotIndexMode defines the indexing policy for storage slots.
-type SlotIndexMode string
-
-const (
-	SlotIndexModeAuto SlotIndexMode = "auto" // Index pre-Cancun, freeze at Cancun
-	SlotIndexModeOn   SlotIndexMode = "on"   // Always index
-	SlotIndexModeOff  SlotIndexMode = "off"  // Never index
-)
-
 // estimatedSlotEntrySize is the approximate byte size of a single slot index entry.
 // Breakdown: key prefix (10) + address (20) + slot hash (32) + RLP entry data ~16 = ~78 bytes.
 // Rounded to 72 for a conservative alignment estimate.
@@ -41,7 +32,6 @@ const estimatedSlotEntrySize = 72
 
 // SlotIndex tracks storage slot creation/modification metadata for pre-Cancun replay correctness.
 type SlotIndex struct {
-	mode              SlotIndexMode
 	db                ethdb.KeyValueStore
 	cancunBlock       uint64
 	frozen            bool
@@ -51,17 +41,12 @@ type SlotIndex struct {
 }
 
 // NewSlotIndex creates a new SlotIndex manager.
-func NewSlotIndex(db ethdb.KeyValueStore, mode string, cancunBlock uint64, diskBudget uint64, alertThresholdPct uint64) *SlotIndex {
-	m := SlotIndexMode(mode)
-	if m != SlotIndexModeAuto && m != SlotIndexModeOn && m != SlotIndexModeOff {
-		m = SlotIndexModeAuto
-	}
+func NewSlotIndex(db ethdb.KeyValueStore, cancunBlock uint64, diskBudget uint64, alertThresholdPct uint64) *SlotIndex {
 	if alertThresholdPct == 0 {
 		alertThresholdPct = 80
 	}
 
 	si := &SlotIndex{
-		mode:              m,
 		db:                db,
 		cancunBlock:       cancunBlock,
 		diskBudget:        diskBudget,
@@ -81,30 +66,20 @@ func NewSlotIndex(db ethdb.KeyValueStore, mode string, cancunBlock uint64, diskB
 
 // ShouldIndex returns whether slot indexing should be active for the given block.
 func (si *SlotIndex) ShouldIndex(blockNumber uint64) bool {
-	switch si.mode {
-	case SlotIndexModeOff:
-		return false
-	case SlotIndexModeOn:
-		return true
-	case SlotIndexModeAuto:
-		if si.frozen {
-			return false
-		}
-		// Auto mode: index pre-Cancun blocks only.
-		// Freeze at first Cancun block (plan §8: "Freeze at first Cancun block").
-		if si.cancunBlock > 0 && blockNumber >= si.cancunBlock {
-			si.Freeze(blockNumber)
-			return false
-		}
-		return true
-	default:
+	if si.frozen {
 		return false
 	}
+	// Index pre-Cancun blocks only and freeze at the first Cancun block.
+	if si.cancunBlock > 0 && blockNumber >= si.cancunBlock {
+		si.Freeze(blockNumber)
+		return false
+	}
+	return true
 }
 
 // TrackSlot inserts or updates a slot index entry.
 func (si *SlotIndex) TrackSlot(addr common.Address, slot common.Hash, blockNumber uint64) error {
-	if si.frozen && si.mode == SlotIndexModeAuto {
+	if si.frozen {
 		return nil
 	}
 
