@@ -34,13 +34,24 @@ import (
 // because raw storage keys are unavailable for at least one touched slot.
 var ErrRawStorageKeyMissing = errors.New("ErrRawStorageKeyMissing")
 
+// UBTStorageKeyLookup resolves a raw storage slot key from (address, slotHash).
+// It is used for pre-Cancun conversion where state updates are keyed by slot hash.
+type UBTStorageKeyLookup func(common.Address, common.Hash) (common.Hash, bool)
+
 // ToUBTDiff converts the internal stateUpdate to a QueuedDiffV1 for UBT emission.
 // This is the orchestration boundary where unexported state types are converted
 // to exported ubtemit types.
-//
-// IMPORTANT: This method requires rawStorageKey=true on the stateUpdate for
-// correct UBT conversion. If raw keys are unavailable, this is an invariant violation.
 func (sc *stateUpdate) ToUBTDiff() (*ubtemit.QueuedDiffV1, error) {
+	return sc.toUBTDiff(nil)
+}
+
+// ToUBTDiffWithStorageKeyLookup converts state updates to UBT diff and uses the
+// provided lookup when raw storage keys are not directly available.
+func (sc *stateUpdate) ToUBTDiffWithStorageKeyLookup(lookup UBTStorageKeyLookup) (*ubtemit.QueuedDiffV1, error) {
+	return sc.toUBTDiff(lookup)
+}
+
+func (sc *stateUpdate) toUBTDiff(lookup UBTStorageKeyLookup) (*ubtemit.QueuedDiffV1, error) {
 	diff := &ubtemit.QueuedDiffV1{
 		OriginRoot: sc.originRoot,
 		Root:       sc.root,
@@ -76,17 +87,26 @@ func (sc *stateUpdate) ToUBTDiff() (*ubtemit.QueuedDiffV1, error) {
 	})
 
 	// Convert storage slots
-	if !sc.rawStorageKey {
-		// Pre-Cancun blocks lack raw storage keys - this is expected behavior.
-		// UBT diffs will resume once Cancun is activated and raw keys become available.
-		return nil, fmt.Errorf("%w: UBT diff conversion requires raw storage keys (pre-Cancun block, UBT diffs will resume at Cancun activation)", ErrRawStorageKeyMissing)
-	}
 	for addr, slots := range sc.storagesOrigin {
 		addrHash := crypto.Keccak256Hash(addr.Bytes())
 		newSlots := sc.storages[addrHash]
 
-		for rawKey := range slots {
-			hashedKey := crypto.Keccak256Hash(rawKey.Bytes())
+		for slotKey := range slots {
+			var (
+				rawKey    common.Hash
+				hashedKey common.Hash
+			)
+			if sc.rawStorageKey {
+				rawKey = slotKey
+				hashedKey = crypto.Keccak256Hash(rawKey.Bytes())
+			} else {
+				hashedKey = slotKey
+				var ok bool
+				rawKey, ok = sc.resolveRawStorageKey(addr, hashedKey, lookup)
+				if !ok {
+					return nil, fmt.Errorf("%w: missing storage key preimage for addr=%s slotHash=%s", ErrRawStorageKeyMissing, addr, hashedKey)
+				}
+			}
 			newValue := newSlots[hashedKey]
 
 			var value common.Hash
@@ -128,4 +148,16 @@ func (sc *stateUpdate) ToUBTDiff() (*ubtemit.QueuedDiffV1, error) {
 	})
 
 	return diff, nil
+}
+
+func (sc *stateUpdate) resolveRawStorageKey(addr common.Address, slotHash common.Hash, lookup UBTStorageKeyLookup) (common.Hash, bool) {
+	if slots := sc.storageSlotPreimages[addr]; slots != nil {
+		if raw, ok := slots[slotHash]; ok {
+			return raw, true
+		}
+	}
+	if lookup != nil {
+		return lookup(addr, slotHash)
+	}
+	return common.Hash{}, false
 }

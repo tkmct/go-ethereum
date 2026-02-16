@@ -186,24 +186,25 @@ func flushAlloc(ga *types.GenesisAlloc, triedb *triedb.Database, tracer *tracing
 		}
 	}
 
-	var root common.Hash
-	if tracer != nil && tracer.OnStateUpdate != nil {
-		r, update, err := statedb.CommitWithUpdate(0, false, false)
-		if err != nil {
+	r, update, err := statedb.CommitWithUpdate(0, false, false)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	if slotPreimages := update.UBTStoragePreimages(); len(slotPreimages) > 0 {
+		batch := triedb.Disk().NewBatch()
+		rawdb.WriteUBTStorageSlotPreimages(batch, slotPreimages)
+		if err := batch.Write(); err != nil {
 			return common.Hash{}, err
 		}
+	}
+	if tracer != nil && tracer.OnStateUpdate != nil {
 		trUpdate, err := update.ToTracingUpdate()
 		if err != nil {
 			return common.Hash{}, err
 		}
 		tracer.OnStateUpdate(trUpdate)
-		root = r
-	} else {
-		root, err = statedb.Commit(0, false, false)
-		if err != nil {
-			return common.Hash{}, err
-		}
 	}
+	root := r
 
 	// Commit newly generated states into disk if it's not empty.
 	if root != emptyRoot {

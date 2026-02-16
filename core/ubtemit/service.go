@@ -34,7 +34,16 @@ type Service struct {
 
 	mu     sync.Mutex
 	closed bool
+
+	lastRawKeyFailureLogBlock     uint64
+	lastRawKeyFailurePersistBlock uint64
 }
+
+const (
+	// Avoid per-block error logs and DB writes while pre-Cancun raw storage keys are unavailable.
+	rawKeyFailureLogIntervalBlocks     = 10000
+	rawKeyFailurePersistIntervalBlocks = 1000
+)
 
 // NewService creates a new emitter service with the given outbox store.
 func NewService(store *OutboxStore) *Service {
@@ -91,6 +100,9 @@ func (s *Service) EmitDiff(blockNumber uint64, blockHash, parentHash common.Hash
 	if s.degraded.Load() {
 		s.degraded.Store(false)
 		emitterDegradedGauge.Update(0)
+		s.lastRawKeyFailureLogBlock = 0
+		s.lastRawKeyFailurePersistBlock = 0
+		s.store.ClearFailureCheckpoint()
 		log.Info("UBT emitter recovered from degraded state", "seq", seq, "block", blockNumber)
 	}
 
@@ -140,6 +152,9 @@ func (s *Service) EmitReorg(marker *ReorgMarkerV1) {
 	if s.degraded.Load() {
 		s.degraded.Store(false)
 		emitterDegradedGauge.Update(0)
+		s.lastRawKeyFailureLogBlock = 0
+		s.lastRawKeyFailurePersistBlock = 0
+		s.store.ClearFailureCheckpoint()
 		log.Info("UBT emitter recovered from degraded state", "seq", seq, "from", marker.FromBlockNumber, "to", marker.ToBlockNumber)
 	}
 
@@ -160,15 +175,31 @@ func (s *Service) MarkRawKeyFailure(blockNumber uint64, err error) {
 	if err != nil && strings.Contains(err.Error(), "ErrRawStorageKeyMissing") {
 		reasonCode = "ErrRawStorageKeyMissing"
 	}
+	alreadyDegraded := s.degraded.Load()
 	s.degraded.Store(true)
-	emitterDegradedTotal.Inc(1)
 	emitterDegradedGauge.Update(1)
 	emitterRawKeyFailures.Inc(1)
 	emitterAppendErrors.Inc(1)
-	log.Error("UBT invariant violation: raw storage key unavailable", "block", blockNumber, "reasonCode", reasonCode, "err", err)
+	if !alreadyDegraded {
+		emitterDegradedTotal.Inc(1)
+	}
 
-	// Persist failure checkpoint for diagnostics and restart awareness
-	s.store.PersistFailureCheckpoint(blockNumber, err)
+	shouldLog := !alreadyDegraded || blockNumber >= s.lastRawKeyFailureLogBlock+rawKeyFailureLogIntervalBlocks
+	if shouldLog {
+		if alreadyDegraded {
+			log.Warn("UBT raw-key invariant still degraded", "block", blockNumber, "reasonCode", reasonCode, "err", err)
+		} else {
+			log.Error("UBT invariant violation: raw storage key unavailable", "block", blockNumber, "reasonCode", reasonCode, "err", err)
+		}
+		s.lastRawKeyFailureLogBlock = blockNumber
+	}
+
+	// Persist failure checkpoint for diagnostics/restart awareness, but not every block.
+	shouldPersist := !alreadyDegraded || blockNumber >= s.lastRawKeyFailurePersistBlock+rawKeyFailurePersistIntervalBlocks
+	if shouldPersist {
+		s.store.PersistFailureCheckpoint(blockNumber, err)
+		s.lastRawKeyFailurePersistBlock = blockNumber
+	}
 }
 
 // IsDegraded returns whether the emitter is in degraded mode.

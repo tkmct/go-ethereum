@@ -54,6 +54,12 @@ type UBTConsumerState struct {
 	PendingUpdatedAt uint64                   `rlp:"optional"` // Unix timestamp of last pending status transition.
 }
 
+// UBTFailureCheckpoint stores the latest degraded emitter failure reason.
+type UBTFailureCheckpoint struct {
+	BlockNumber uint64
+	Reason      string
+}
+
 // WriteUBTOutboxEvent writes an outbox event at the given sequence number.
 // NOTE: This function uses log.Crit on failure, making it unsuitable for
 // production hot paths. For production outbox writes from the emitter,
@@ -181,6 +187,35 @@ func ReadUBTOutboxDiskUsage(db ethdb.KeyValueReader) uint64 {
 		return 0
 	}
 	return binary.BigEndian.Uint64(data)
+}
+
+// WriteUBTFailureCheckpoint writes the last emitter failure checkpoint.
+func WriteUBTFailureCheckpoint(db ethdb.KeyValueWriter, blockNumber uint64, reason string) {
+	data := make([]byte, 8+len(reason))
+	binary.BigEndian.PutUint64(data[:8], blockNumber)
+	copy(data[8:], []byte(reason))
+	if err := db.Put(ubtOutboxFailureCkptKey, data); err != nil {
+		log.Crit("Failed to write UBT failure checkpoint", "block", blockNumber, "err", err)
+	}
+}
+
+// ReadUBTFailureCheckpoint reads the latest emitter failure checkpoint.
+func ReadUBTFailureCheckpoint(db ethdb.KeyValueReader) *UBTFailureCheckpoint {
+	data, err := db.Get(ubtOutboxFailureCkptKey)
+	if err != nil || len(data) < 8 {
+		return nil
+	}
+	return &UBTFailureCheckpoint{
+		BlockNumber: binary.BigEndian.Uint64(data[:8]),
+		Reason:      string(data[8:]),
+	}
+}
+
+// DeleteUBTFailureCheckpoint clears the latest emitter failure checkpoint.
+func DeleteUBTFailureCheckpoint(db ethdb.KeyValueWriter) {
+	if err := db.Delete(ubtOutboxFailureCkptKey); err != nil {
+		log.Crit("Failed to delete UBT failure checkpoint", "err", err)
+	}
 }
 
 // WriteUBTConsumerState writes the consumer checkpoint state.

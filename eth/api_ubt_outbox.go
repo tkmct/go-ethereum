@@ -19,6 +19,7 @@ package eth
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -151,7 +152,19 @@ func (api *UBTOutboxAPI) Status(ctx context.Context) (map[string]any, error) {
 
 	// Add emitter degraded status if service is available
 	if svc := api.eth.EmitterService(); svc != nil {
-		result["degraded"] = svc.IsDegraded()
+		degraded := svc.IsDegraded()
+		result["degraded"] = degraded
+		if degraded {
+			if ckpt := store.ReadFailureCheckpoint(); ckpt != nil {
+				result["degradedBlock"] = hexutil.Uint64(ckpt.BlockNumber)
+				result["degradedReason"] = ckpt.Reason
+				reasonCode := "unknown"
+				if strings.Contains(ckpt.Reason, "ErrRawStorageKeyMissing") {
+					reasonCode = "ErrRawStorageKeyMissing"
+				}
+				result["degradedReasonCode"] = reasonCode
+			}
+		}
 	}
 
 	return result, nil

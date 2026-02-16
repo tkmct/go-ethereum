@@ -1,202 +1,356 @@
 # ubtconv - External UBT Conversion Daemon
 
-The `ubtconv` daemon is a separate process that maintains a UBT (Unified Binary Trie) by consuming state diff events from a geth node via RPC.
+`ubtconv` is an external daemon that consumes UBT outbox events from `geth` and maintains a UBT (Unified Binary Trie) view with query APIs.
 
-This branch assumes full-sync operation on geth; snap/bootstrap backfill modes are not supported.
+## Scope and Current Assumptions
+
+- `geth` sync mode is **full-sync only** (`--syncmode full`).
+- Snap-sync/bootstrap-backfill flows are out of scope.
+- Mainnet operation requires an EL+CL stack (`geth` + consensus client such as `lighthouse`) and `ubtconv`.
+- Execution-class RPC methods are implemented but disabled by default; enable with `--execution-class-rpc-enabled`.
 
 ## Architecture
 
-The daemon consists of the following components:
+### Main Components
 
-### Core Components
-
-- **main.go** - CLI entry point with flag parsing and signal handling
-- **config.go** - Configuration validation and defaults
-- **runner.go** - Daemon lifecycle manager that orchestrates the consumer loop
-- **consumer.go** - Event consumption orchestration with crash-consistent checkpointing
-- **applier.go** - UBT trie operations (applies diffs to the binary trie)
-- **outbox_reader.go** - RPC client for reading outbox events from geth
-- **query_server.go** - JSON-RPC server for querying UBT state
-- **validate.go** - Account, storage, and code validation against MPT via geth RPC
-- **slot_index.go** - Storage slot index for pre-Cancun replay correctness
-- **replay_client.go** - Block replay via `debug_traceBlockByNumber` for deep recovery
-- **state_adapter.go** - StateDB adapter for UBT-backed EVM execution
-- **metrics.go** - Prometheus-compatible metrics for daemon observability
+- `main.go`: CLI entrypoint and signal handling.
+- `runner.go`: daemon lifecycle and retry loop.
+- `consumer.go`: event consumption and checkpointing.
+- `applier.go`: UBT trie apply/revert/proof operations.
+- `outbox_reader.go`: RPC reader for geth outbox methods.
+- `query_server.go`: JSON-RPC query server (`ubt_*`).
+- `validate.go`: strict validation against MPT via geth RPC.
+- `slot_index.go`: pre-Cancun slot tracking for replay correctness.
+- `replay_client.go`: archive replay client for deep recovery.
 
 ### Data Flow
 
+```text
+geth outbox RPC (ubt_getEvent/ubt_getEvents)
+    -> OutboxReader
+    -> Consumer
+    -> Applier
+    -> UBT trie DB (triedb)
+
+Consumer checkpoints are persisted in a separate DB (consumer/).
 ```
-geth (outbox) --> [RPC] --> OutboxReader --> Consumer --> Applier --> UBT Trie DB
-                                                 |
-                                                 v
-                                         Consumer State DB
-                                         (checkpoint: pendingSeq, pendingState, appliedSeq, appliedRoot)
-```
 
-### Consumer State Management
+## Consumer State and Recovery
 
-The consumer maintains crash-consistent state with these fields:
+Persisted state fields:
 
-- **PendingSeq**: The sequence number currently being processed (0 if none)
-- **PendingState**: `none` or `inflight` (explicit pending state machine)
-- **PendingUpdatedAt**: Unix timestamp of the last pending state transition
-- **AppliedSeq**: The last fully applied sequence number
-- **AppliedRoot**: The UBT root hash after applying AppliedSeq
-- **AppliedBlock**: The block number corresponding to AppliedSeq
+- `PendingSeq`, `PendingState`, `PendingUpdatedAt`
+- `AppliedSeq`, `AppliedBlock`, `AppliedRoot`
 
-On startup, the consumer:
-1. Loads the checkpoint from disk
-2. If `PendingState=inflight`, the last consume was interrupted - clear pending metadata and restart from AppliedSeq + 1
-3. If the trie DB root doesn't match AppliedRoot, attempt anchor snapshot recovery
-4. Otherwise, continue from AppliedSeq + 1
+Startup behavior:
 
-### Sequence and Compaction Semantics
+1. Load persisted checkpoint.
+2. If pending state indicates interrupted apply, clear pending metadata and resume from `AppliedSeq + 1`.
+3. Open trie at `AppliedRoot`.
+4. If opening fails, attempt anchor recovery.
 
-- **latestSeq**: The highest persisted outbox sequence (`nextSeq - 1`)
-- **nextSeq**: The next sequence ID to assign on append
-- **safeSeq (compaction)**: Delete events with `seq < safeSeq`
-- **Boundary rule**: `safeSeq <= latestSeq + 1`
-- `safeSeq = latestSeq + 1` means "compact all currently persisted events"
+Commit policy:
 
-### Error Categories
+- Commit by block interval: `--apply-commit-interval` (default `128`).
+- Commit by time: `--apply-commit-max-latency` (default `10s`).
+- Backpressure commit trigger: `outboxLag > --backpressure-lag-threshold`.
 
-- **Stop-class errors**: invariant failures that require operator action (for example deep reorg without archive replay)
-- **Degraded-class errors**: emitter/consumer continues canonical progress while surfacing alerts and checkpoints
-- **Raw key missing code**: `ErrRawStorageKeyMissing` is emitted as a structured reason code for pre-Cancun raw-key unavailability
+## Mainnet Node Startup
 
-### Commit Policy
+### Option A: Recommended one-command script
 
-The daemon commits UBT state to disk based on two conditions (whichever comes first):
-
-1. **Block interval**: After `apply-commit-interval` blocks (default: 128)
-2. **Time latency**: After `apply-commit-max-latency` time has passed (default: 10s)
-
-### Reorg Handling
-
-Reorg recovery uses a two-path strategy:
-
-1. **Fast path**: If the common ancestor root exists in the trie DB diff layers, revert directly
-2. **Slow path**: Restore from the nearest anchor snapshot, then replay blocks forward via archive node
-
-### Anchor Snapshots
-
-Periodic anchor snapshots capture `(blockNumber, blockRoot, seq)` tuples. These enable recovery from deep reorgs and startup corruption by providing known-good rollback points.
-
-## Query RPC API
-
-When `--query-rpc-enabled` is set, the daemon exposes a JSON-RPC server with these methods:
-
-| Method | Description |
-|--------|-------------|
-| `ubt_status` | Current daemon status, lag, and root |
-| `ubt_getBalance` | Account balance from UBT state |
-| `ubt_getStorageAt` | Storage slot value from UBT state |
-| `ubt_getCode` | Contract bytecode from UBT state |
-| `ubt_getProof` | Merkle inclusion proof for an account |
-| `ubt_verifyProof` | Verify a proof against a given root |
-| `ubt_safeCompactSeq` | Safe sequence for outbox compaction |
-| `ubt_callUBT` | Execution-class call RPC (disabled unless `--execution-class-rpc-enabled` is set) |
-| `ubt_executionWitnessUBT` | Execution witness RPC (disabled unless `--execution-class-rpc-enabled` is set) |
-
-## Validation Modes
-
-### Standard Validation
-By default, the consumer validates each applied diff's root hash against the expected UBT root provided in the outbox event.
-
-### Strict Validation (`--validation-strict`)
-Cross-checks every account balance, nonce, storage slot, and code against MPT state via geth RPC. Enable `--validation-halt-on-mismatch` to halt on any discrepancy.
-
-## Slot Index Policy
-
-The slot index tracks which storage slots were created/modified before the Cancun hard fork. This metadata supports correct replay of pre-Cancun state transitions.
-
-The policy is fixed: index pre-Cancun slots, then freeze at Cancun boundary.
-Configure the boundary with `--cancun-block` (or leave at `0` for chain-config estimation), and optionally limit disk usage with `--slot-index-disk-budget`.
-
-## Usage
+Use the integrated startup script for `geth + lighthouse + ubtconv`:
 
 ```bash
-# Start the daemon with default settings
-ubtconv --outbox-rpc-endpoint http://localhost:8545 --datadir ./ubtconv-data
-
-# Customize commit policy
-ubtconv \
-  --outbox-rpc-endpoint http://localhost:8545 \
-  --datadir ./ubtconv-data \
-  --apply-commit-interval 256 \
-  --apply-commit-max-latency 30s
-
-# Strict validation with halt on mismatch
-ubtconv \
-  --outbox-rpc-endpoint http://localhost:8545 \
-  --datadir ./ubtconv-data \
-  --validation-strict \
-  --validation-halt-on-mismatch
+CHECKPOINT_SYNC_URL='https://mainnet.checkpoint.sigp.io' \
+scripts/run_mainnet_geth_ubtconv.sh \
+  --action up \
+  --enable-execution-rpc \
+  --detach
 ```
+
+Useful commands:
+
+```bash
+scripts/run_mainnet_geth_ubtconv.sh --action status --skip-build
+scripts/run_mainnet_geth_ubtconv.sh --action down --skip-build
+```
+
+Notes:
+
+- Script forces geth full-sync (`--syncmode full`).
+- Script waits for `Lighthouse started` in lighthouse log before continuing.
+- Lighthouse HTTP readiness can lag after process startup; script warns and continues if process is healthy.
+- Logs are under `${WORKDIR:-$HOME/.ubt-mainnet}/logs/`.
+
+### Option B: Manual startup
+
+### 1. Build binaries
+
+```bash
+go build -o build/bin/geth ./cmd/geth
+go build -o build/bin/ubtconv ./cmd/ubtconv
+```
+
+### 2. Create JWT secret for EL<->CL auth
+
+```bash
+mkdir -p /tmp/ubt-mainnet
+head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > /tmp/ubt-mainnet/jwtsecret.hex
+```
+
+### 3. Start geth (mainnet full-sync + UBT outbox/debug proxy)
+
+```bash
+build/bin/geth \
+  --mainnet \
+  --syncmode full \
+  --datadir /path/to/geth-datadir \
+  --http --http.addr 127.0.0.1 --http.port 8545 \
+  --http.api eth,net,web3,debug,ubt \
+  --authrpc.addr 127.0.0.1 --authrpc.port 8551 \
+  --authrpc.jwtsecret /tmp/ubt-mainnet/jwtsecret.hex \
+  --ubt.conversion-enabled \
+  --ubt.decoupled \
+  --ubt.outbox-db-path /path/to/geth-outbox \
+  --ubt.outbox-retention-seq-window 100000 \
+  --ubt.reorg-marker-enabled \
+  --ubt.outbox-read-rpc-enabled \
+  --ubt.debug-rpc-proxy-enabled \
+  --ubt.debug-endpoint http://127.0.0.1:8560 \
+  --ubt.debug-timeout 5s
+```
+
+### 4. Start lighthouse beacon node
+
+```bash
+lighthouse bn \
+  --network mainnet \
+  --datadir /path/to/lighthouse-datadir \
+  --execution-endpoint http://127.0.0.1:8551 \
+  --execution-jwt /tmp/ubt-mainnet/jwtsecret.hex \
+  --http --http-address 127.0.0.1 --http-port 5052 \
+  --checkpoint-sync-url https://mainnet.checkpoint.sigp.io
+```
+
+### 5. Start ubtconv
+
+```bash
+build/bin/ubtconv \
+  --outbox-rpc-endpoint http://127.0.0.1:8545 \
+  --datadir /path/to/ubtconv-datadir \
+  --query-rpc-enabled \
+  --query-rpc-listen-addr 127.0.0.1:8560 \
+  --triedb-scheme path \
+  --triedb-state-history 90000 \
+  --validation-strict=true \
+  --require-archive-replay=true \
+  --execution-class-rpc-enabled
+```
+
+## First Health Checks
+
+### 1. RPC modules
+
+```bash
+curl -s -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"rpc_modules","params":[]}' \
+  http://127.0.0.1:8545 | jq
+
+curl -s -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"rpc_modules","params":[]}' \
+  http://127.0.0.1:8560 | jq
+```
+
+Expected:
+
+- geth: includes `ubt`, `debug`, `eth`.
+- ubtconv: includes `ubt`.
+
+### 2. Progress checks
+
+```bash
+curl -s -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"ubt_status","params":[]}' \
+  http://127.0.0.1:8545 | jq
+
+curl -s -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"ubt_latestSeq","params":[]}' \
+  http://127.0.0.1:8545 | jq
+
+curl -s -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"ubt_status","params":[]}' \
+  http://127.0.0.1:8560 | jq
+```
+
+Expected:
+
+- geth side: `enabled=true`, `latestSeq` increases.
+- ubtconv side: `appliedSeq/appliedBlock/appliedRoot` advance.
+
+## Query RPC API (`ubt_*`)
+
+| Method | Description |
+|---|---|
+| `ubt_status` | Daemon status (`appliedSeq`, `appliedBlock`, `appliedRoot`, lag) |
+| `ubt_getBalance` | Balance at selected block/root |
+| `ubt_getStorageAt` | Storage slot value at selected block/root |
+| `ubt_getCode` | Account bytecode at selected block/root |
+| `ubt_getProof` | Raw-key UBT proof |
+| `ubt_getAccountProof` | Account + storage proofs |
+| `ubt_verifyProof` | Proof verification against root |
+| `ubt_safeCompactSeq` | Safe seq for outbox compaction |
+| `ubt_callUBT` | EVM call on UBT state (flag-gated) |
+| `ubt_executionWitnessUBT` | Execution witness snapshot (flag-gated) |
+
+## Execution-class RPC (`ubt_callUBT`, `ubt_executionWitnessUBT`)
+
+- Disabled by default.
+- Enable with `--execution-class-rpc-enabled`.
+- Disabled error message includes: `execution-class RPC disabled`.
+
+### Quick parity check (`eth_call` vs UBT call)
+
+```bash
+IDENTITY=0x0000000000000000000000000000000000000004
+DATA=0x1122334455
+
+curl -s -H 'Content-Type: application/json' \
+  --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_call\",\"params\":[{\"to\":\"${IDENTITY}\",\"data\":\"${DATA}\"},\"latest\"]}" \
+  http://127.0.0.1:8545 | jq
+
+curl -s -H 'Content-Type: application/json' \
+  --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"debug_callUBT\",\"params\":[{\"to\":\"${IDENTITY}\",\"data\":\"${DATA}\"},\"latest\",null,null]}" \
+  http://127.0.0.1:8545 | jq
+
+curl -s -H 'Content-Type: application/json' \
+  --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ubt_callUBT\",\"params\":[{\"to\":\"${IDENTITY}\",\"data\":\"${DATA}\"},\"latest\",null,null]}" \
+  http://127.0.0.1:8560 | jq
+```
+
+### Witness notes
+
+- `ubt_executionWitnessUBT` currently returns `status: "partial"` by design.
+- `accountsTouched/storageTouched/codeTouched` can be empty depending on selected block/root.
+- For strict direct/proxy comparison, query both methods with the **same explicit block**.
+
+## Selector and Parity Guidance
+
+Supported selectors:
+
+- `latest`
+- explicit block number
+- block hash (canonical)
+
+Rejected selectors:
+
+- `pending`, `safe`, `finalized`
+
+For deterministic comparisons between geth debug proxy and ubtconv direct RPC:
+
+1. Read `ubt_status` from ubtconv.
+2. Use `appliedBlock` as fixed selector (for both endpoints).
+3. Avoid comparing two independent `latest` calls taken at different timestamps.
+
+## Full-sync caveats
+
+1. geth full-sync does not serve arbitrary historical state forever.
+2. During initial catch-up, `eth_getBalance`/`eth_call` on older block selectors can fail with `historical state ... is not available`.
+3. UBT has its own retained history window (`--triedb-state-history`); requests outside that window return state-not-available errors.
+
+## Pre-Cancun storage preimage behavior
+
+- This branch persists `(address, slotHash) -> rawSlot` mappings needed for pre-Cancun UBT diff emission.
+- Mainnet full-sync from genesis is the expected steady-state path.
+- If geth `ubt_status` reports `degradedReasonCode=ErrRawStorageKeyMissing`, treat it as an operational/invariant issue (for example non-genesis bootstrap or missing historical preimages).
+
+## Outbox Compaction Semantics
+
+- `safeSeq` means delete events with `seq < safeSeq`.
+- Constraint: `safeSeq <= latestSeq + 1`.
+- `safeSeq = latestSeq + 1` means compact all currently persisted events.
+
+Recommended flow:
+
+1. `ubt_safeCompactSeq` from ubtconv.
+2. `ubt_compactOutboxBelow` on geth with that sequence.
+
+## Troubleshooting
+
+### `ubtconv` stuck with `no event at seq N`
+
+Cause:
+
+- Consumer starts from `AppliedSeq + 1`, but outbox lowest available seq is already greater than `N` (compaction boundary mismatch).
+
+Actions:
+
+1. Reuse matching `ubtconv` checkpoint datadir with that outbox.
+2. Or recreate outbox from seq `0` and restart with fresh ubtconv datadir.
+
+### `ubtconv` fails with DB lock (`resource temporarily unavailable`)
+
+Cause:
+
+- Multiple ubtconv processes using same `--datadir`.
+
+Action:
+
+- Stop duplicate process or use a different datadir.
+
+### `Lighthouse started` log confusion
+
+- Script marks lighthouse started when the startup banner is observed in lighthouse log.
+- Lighthouse HTTP API may still take extra time; script warns and continues while process is healthy.
+
+### `run_manual_check.sh` cannot resolve address on mainnet
+
+Cause:
+
+- Mainnet `eth_accounts`/`eth_coinbase` can be empty.
+
+Action:
+
+- Pass explicit `--address`.
 
 ## Configuration Flags
 
 | Flag | Default | Description |
-|------|---------|-------------|
-| `--outbox-rpc-endpoint` | `http://localhost:8545` | Geth RPC endpoint for outbox consumption |
-| `--datadir` | `./ubtconv-data` | Data directory for UBT trie database |
-| `--apply-commit-interval` | `128` | Number of blocks between UBT trie commits |
-| `--apply-commit-max-latency` | `10s` | Maximum time between UBT trie commits |
-| `--max-recoverable-reorg-depth` | `128` | Maximum reorg depth for fast-path recovery |
-| `--triedb-scheme` | `path` | Trie database scheme (must be `path`) |
-| `--triedb-state-history` | `90000` | Number of blocks of state history to retain |
-| `--require-archive-replay` | `true` | Require archive node for deep replay |
-| `--query-rpc-enabled` | `true` | Enable UBT query RPC server |
-| `--query-rpc-listen-addr` | `localhost:8560` | Listen address for UBT query RPC server |
-| `--query-rpc-max-batch` | `100` | Maximum batch size for list-style UBT RPC methods |
-| `--execution-class-rpc-enabled` | `false` | Enable execution-class RPC methods (`ubt_callUBT`, `ubt_executionWitnessUBT`) |
-| `--validation-sample-rate` | `0` | Validate every Nth block (`0` disables sampled validation) |
-| `--backpressure-lag-threshold` | `1000` | Force commit when `outboxLag > threshold` (`0` disables backpressure commits) |
-| `--outbox-disk-budget-bytes` | `0` (unlimited) | Maximum disk usage for outbox events |
-| `--outbox-alert-threshold-pct` | `80` | Disk usage percentage to trigger compaction alert |
-| `--cancun-block` | `0` | Explicit Cancun fork block (`0` = estimate from chain config timestamp) |
-| `--slot-index-disk-budget` | `0` (unlimited) | Maximum disk usage for slot index |
-| `--validation-strict` | `true` | Enable strict cross-validation against MPT |
-| `--validation-halt-on-mismatch` | `false` | Halt on validation mismatch |
+|---|---|---|
+| `--outbox-rpc-endpoint` | `http://localhost:8545` | geth RPC endpoint for outbox consumption |
+| `--datadir` | `./ubtconv-data` | ubtconv data directory |
+| `--apply-commit-interval` | `128` | Commit every N applied blocks |
+| `--apply-commit-max-latency` | `10s` | Commit max latency |
+| `--max-recoverable-reorg-depth` | `128` | Fast-path reorg depth bound |
+| `--triedb-scheme` | `path` | Trie scheme (must be `path`) |
+| `--triedb-state-history` | `90000` | Retained UBT state history blocks |
+| `--require-archive-replay` | `true` | Require archive replay client for deep recovery |
+| `--query-rpc-enabled` | `true` | Enable ubt query RPC server |
+| `--query-rpc-listen-addr` | `localhost:8560` | Query RPC listen address |
+| `--query-rpc-max-batch` | `100` | Max batch size for list-style RPC |
+| `--validation-strict` | `true` | Strict validation against MPT |
+| `--validation-halt-on-mismatch` | `false` | Stop daemon on strict mismatch |
+| `--execution-class-rpc-enabled` | `false` | Enable `ubt_callUBT` and `ubt_executionWitnessUBT` |
+| `--backpressure-lag-threshold` | `1000` | Force fast commit above lag threshold |
+| `--outbox-disk-budget-bytes` | `0` | Outbox disk budget (0 = unlimited) |
+| `--outbox-alert-threshold-pct` | `80` | Outbox compaction alert threshold |
+| `--cancun-block` | `0` | Explicit Cancun block (`0` = estimate from chain config timestamp) |
+| `--slot-index-disk-budget` | `0` | Slot index disk budget (0 = unlimited) |
 
-## Data Directory Structure
+## Data Directory Layout
 
-```
+```text
 ubtconv-data/
-├── consumer/        # LevelDB: Consumer checkpoint state
-└── triedb/          # LevelDB: UBT trie nodes (path scheme)
+  consumer/   # consumer state/checkpoints
+  triedb/     # UBT trie DB (path scheme)
 ```
 
-## Building
+## Build
 
 ```bash
-cd cmd/ubtconv
-go build -o ubtconv .
+go build -o build/bin/ubtconv ./cmd/ubtconv
 ```
-
-## Development Status
-
-- [x] Basic daemon skeleton with lifecycle management
-- [x] Consumer with crash-consistent checkpointing
-- [x] Applier with UBT trie operations
-- [x] Commit policy (block interval + time latency)
-- [x] RPC client for reading outbox events
-- [x] Reorg recovery (fast-path + slow-path with anchor snapshots)
-- [x] Query RPC server with state/proof/witness endpoints
-- [x] Full-sync-first startup flow (`seq=0` from fresh state, resume by checkpoint)
-- [x] Strict validation (account, storage, code cross-check)
-- [x] Fixed slot index policy for pre-Cancun storage tracking
-- [x] Observability metrics (daemon, proxy, recovery)
-- [x] Outbox compaction coordination with disk budget
-- [x] Merkle proof generation and verification
-- [x] Startup recovery from anchor snapshots
-
-## Dependencies
-
-- `github.com/ethereum/go-ethereum` - Core geth libraries
-- `github.com/urfave/cli/v2` - CLI framework
-- LevelDB - Storage backend
 
 ## License
 
-Copyright 2024 The go-ethereum Authors. Licensed under the GNU General Public License v3.0.
+Copyright 2024 The go-ethereum Authors. Licensed under GNU GPL v3.0.

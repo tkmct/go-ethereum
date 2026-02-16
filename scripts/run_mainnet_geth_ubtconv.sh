@@ -32,12 +32,14 @@ LIGHTHOUSE_HTTP_PORT="${LIGHTHOUSE_HTTP_PORT:-5052}"
 LIGHTHOUSE_P2P_PORT="${LIGHTHOUSE_P2P_PORT:-9000}"
 LIGHTHOUSE_QUIC_PORT="${LIGHTHOUSE_QUIC_PORT:-9001}"
 CHECKPOINT_SYNC_URL="${CHECKPOINT_SYNC_URL:-}"
+GETH_CACHE_MB="${GETH_CACHE_MB:-512}"
 
 APPLY_COMMIT_INTERVAL="${APPLY_COMMIT_INTERVAL:-128}"
 APPLY_COMMIT_MAX_LATENCY="${APPLY_COMMIT_MAX_LATENCY:-10s}"
 TRIEDB_STATE_HISTORY="${TRIEDB_STATE_HISTORY:-90000}"
 MAX_RECOVERABLE_REORG_DEPTH="${MAX_RECOVERABLE_REORG_DEPTH:-128}"
 OUTBOX_RETENTION_SEQ_WINDOW="${OUTBOX_RETENTION_SEQ_WINDOW:-100000}"
+MONITOR_PROGRESS_INTERVAL="${MONITOR_PROGRESS_INTERVAL:-30}"
 
 GETH_PID_FILE="${WORKDIR}/geth.pid"
 UBT_PID_FILE="${WORKDIR}/ubtconv.pid"
@@ -59,6 +61,13 @@ fail() {
   exit 1
 }
 
+spawn_process() {
+  local log_file="$1"
+  shift
+  nohup "$@" >"${log_file}" 2>&1 < /dev/null &
+  echo "$!"
+}
+
 usage() {
   cat <<'USAGE'
 Usage:
@@ -78,11 +87,13 @@ Options:
 
 Environment overrides:
   GETH_HTTP_ADDR, GETH_HTTP_PORT, GETH_P2P_PORT, GETH_AUTHRPC_ADDR, GETH_AUTHRPC_PORT
+  GETH_CACHE_MB
   UBT_HTTP_ADDR, UBT_HTTP_PORT
   LIGHTHOUSE_HTTP_ADDR, LIGHTHOUSE_HTTP_PORT, LIGHTHOUSE_P2P_PORT, LIGHTHOUSE_QUIC_PORT
   CHECKPOINT_SYNC_URL
   APPLY_COMMIT_INTERVAL, APPLY_COMMIT_MAX_LATENCY
   TRIEDB_STATE_HISTORY, MAX_RECOVERABLE_REORG_DEPTH, OUTBOX_RETENTION_SEQ_WINDOW
+  MONITOR_PROGRESS_INTERVAL
 
 Notes:
   - This script forces geth sync mode to full-sync: --syncmode full.
@@ -93,6 +104,15 @@ USAGE
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+require_opt_value() {
+  local opt="$1"
+  local val="${2:-}"
+  if [[ -z "${val}" || "${val}" == --* ]]; then
+    fail "option ${opt} requires a value"
+  fi
+  printf '%s' "${val}"
 }
 
 pid_running() {
@@ -114,6 +134,35 @@ rpc_call() {
   curl -sS -H 'Content-Type: application/json' \
     --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"${method}\",\"params\":${params}}" \
     "${endpoint}"
+}
+
+rpc_result_raw() {
+  local endpoint="$1"
+  local method="$2"
+  local params="$3"
+  local response
+  if ! response="$(rpc_call "${endpoint}" "${method}" "${params}" 2>/dev/null)"; then
+    return 1
+  fi
+  local err
+  err="$(jq -r '.error.message // empty' <<<"${response}" 2>/dev/null || true)"
+  if [[ -n "${err}" ]]; then
+    return 1
+  fi
+  jq -rc '.result' <<<"${response}" 2>/dev/null
+}
+
+hex_to_dec_or_na() {
+  local hex="${1:-}"
+  if [[ -z "${hex}" || "${hex}" == "null" ]]; then
+    printf 'n/a'
+    return
+  fi
+  if [[ "${hex}" =~ ^0x[0-9a-fA-F]+$ ]]; then
+    printf '%d' "$((16#${hex#0x}))"
+    return
+  fi
+  printf '%s' "${hex}"
 }
 
 wait_for_rpc() {
@@ -176,9 +225,10 @@ start_geth() {
   fi
 
   log "Starting geth (mainnet full-sync)"
-  "${GETH_BIN}" \
+  spawn_process "${GETH_LOG_FILE}" env -u GETH_CACHE_MB "${GETH_BIN}" \
     --mainnet \
     --syncmode full \
+    --cache "${GETH_CACHE_MB}" \
     --datadir "${GETH_DATADIR}" \
     --port "${GETH_P2P_PORT}" \
     --authrpc.addr "${GETH_AUTHRPC_ADDR}" \
@@ -195,8 +245,7 @@ start_geth() {
     --ubt.debug-rpc-proxy-enabled \
     --ubt.debug-endpoint "http://${UBT_HTTP_ADDR}:${UBT_HTTP_PORT}" \
     --ubt.debug-timeout 5s \
-    >"${GETH_LOG_FILE}" 2>&1 &
-  echo "$!" >"${GETH_PID_FILE}"
+    >"${GETH_PID_FILE}"
 
   if ! wait_for_rpc "http://${GETH_HTTP_ADDR}:${GETH_HTTP_PORT}" "rpc_modules" 180; then
     fail "geth RPC did not become ready (log: ${GETH_LOG_FILE})"
@@ -207,12 +256,16 @@ start_geth() {
 wait_for_http_get() {
   local url="$1"
   local timeout_sec="${2:-180}"
+  local pid="${3:-}"
   local start now
 
   start="$(date +%s)"
   while true; do
-    if curl -fsS "${url}" >/dev/null 2>&1; then
+    if curl --max-time 2 -fsS "${url}" >/dev/null 2>&1; then
       return 0
+    fi
+    if [[ -n "${pid}" ]] && ! pid_running "${pid}"; then
+      return 2
     fi
     now="$(date +%s)"
     if (( now - start >= timeout_sec )); then
@@ -247,13 +300,35 @@ start_lighthouse() {
     cmd+=(--checkpoint-sync-url "${CHECKPOINT_SYNC_URL}")
   fi
 
-  "${cmd[@]}" >"${LIGHTHOUSE_LOG_FILE}" 2>&1 &
-  echo "$!" >"${LIGHTHOUSE_PID_FILE}"
+  spawn_process "${LIGHTHOUSE_LOG_FILE}" "${cmd[@]}" >"${LIGHTHOUSE_PID_FILE}"
+  local lighthouse_pid
+  lighthouse_pid="$(cat "${LIGHTHOUSE_PID_FILE}")"
 
-  if ! wait_for_http_get "http://${LIGHTHOUSE_HTTP_ADDR}:${LIGHTHOUSE_HTTP_PORT}/eth/v1/node/version" 240; then
-    fail "lighthouse HTTP API did not become ready (log: ${LIGHTHOUSE_LOG_FILE})"
+  # Consider lighthouse "started" once process is alive and startup banner is written.
+  local start now
+  start="$(date +%s)"
+  while true; do
+    if ! pid_running "${lighthouse_pid}"; then
+      fail "lighthouse exited during startup (log: ${LIGHTHOUSE_LOG_FILE})"
+    fi
+    if grep -q "Lighthouse started" "${LIGHTHOUSE_LOG_FILE}" 2>/dev/null; then
+      break
+    fi
+    now="$(date +%s)"
+    if (( now - start >= 60 )); then
+      fail "lighthouse startup banner not observed within timeout (log: ${LIGHTHOUSE_LOG_FILE})"
+    fi
+    sleep 1
+  done
+  log "lighthouse started (pid=${lighthouse_pid})"
+
+  # HTTP API readiness can lag behind startup; warn but continue when process is healthy.
+  if ! wait_for_http_get "http://${LIGHTHOUSE_HTTP_ADDR}:${LIGHTHOUSE_HTTP_PORT}/eth/v1/node/version" 30 "${lighthouse_pid}"; then
+    if ! pid_running "${lighthouse_pid}"; then
+      fail "lighthouse exited before HTTP API became ready (log: ${LIGHTHOUSE_LOG_FILE})"
+    fi
+    warn "lighthouse HTTP API not ready yet; continuing while process is healthy"
   fi
-  log "lighthouse started (pid=$(cat "${LIGHTHOUSE_PID_FILE}"))"
 }
 
 start_ubtconv() {
@@ -282,8 +357,7 @@ start_ubtconv() {
     cmd+=(--execution-class-rpc-enabled)
   fi
 
-  "${cmd[@]}" >"${UBT_LOG_FILE}" 2>&1 &
-  echo "$!" >"${UBT_PID_FILE}"
+  spawn_process "${UBT_LOG_FILE}" "${cmd[@]}" >"${UBT_PID_FILE}"
 
   if ! wait_for_rpc "http://${UBT_HTTP_ADDR}:${UBT_HTTP_PORT}" "ubt_status" 180; then
     fail "ubtconv RPC did not become ready (log: ${UBT_LOG_FILE})"
@@ -355,6 +429,46 @@ show_status() {
   printf 'lighthouse http: http://%s:%s\n' "${LIGHTHOUSE_HTTP_ADDR}" "${LIGHTHOUSE_HTTP_PORT}"
   printf 'ubt rpc:  http://%s:%s\n' "${UBT_HTTP_ADDR}" "${UBT_HTTP_PORT}"
   printf 'logs: %s , %s , %s\n' "${GETH_LOG_FILE}" "${LIGHTHOUSE_LOG_FILE}" "${UBT_LOG_FILE}"
+
+  local eth_block_hex ubt_seq_hex ubt_status_json geth_ubt_status_json
+  eth_block_hex="$(rpc_result_raw "http://${GETH_HTTP_ADDR}:${GETH_HTTP_PORT}" "eth_blockNumber" '[]' || true)"
+  ubt_seq_hex="$(rpc_result_raw "http://${GETH_HTTP_ADDR}:${GETH_HTTP_PORT}" "ubt_latestSeq" '[]' || true)"
+  ubt_status_json="$(rpc_result_raw "http://${UBT_HTTP_ADDR}:${UBT_HTTP_PORT}" "ubt_status" '[]' || true)"
+  geth_ubt_status_json="$(rpc_result_raw "http://${GETH_HTTP_ADDR}:${GETH_HTTP_PORT}" "ubt_status" '[]' || true)"
+
+  printf 'eth_blockNumber: %s (%s)\n' \
+    "${eth_block_hex:-n/a}" "$(hex_to_dec_or_na "${eth_block_hex:-}")"
+  printf 'ubt_latestSeq:  %s (%s)\n' \
+    "${ubt_seq_hex:-n/a}" "$(hex_to_dec_or_na "${ubt_seq_hex:-}")"
+  if [[ -n "${ubt_status_json}" ]]; then
+    printf 'ubt_status:     appliedSeq=%s appliedBlock=%s pendingSeq=%s outboxLag=%s\n' \
+      "$(jq -r '.appliedSeq // "n/a"' <<<"${ubt_status_json}" 2>/dev/null || echo n/a)" \
+      "$(jq -r '.appliedBlock // "n/a"' <<<"${ubt_status_json}" 2>/dev/null || echo n/a)" \
+      "$(jq -r '.pendingSeq // "n/a"' <<<"${ubt_status_json}" 2>/dev/null || echo n/a)" \
+      "$(jq -r '.outboxLag // "n/a"' <<<"${ubt_status_json}" 2>/dev/null || echo n/a)"
+  else
+    printf 'ubt_status:     n/a (RPC not ready)\n'
+  fi
+
+  if [[ -n "${geth_ubt_status_json}" ]]; then
+    printf 'geth ubt:       enabled=%s degraded=%s latestSeq=%s\n' \
+      "$(jq -r '.enabled // "n/a"' <<<"${geth_ubt_status_json}" 2>/dev/null || echo n/a)" \
+      "$(jq -r '.degraded // "n/a"' <<<"${geth_ubt_status_json}" 2>/dev/null || echo n/a)" \
+      "$(jq -r '.latestSeq // "n/a"' <<<"${geth_ubt_status_json}" 2>/dev/null || echo n/a)"
+    local degraded_reason_code degraded_block
+    degraded_reason_code="$(jq -r '.degradedReasonCode // empty' <<<"${geth_ubt_status_json}" 2>/dev/null || true)"
+    degraded_block="$(jq -r '.degradedBlock // empty' <<<"${geth_ubt_status_json}" 2>/dev/null || true)"
+    if [[ -n "${degraded_reason_code}" ]]; then
+      printf 'geth ubt:       degradedReasonCode=%s degradedBlock=%s\n' \
+        "${degraded_reason_code}" "${degraded_block:-n/a}"
+    fi
+  fi
+
+  local beacon_line
+  beacon_line="$(grep "Syncing beacon headers" "${GETH_LOG_FILE}" 2>/dev/null | tail -n 1 || true)"
+  if [[ -n "${beacon_line}" ]]; then
+    printf 'geth beacon sync: %s\n' "${beacon_line}"
+  fi
 }
 
 monitor_loop() {
@@ -362,6 +476,10 @@ monitor_loop() {
   geth_pid="$(cat "${GETH_PID_FILE}")"
   ubt_pid="$(cat "${UBT_PID_FILE}")"
   lighthouse_pid="$(cat "${LIGHTHOUSE_PID_FILE}")"
+  local ticks=0
+  local prev_block=""
+  local prev_seq=""
+  local stagnant_intervals=0
 
   while true; do
     if ! pid_running "${geth_pid}"; then
@@ -372,6 +490,46 @@ monitor_loop() {
     fi
     if ! pid_running "${lighthouse_pid}"; then
       fail "lighthouse exited unexpectedly (see ${LIGHTHOUSE_LOG_FILE})"
+    fi
+    ticks=$((ticks + 5))
+    if (( ticks >= MONITOR_PROGRESS_INTERVAL )); then
+      ticks=0
+      local block_hex seq_hex ubt_status_json geth_ubt_status_json applied_seq applied_block beacon_line
+      block_hex="$(rpc_result_raw "http://${GETH_HTTP_ADDR}:${GETH_HTTP_PORT}" "eth_blockNumber" '[]' || true)"
+      seq_hex="$(rpc_result_raw "http://${GETH_HTTP_ADDR}:${GETH_HTTP_PORT}" "ubt_latestSeq" '[]' || true)"
+      ubt_status_json="$(rpc_result_raw "http://${UBT_HTTP_ADDR}:${UBT_HTTP_PORT}" "ubt_status" '[]' || true)"
+      geth_ubt_status_json="$(rpc_result_raw "http://${GETH_HTTP_ADDR}:${GETH_HTTP_PORT}" "ubt_status" '[]' || true)"
+      applied_seq="$(jq -r '.appliedSeq // "n/a"' <<<"${ubt_status_json:-null}" 2>/dev/null || echo n/a)"
+      applied_block="$(jq -r '.appliedBlock // "n/a"' <<<"${ubt_status_json:-null}" 2>/dev/null || echo n/a)"
+
+      log "progress: eth_blockNumber=${block_hex:-n/a}($(hex_to_dec_or_na "${block_hex:-}")) ubt_latestSeq=${seq_hex:-n/a}($(hex_to_dec_or_na "${seq_hex:-}")) appliedSeq=${applied_seq} appliedBlock=${applied_block}"
+
+      local degraded_reason_code degraded_block
+      degraded_reason_code="$(jq -r '.degradedReasonCode // empty' <<<"${geth_ubt_status_json:-null}" 2>/dev/null || true)"
+      degraded_block="$(jq -r '.degradedBlock // empty' <<<"${geth_ubt_status_json:-null}" 2>/dev/null || true)"
+      if [[ "${seq_hex:-}" == "0x0" && "${block_hex:-}" != "0x0" && -n "${degraded_reason_code}" ]]; then
+        warn "UBT emitter degraded (${degraded_reason_code}) at block ${degraded_block:-n/a}; outbox seq will stay 0 until this constraint clears"
+      fi
+
+      if [[ -n "${block_hex}" && -n "${seq_hex}" && "${block_hex}" == "${prev_block}" && "${seq_hex}" == "${prev_seq}" ]]; then
+        stagnant_intervals=$((stagnant_intervals + 1))
+      else
+        stagnant_intervals=0
+      fi
+      prev_block="${block_hex:-}"
+      prev_seq="${seq_hex:-}"
+
+      if (( stagnant_intervals >= 2 )); then
+        if [[ -n "${degraded_reason_code}" ]]; then
+          warn "geth UBT emitter is degraded (${degraded_reason_code}) at block ${degraded_block:-n/a}; latestSeq may stay 0 until constraint is resolved"
+        fi
+        beacon_line="$(grep "Syncing beacon headers" "${GETH_LOG_FILE}" 2>/dev/null | tail -n 1 || true)"
+        if [[ -n "${beacon_line}" ]]; then
+          warn "no EL/UBT counter movement yet; geth still in beacon-header sync: ${beacon_line}"
+        else
+          warn "no EL/UBT counter movement yet; waiting for full-sync pipeline to advance"
+        fi
+      fi
     fi
     sleep 5
   done
@@ -389,11 +547,11 @@ parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --action)
-        ACTION="${2:-}"
+        ACTION="$(require_opt_value "$1" "${2:-}")"
         shift 2
         ;;
       --workdir)
-        WORKDIR="${2:-}"
+        WORKDIR="$(require_opt_value "$1" "${2:-}")"
         GETH_DATADIR="${WORKDIR}/geth"
         UBT_DATADIR="${WORKDIR}/ubtconv"
         LIGHTHOUSE_DATADIR="${WORKDIR}/lighthouse"
@@ -408,19 +566,19 @@ parse_args() {
         shift 2
         ;;
       --geth-bin)
-        GETH_BIN="${2:-}"
+        GETH_BIN="$(require_opt_value "$1" "${2:-}")"
         shift 2
         ;;
       --ubtconv-bin)
-        UBTCONV_BIN="${2:-}"
+        UBTCONV_BIN="$(require_opt_value "$1" "${2:-}")"
         shift 2
         ;;
       --lighthouse-bin)
-        LIGHTHOUSE_BIN="${2:-}"
+        LIGHTHOUSE_BIN="$(require_opt_value "$1" "${2:-}")"
         shift 2
         ;;
       --checkpoint-sync-url)
-        CHECKPOINT_SYNC_URL="${2:-}"
+        CHECKPOINT_SYNC_URL="$(require_opt_value "$1" "${2:-}")"
         shift 2
         ;;
       --skip-build)

@@ -17,7 +17,6 @@
 package ubtemit
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
@@ -305,15 +304,21 @@ func (s *OutboxStore) CompactBelow(safeSeq uint64) (int, error) {
 
 // PersistFailureCheckpoint writes the last failure info to the outbox DB for restart diagnostics.
 func (s *OutboxStore) PersistFailureCheckpoint(blockNumber uint64, failErr error) {
-	// Encode: 8 bytes block number + error string
-	errMsg := failErr.Error()
-	data := make([]byte, 8+len(errMsg))
-	binary.BigEndian.PutUint64(data[:8], blockNumber)
-	copy(data[8:], errMsg)
+	rawdb.WriteUBTFailureCheckpoint(s.db, blockNumber, failErr.Error())
+}
 
-	if err := s.db.Put([]byte("ubt-failure-checkpoint"), data); err != nil {
-		log.Error("Failed to persist failure checkpoint", "err", err)
-	}
+// ReadFailureCheckpoint returns the latest emitter failure checkpoint.
+func (s *OutboxStore) ReadFailureCheckpoint() *rawdb.UBTFailureCheckpoint {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return rawdb.ReadUBTFailureCheckpoint(s.db)
+}
+
+// ClearFailureCheckpoint deletes the latest emitter failure checkpoint.
+func (s *OutboxStore) ClearFailureCheckpoint() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rawdb.DeleteUBTFailureCheckpoint(s.db)
 }
 
 // Close closes the outbox database.

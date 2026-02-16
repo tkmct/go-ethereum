@@ -92,6 +92,11 @@ type stateUpdate struct {
 	storagesOrigin map[common.Address]map[common.Hash][]byte
 	rawStorageKey  bool
 
+	// storageSlotPreimages stores observed storage slot preimages keyed by
+	// (address, slotHash). This allows pre-Cancun conversion to recover raw
+	// slot keys for updates that were touched in the current block.
+	storageSlotPreimages map[common.Address]map[common.Hash]common.Hash
+
 	codes map[common.Address]*contractCode // codes contains the set of dirty codes
 	nodes *trienode.MergedNodeSet          // Aggregated dirty nodes caused by state changes
 }
@@ -113,6 +118,7 @@ func newStateUpdate(rawStorageKey bool, originRoot common.Hash, root common.Hash
 		accountsOrigin = make(map[common.Address][]byte)
 		storages       = make(map[common.Hash]map[common.Hash][]byte)
 		storagesOrigin = make(map[common.Address]map[common.Hash][]byte)
+		slotPreimages  = make(map[common.Address]map[common.Hash]common.Hash)
 		codes          = make(map[common.Address]*contractCode)
 	)
 	// Since some accounts might be destroyed and recreated within the same
@@ -172,19 +178,45 @@ func newStateUpdate(rawStorageKey bool, originRoot common.Hash, root common.Hash
 				}
 			}
 		}
+		// Aggregate storage slot preimages by hash for pre-Cancun recovery.
+		for rawKey := range op.storagesOriginByKey {
+			hash := crypto.Keccak256Hash(rawKey.Bytes())
+			if slotPreimages[addr] == nil {
+				slotPreimages[addr] = make(map[common.Hash]common.Hash)
+			}
+			slotPreimages[addr][hash] = rawKey
+		}
 	}
 	return &stateUpdate{
-		originRoot:     originRoot,
-		root:           root,
-		blockNumber:    blockNumber,
-		accounts:       accounts,
-		accountsOrigin: accountsOrigin,
-		storages:       storages,
-		storagesOrigin: storagesOrigin,
-		rawStorageKey:  rawStorageKey,
-		codes:          codes,
-		nodes:          nodes,
+		originRoot:           originRoot,
+		root:                 root,
+		blockNumber:          blockNumber,
+		accounts:             accounts,
+		accountsOrigin:       accountsOrigin,
+		storages:             storages,
+		storagesOrigin:       storagesOrigin,
+		rawStorageKey:        rawStorageKey,
+		storageSlotPreimages: slotPreimages,
+		codes:                codes,
+		nodes:                nodes,
 	}
+}
+
+// UBTStoragePreimages returns a deep copy of observed storage slot preimages
+// keyed by (address, slotHash) -> rawSlot.
+func (sc *stateUpdate) UBTStoragePreimages() map[common.Address]map[common.Hash]common.Hash {
+	if len(sc.storageSlotPreimages) == 0 {
+		return nil
+	}
+	out := make(map[common.Address]map[common.Hash]common.Hash, len(sc.storageSlotPreimages))
+	for addr, slots := range sc.storageSlotPreimages {
+		sub := make(map[common.Hash]common.Hash, len(slots))
+		for hash, raw := range slots {
+			sub[hash] = raw
+		}
+		out[addr] = sub
+	}
+	return out
 }
 
 // stateSet converts the current stateUpdate object into a triedb.StateSet

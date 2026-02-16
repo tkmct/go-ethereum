@@ -261,6 +261,128 @@ func TestToUBTDiff_RawKeyRequired(t *testing.T) {
 	}
 }
 
+// TestToUBTDiff_PreCancunUsesInBlockPreimages verifies that pre-Cancun conversion
+// can recover raw keys from preimages collected in the same block update.
+func TestToUBTDiff_PreCancunUsesInBlockPreimages(t *testing.T) {
+	addr := common.HexToAddress("0x1111")
+	addrHash := crypto.Keccak256Hash(addr.Bytes())
+	rawKey := common.HexToHash("0x1234")
+	hashedKey := crypto.Keccak256Hash(rawKey.Bytes())
+
+	acctData, _ := rlp.EncodeToBytes(&types.SlimAccount{Balance: uint256.NewInt(100)})
+	newVal, _ := rlp.EncodeToBytes(common.HexToHash("0x42").Bytes())
+	oldVal, _ := rlp.EncodeToBytes(common.HexToHash("0x01").Bytes())
+
+	updates := map[common.Hash]*accountUpdate{
+		addrHash: {
+			address: addr,
+			data:    acctData,
+			origin:  acctData,
+			storages: map[common.Hash][]byte{
+				hashedKey: newVal,
+			},
+			storagesOriginByKey: map[common.Hash][]byte{
+				rawKey: oldVal,
+			},
+			storagesOriginByHash: map[common.Hash][]byte{
+				hashedKey: oldVal,
+			},
+		},
+	}
+	su := newStateUpdate(false, common.Hash{}, common.Hash{}, 1,
+		make(map[common.Hash]*accountDelete), updates, trienode.NewMergedNodeSet())
+
+	diff, err := su.ToUBTDiff()
+	if err != nil {
+		t.Fatalf("ToUBTDiff failed: %v", err)
+	}
+	if len(diff.Storage) != 1 {
+		t.Fatalf("expected 1 storage entry, got %d", len(diff.Storage))
+	}
+	if diff.Storage[0].SlotKeyRaw != rawKey {
+		t.Fatalf("raw key mismatch: got %s want %s", diff.Storage[0].SlotKeyRaw, rawKey)
+	}
+}
+
+// TestToUBTDiff_PreCancunUsesLookup verifies that pre-Cancun conversion can
+// recover raw keys via external lookup for slots without in-block preimages.
+func TestToUBTDiff_PreCancunUsesLookup(t *testing.T) {
+	addr := common.HexToAddress("0x2222")
+	addrHash := crypto.Keccak256Hash(addr.Bytes())
+	rawKey := common.HexToHash("0x8888")
+	hashedKey := crypto.Keccak256Hash(rawKey.Bytes())
+
+	oldData, _ := rlp.EncodeToBytes(&types.SlimAccount{
+		Nonce:   1,
+		Balance: uint256.NewInt(500),
+	})
+	deletes := map[common.Hash]*accountDelete{
+		addrHash: {
+			address: addr,
+			origin:  oldData,
+			storages: map[common.Hash][]byte{
+				hashedKey: nil,
+			},
+			storagesOrigin: map[common.Hash][]byte{
+				hashedKey: nil,
+			},
+		},
+	}
+	su := newStateUpdate(false, common.Hash{}, common.Hash{}, 1,
+		deletes, make(map[common.Hash]*accountUpdate), trienode.NewMergedNodeSet())
+
+	diff, err := su.ToUBTDiffWithStorageKeyLookup(func(a common.Address, h common.Hash) (common.Hash, bool) {
+		if a == addr && h == hashedKey {
+			return rawKey, true
+		}
+		return common.Hash{}, false
+	})
+	if err != nil {
+		t.Fatalf("ToUBTDiffWithStorageKeyLookup failed: %v", err)
+	}
+	if len(diff.Storage) != 1 {
+		t.Fatalf("expected 1 storage entry, got %d", len(diff.Storage))
+	}
+	if diff.Storage[0].SlotKeyRaw != rawKey {
+		t.Fatalf("raw key mismatch: got %s want %s", diff.Storage[0].SlotKeyRaw, rawKey)
+	}
+}
+
+// TestToUBTDiff_PreCancunLookupMissing verifies failure when no preimage source
+// can resolve a slot hash.
+func TestToUBTDiff_PreCancunLookupMissing(t *testing.T) {
+	addr := common.HexToAddress("0x3333")
+	addrHash := crypto.Keccak256Hash(addr.Bytes())
+	slotHash := common.HexToHash("0x9999")
+
+	oldData, _ := rlp.EncodeToBytes(&types.SlimAccount{
+		Nonce:   1,
+		Balance: uint256.NewInt(500),
+	})
+	deletes := map[common.Hash]*accountDelete{
+		addrHash: {
+			address: addr,
+			origin:  oldData,
+			storages: map[common.Hash][]byte{
+				slotHash: nil,
+			},
+			storagesOrigin: map[common.Hash][]byte{
+				slotHash: nil,
+			},
+		},
+	}
+	su := newStateUpdate(false, common.Hash{}, common.Hash{}, 1,
+		deletes, make(map[common.Hash]*accountUpdate), trienode.NewMergedNodeSet())
+
+	_, err := su.ToUBTDiff()
+	if err == nil {
+		t.Fatal("expected error for missing preimage")
+	}
+	if !errors.Is(err, ErrRawStorageKeyMissing) {
+		t.Fatalf("expected ErrRawStorageKeyMissing, got %v", err)
+	}
+}
+
 // TestToUBTDiff_SortedAccounts verifies accounts are sorted by address.
 func TestToUBTDiff_SortedAccounts(t *testing.T) {
 	addrs := []common.Address{

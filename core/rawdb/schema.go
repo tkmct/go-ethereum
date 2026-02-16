@@ -174,6 +174,7 @@ var (
 	ubtOutboxLowestSeqKey      = []byte("ubt-lowseq")    // Lowest non-deleted sequence number
 	ubtOutboxDiskUsageKey      = []byte("ubt-diskusage") // Cumulative disk usage bytes
 	ubtOutboxConsumerStateKey  = []byte("ubt-consumer")  // Consumer checkpoint state
+	ubtOutboxFailureCkptKey    = []byte("ubt-failckpt")  // Last emitter failure checkpoint (block + reason)
 	ubtBlockRootPrefix         = []byte("ubt-blk-root-")  // ubt-blk-root- + block number (8 bytes big-endian) -> UBT root hash
 	ubtBlockHashPrefix         = []byte("ubt-blk-hash-")  // ubt-blk-hash- + block number (8 bytes big-endian) -> canonical block hash
 	ubtBlockParentHashPrefix   = []byte("ubt-blk-phash-") // ubt-blk-phash- + block number (8 bytes big-endian) -> canonical parent hash

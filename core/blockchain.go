@@ -1692,7 +1692,17 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 			bc.stateSizer.Notify(update)
 		}
 		if hasEmitter {
-			ubtDiff, err := update.ToUBTDiff()
+			slotPreimages := update.UBTStoragePreimages()
+			if !isCancun && len(slotPreimages) > 0 {
+				preimageBatch := bc.db.NewBatch()
+				rawdb.WriteUBTStorageSlotPreimages(preimageBatch, slotPreimages)
+				if err := preimageBatch.Write(); err != nil {
+					log.Crit("Failed to write UBT slot preimages", "block", block.NumberU64(), "err", err)
+				}
+			}
+			ubtDiff, err := update.ToUBTDiffWithStorageKeyLookup(func(addr common.Address, slotHash common.Hash) (common.Hash, bool) {
+				return rawdb.ReadUBTStorageSlotPreimage(bc.db, addr, slotHash)
+			})
 			if err != nil {
 				bc.emitter.MarkRawKeyFailure(block.NumberU64(), err)
 			} else {
