@@ -20,6 +20,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/pprof"
 	"sync"
 	"time"
 
@@ -33,6 +36,8 @@ type Runner struct {
 	cfg         *Config
 	consumer    *Consumer
 	queryServer *QueryServer
+	pprofSrv    *http.Server
+	pprofLn     net.Listener
 
 	stopCh          chan struct{}
 	wg              sync.WaitGroup
@@ -73,6 +78,12 @@ func (r *Runner) Start() error {
 		}
 		r.queryServer = qs
 	}
+	// Start pprof server if enabled
+	if r.cfg.PprofEnabled {
+		if err := r.startPprofServer(); err != nil {
+			return fmt.Errorf("failed to start pprof server: %w", err)
+		}
+	}
 
 	r.wg.Add(1)
 	go r.loop()
@@ -102,8 +113,44 @@ func (r *Runner) Stop() error {
 			log.Error("Failed to close query server", "err", err)
 		}
 	}
+	// Stop pprof server if running
+	if r.pprofSrv != nil {
+		if err := r.pprofSrv.Close(); err != nil {
+			log.Error("Failed to close pprof server", "err", err)
+		}
+	}
 
 	return r.consumer.Close()
+}
+
+func (r *Runner) startPprofServer() error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
+	mux.Handle("/debug/pprof/block", pprof.Handler("block"))
+	mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+	mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+	mux.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
+	mux.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
+
+	ln, err := net.Listen("tcp", r.cfg.PprofListenAddr)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{Handler: mux}
+	r.pprofLn = ln
+	r.pprofSrv = srv
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Error("UBT pprof server error", "err", err)
+		}
+	}()
+	log.Info("UBT pprof server started", "addr", ln.Addr())
+	return nil
 }
 
 // loop is the main event consumption loop.
@@ -114,7 +161,8 @@ func (r *Runner) loop() {
 
 	backoff := time.Second
 	maxBackoff := 30 * time.Second
-	lagCheckInterval := 30 * time.Second
+	lagCheckInterval := 5 * time.Second
+	r.refreshOutboxLag()
 	lastLagCheck := time.Now()
 
 	for {
@@ -126,6 +174,20 @@ func (r *Runner) loop() {
 			consumeErr := r.consumer.ConsumeNext()
 
 			if consumeErr != nil {
+				if errors.Is(consumeErr, errNoEventAvailable) {
+					consumerBackoffGauge.Update(0)
+					select {
+					case <-r.stopCh:
+						return
+					case <-time.After(20 * time.Millisecond):
+					}
+					// Keep lag fresh even when outbox is temporarily idle.
+					if time.Since(lastLagCheck) >= lagCheckInterval {
+						r.refreshOutboxLag()
+						lastLagCheck = time.Now()
+					}
+					continue
+				}
 				// Check for fatal validation halt — stop the daemon, don't retry
 				var haltErr *errValidationHalt
 				if errors.As(consumeErr, &haltErr) {
@@ -142,6 +204,12 @@ func (r *Runner) loop() {
 				if errors.As(consumeErr, &replayErr) {
 					log.Crit("UBT reorg requires archive replay", "err", consumeErr,
 						"action", "Restart with --require-archive-replay=true pointing to an archive node")
+					return
+				}
+				var gapErr *errOutboxGap
+				if errors.As(consumeErr, &gapErr) {
+					log.Crit("UBT consumer fell behind outbox retention window", "err", consumeErr,
+						"action", "Increase geth outbox retention window (or disable retention), then reset ubtconv state and restart")
 					return
 				}
 				// Log and backoff on transient error
@@ -196,6 +264,7 @@ func (r *Runner) refreshOutboxLag() {
 func (r *Runner) pruneStaleBlockRoots() {
 	r.consumer.mu.Lock()
 	appliedBlock := r.consumer.state.AppliedBlock
+	outboxLag := r.consumer.outboxLag
 	r.consumer.mu.Unlock()
 
 	if appliedBlock <= r.cfg.TrieDBStateHistory {
@@ -205,17 +274,34 @@ func (r *Runner) pruneStaleBlockRoots() {
 	if pruneBelow <= r.lastPrunedBlock {
 		return
 	}
+	// When conversion lag is high, prioritize apply throughput over root-index cleanup.
+	threshold := r.cfg.BackpressureLagThreshold
+	if threshold > 0 && outboxLag > threshold*2 {
+		pruneSkippedTotal.Inc(1)
+		return
+	}
 
-	// Prune in batches to avoid holding locks too long
+	// Prune in bounded batches to avoid stealing CPU/IO from apply/commit hot paths.
+	pruneBudget := uint64(2048)
+	if threshold > 0 && outboxLag > threshold {
+		pruneBudget = 512
+	}
 	pruned := 0
-	for block := r.lastPrunedBlock; block < pruneBelow; block++ {
+	last := r.lastPrunedBlock
+	for block := r.lastPrunedBlock; block < pruneBelow && uint64(pruned) < pruneBudget; block++ {
 		rawdb.DeleteUBTBlockRoot(r.consumer.db, block)
 		rawdb.DeleteUBTCanonicalBlock(r.consumer.db, block)
 		pruned++
+		last = block + 1
 	}
-	r.lastPrunedBlock = pruneBelow
+	r.lastPrunedBlock = last
+	pruneDeletedTotal.Inc(int64(pruned))
 	if pruned > 0 {
-		log.Debug("Pruned stale block roots", "pruned", pruned, "belowBlock", pruneBelow)
+		log.Debug("Pruned stale block roots",
+			"pruned", pruned,
+			"nextBlock", r.lastPrunedBlock,
+			"targetBelow", pruneBelow,
+			"lag", outboxLag)
 	}
 }
 
@@ -256,6 +342,9 @@ func (r *Runner) compactionLoop() {
 
 // tryCompaction attempts to compact outbox events below a safe threshold.
 func (r *Runner) tryCompaction(lastCompactedBelow *uint64) {
+	start := time.Now()
+	defer compactionLatency.UpdateSince(start)
+
 	compactionAttemptsTotal.Inc(1)
 
 	r.consumer.mu.Lock()
@@ -287,6 +376,9 @@ func (r *Runner) tryCompaction(lastCompactedBelow *uint64) {
 
 // callCompactOutbox invokes the ubt_compactOutboxBelow RPC on geth.
 func (r *Runner) callCompactOutbox(belowSeq uint64) error {
+	start := time.Now()
+	defer compactionRPCLatency.UpdateSince(start)
+
 	client, err := r.consumer.reader.getClient()
 	if err != nil {
 		return fmt.Errorf("get RPC client: %w", err)

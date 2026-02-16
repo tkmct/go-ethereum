@@ -19,6 +19,9 @@ package main
 import (
 	"fmt"
 	"path/filepath"
+	"runtime"
+	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -33,6 +36,8 @@ import (
 	"github.com/ethereum/go-ethereum/triedb/pathdb"
 	"github.com/holiman/uint256"
 )
+
+const applyPreprocessParallelThreshold = 2048
 
 // Applier applies QueuedDiffV1 events to the UBT trie.
 type Applier struct {
@@ -94,84 +99,237 @@ func NewApplier(cfg *Config, expectedRoot common.Hash) (*Applier, error) {
 	}, nil
 }
 
-// ApplyDiff applies a QueuedDiffV1 to the UBT trie.
-// blockNumber is used for slot index tracking (pre/post-Cancun semantics).
-// Returns the new UBT root hash (note: not committed to disk yet).
+// ApplyDiff applies a QueuedDiffV1 to the UBT trie and computes the
+// post-apply root hash. Call ApplyDiffFast in high-throughput catch-up paths
+// when an intermediate root is not needed for this block.
 func (a *Applier) ApplyDiff(diff *ubtemit.QueuedDiffV1, blockNumber ...uint64) (common.Hash, error) {
+	return a.applyDiff(diff, true, blockNumber...)
+}
+
+// ApplyDiffFast applies a QueuedDiffV1 to the UBT trie without hashing the
+// trie at the end of the transition.
+func (a *Applier) ApplyDiffFast(diff *ubtemit.QueuedDiffV1, blockNumber ...uint64) error {
+	_, err := a.applyDiff(diff, false, blockNumber...)
+	return err
+}
+
+func (a *Applier) applyDiff(diff *ubtemit.QueuedDiffV1, computeRoot bool, blockNumber ...uint64) (common.Hash, error) {
 	blkNum := uint64(0)
 	if len(blockNumber) > 0 {
 		blkNum = blockNumber[0]
 	}
-	codeByAddr := make(map[common.Address][]byte, len(diff.Codes))
-	for i := range diff.Codes {
-		codeByAddr[diff.Codes[i].Address] = diff.Codes[i].Code
-	}
+	accounts, storage, codes, codeByAddr := preprocessDiffForApply(diff)
+	applierApplyAccountsTotal.Inc(int64(len(accounts)))
+	applierApplyStorageTotal.Inc(int64(len(storage)))
+	applierApplyCodeTotal.Inc(int64(len(codes)))
 	// Apply accounts
-	for _, acct := range diff.Accounts {
-		if acct.Alive {
-			// Account exists - update it
-			bal, overflow := uint256.FromBig(acct.Balance)
-			if overflow {
-				return common.Hash{}, fmt.Errorf("balance overflow for account %s: %s", acct.Address, acct.Balance)
-			}
-			if bal.BitLen() > 128 {
-				return common.Hash{}, fmt.Errorf("balance exceeds UBT 128-bit limit for account %s: %s (needs %d bits)", acct.Address, acct.Balance, bal.BitLen())
-			}
-			stateAcct := &types.StateAccount{
-				Nonce:    acct.Nonce,
-				Balance:  bal,
-				Root:     types.EmptyRootHash, // UBT doesn't use per-account storage roots
-				CodeHash: acct.CodeHash.Bytes(),
-			}
-			codeLen := len(codeByAddr[acct.Address])
-			if err := a.trie.UpdateAccount(acct.Address, stateAcct, codeLen); err != nil {
-				return common.Hash{}, fmt.Errorf("update account %s: %w", acct.Address, err)
-			}
-		} else {
-			// Account deleted - zero it out
-			zeroAcct := &types.StateAccount{
-				Nonce:    0,
-				Balance:  new(uint256.Int),
-				Root:     types.EmptyRootHash,
-				CodeHash: types.EmptyCodeHash.Bytes(),
-			}
-			if err := a.trie.UpdateAccount(acct.Address, zeroAcct, 0); err != nil {
-				return common.Hash{}, fmt.Errorf("delete account %s: %w", acct.Address, err)
-			}
-			// Clean up slot index entries for deleted account
-			if a.slotIndex != nil {
-				if err := a.slotIndex.DeleteSlotsForAccount(acct.Address); err != nil {
-					log.Warn("Slot index cleanup failed", "addr", acct.Address, "err", err)
+	accountsStart := time.Now()
+	if err := func() error {
+		defer applierApplyAccountsLatency.UpdateSince(accountsStart)
+		for _, acct := range accounts {
+			if acct.Alive {
+				// Account exists - update it
+				bal, overflow := uint256.FromBig(acct.Balance)
+				if overflow {
+					return fmt.Errorf("balance overflow for account %s: %s", acct.Address, acct.Balance)
 				}
+				if bal.BitLen() > 128 {
+					return fmt.Errorf("balance exceeds UBT 128-bit limit for account %s: %s (needs %d bits)", acct.Address, acct.Balance, bal.BitLen())
+				}
+				stateAcct := &types.StateAccount{
+					Nonce:    acct.Nonce,
+					Balance:  bal,
+					Root:     types.EmptyRootHash, // UBT doesn't use per-account storage roots
+					CodeHash: acct.CodeHash.Bytes(),
+				}
+				codeLen := len(codeByAddr[acct.Address])
+				if err := a.trie.UpdateAccount(acct.Address, stateAcct, codeLen); err != nil {
+					return fmt.Errorf("update account %s: %w", acct.Address, err)
+				}
+			} else {
+				// Account deleted - zero it out
+				zeroAcct := &types.StateAccount{
+					Nonce:    0,
+					Balance:  new(uint256.Int),
+					Root:     types.EmptyRootHash,
+					CodeHash: types.EmptyCodeHash.Bytes(),
+				}
+				if err := a.trie.UpdateAccount(acct.Address, zeroAcct, 0); err != nil {
+					return fmt.Errorf("delete account %s: %w", acct.Address, err)
+				}
+				// Clean up slot index entries for deleted account
+				if a.slotIndex != nil {
+					if err := a.slotIndex.DeleteSlotsForAccount(acct.Address); err != nil {
+						log.Warn("Slot index cleanup failed", "addr", acct.Address, "err", err)
+					}
+				}
+				log.Debug("UBT account deleted", "addr", acct.Address)
 			}
-			log.Debug("UBT account deleted", "addr", acct.Address)
 		}
+		return nil
+	}(); err != nil {
+		return common.Hash{}, err
 	}
 
 	// Apply storage
-	for _, slot := range diff.Storage {
-		if err := a.trie.UpdateStorage(slot.Address, slot.SlotKeyRaw.Bytes(), slot.Value.Bytes()); err != nil {
-			return common.Hash{}, fmt.Errorf("update storage %s/%s: %w", slot.Address, slot.SlotKeyRaw, err)
-		}
-		// Track slot in index if enabled
-		if a.slotIndex != nil && a.slotIndex.ShouldIndex(blkNum) {
-			if err := a.slotIndex.TrackSlot(slot.Address, slot.SlotKeyRaw, blkNum); err != nil {
-				log.Warn("Slot index track failed", "addr", slot.Address, "slot", slot.SlotKeyRaw, "err", err)
+	storageStart := time.Now()
+	if err := func() error {
+		defer applierApplyStorageLatency.UpdateSince(storageStart)
+		for _, slot := range storage {
+			if err := a.trie.UpdateStorage(slot.Address, slot.SlotKeyRaw.Bytes(), slot.Value.Bytes()); err != nil {
+				return fmt.Errorf("update storage %s/%s: %w", slot.Address, slot.SlotKeyRaw, err)
+			}
+			// Track slot in index if enabled
+			if a.slotIndex != nil && a.slotIndex.ShouldIndex(blkNum) {
+				if err := a.slotIndex.TrackSlot(slot.Address, slot.SlotKeyRaw, blkNum); err != nil {
+					log.Warn("Slot index track failed", "addr", slot.Address, "slot", slot.SlotKeyRaw, "err", err)
+				}
 			}
 		}
+		return nil
+	}(); err != nil {
+		return common.Hash{}, err
 	}
 
 	// Apply code
-	for _, code := range diff.Codes {
-		if err := a.trie.UpdateContractCode(code.Address, code.CodeHash, code.Code); err != nil {
-			return common.Hash{}, fmt.Errorf("update code %s: %w", code.Address, err)
+	codeStart := time.Now()
+	if err := func() error {
+		defer applierApplyCodeLatency.UpdateSince(codeStart)
+		for _, code := range codes {
+			if err := a.trie.UpdateContractCode(code.Address, code.CodeHash, code.Code); err != nil {
+				return fmt.Errorf("update code %s: %w", code.Address, err)
+			}
+			// Store raw code in diskdb for StateDB code lookups (used by CallUBT)
+			rawdb.WriteCode(a.diskdb, code.CodeHash, code.Code)
 		}
-		// Store raw code in diskdb for StateDB code lookups (used by CallUBT)
-		rawdb.WriteCode(a.diskdb, code.CodeHash, code.Code)
+		return nil
+	}(); err != nil {
+		return common.Hash{}, err
 	}
 
-	// Return the current trie root (uncommitted)
+	// Return the current trie root (uncommitted) only when required.
+	if !computeRoot {
+		return common.Hash{}, nil
+	}
 	return a.trie.Hash(), nil
+}
+
+func preprocessDiffForApply(diff *ubtemit.QueuedDiffV1) ([]ubtemit.AccountEntry, []ubtemit.StorageEntry, []ubtemit.CodeEntry, map[common.Address][]byte) {
+	if diff == nil {
+		return nil, nil, nil, map[common.Address][]byte{}
+	}
+	total := len(diff.Accounts) + len(diff.Storage) + len(diff.Codes)
+	useParallel := total >= applyPreprocessParallelThreshold && runtime.GOMAXPROCS(0) > 1
+
+	var accounts []ubtemit.AccountEntry
+	var storage []ubtemit.StorageEntry
+	var codes []ubtemit.CodeEntry
+
+	if useParallel {
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			accounts = coalesceAccountEntries(diff.Accounts)
+		}()
+		go func() {
+			defer wg.Done()
+			storage = coalesceStorageEntries(diff.Storage)
+		}()
+		go func() {
+			defer wg.Done()
+			codes = coalesceCodeEntries(diff.Codes)
+		}()
+		wg.Wait()
+	} else {
+		accounts = coalesceAccountEntries(diff.Accounts)
+		storage = coalesceStorageEntries(diff.Storage)
+		codes = coalesceCodeEntries(diff.Codes)
+	}
+
+	codeByAddr := make(map[common.Address][]byte, len(codes))
+	for i := range codes {
+		codeByAddr[codes[i].Address] = codes[i].Code
+	}
+	return accounts, storage, codes, codeByAddr
+}
+
+func coalesceAccountEntries(entries []ubtemit.AccountEntry) []ubtemit.AccountEntry {
+	if len(entries) <= 1 {
+		return entries
+	}
+	seen := make(map[common.Address]struct{}, len(entries))
+	out := make([]ubtemit.AccountEntry, 0, len(entries))
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		if _, ok := seen[entry.Address]; ok {
+			continue
+		}
+		seen[entry.Address] = struct{}{}
+		out = append(out, entry)
+	}
+	reverseAccountEntries(out)
+	return out
+}
+
+type storageCoalesceKey struct {
+	address common.Address
+	slot    common.Hash
+}
+
+func coalesceStorageEntries(entries []ubtemit.StorageEntry) []ubtemit.StorageEntry {
+	if len(entries) <= 1 {
+		return entries
+	}
+	seen := make(map[storageCoalesceKey]struct{}, len(entries))
+	out := make([]ubtemit.StorageEntry, 0, len(entries))
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		key := storageCoalesceKey{address: entry.Address, slot: entry.SlotKeyRaw}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, entry)
+	}
+	reverseStorageEntries(out)
+	return out
+}
+
+func coalesceCodeEntries(entries []ubtemit.CodeEntry) []ubtemit.CodeEntry {
+	if len(entries) <= 1 {
+		return entries
+	}
+	seen := make(map[common.Address]struct{}, len(entries))
+	out := make([]ubtemit.CodeEntry, 0, len(entries))
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		if _, ok := seen[entry.Address]; ok {
+			continue
+		}
+		seen[entry.Address] = struct{}{}
+		out = append(out, entry)
+	}
+	reverseCodeEntries(out)
+	return out
+}
+
+func reverseAccountEntries(entries []ubtemit.AccountEntry) {
+	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
+		entries[i], entries[j] = entries[j], entries[i]
+	}
+}
+
+func reverseStorageEntries(entries []ubtemit.StorageEntry) {
+	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
+		entries[i], entries[j] = entries[j], entries[i]
+	}
+}
+
+func reverseCodeEntries(entries []ubtemit.CodeEntry) {
+	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
+		entries[i], entries[j] = entries[j], entries[i]
+	}
 }
 
 // Commit commits the current trie state to the database.
@@ -222,7 +380,7 @@ func (a *Applier) CommitAt(blockNumber uint64) error {
 	}
 	a.trie = tr
 
-	log.Info("UBT trie committed", "root", root)
+	log.Debug("UBT trie committed", "root", root)
 	return nil
 }
 
@@ -337,11 +495,15 @@ func (a *Applier) GenerateProofAt(root common.Hash, key []byte) (map[common.Hash
 	if len(key) != 32 {
 		return nil, fmt.Errorf("invalid key length %d, expected 32", len(key))
 	}
+	// Reuse the live trie only when the requested root matches the current
+	// in-memory trie hash exactly (supports uncommitted-root proofs in tests).
+	// For historical/committed-root proofs while newer uncommitted mutations
+	// exist, open an explicit snapshot trie at the requested root.
 	var (
 		tr  *bintrie.BinaryTrie
 		err error
 	)
-	if root == a.root && a.trie != nil {
+	if a.trie != nil && root == a.trie.Hash() {
 		tr = a.trie
 	} else {
 		tr, err = a.TrieAt(root)

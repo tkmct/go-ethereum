@@ -237,3 +237,37 @@ func TestConfig_ExecutionClassRPCEnabled_ExplicitTrue(t *testing.T) {
 		t.Fatalf("expected ExecutionClassRPCEnabled true when explicitly set")
 	}
 }
+
+func TestConfigValidate_PprofEnabledRequiresListenAddr(t *testing.T) {
+	cfg := &Config{
+		OutboxRPCEndpoint:     "http://localhost:8545",
+		DataDir:               "/tmp/test",
+		ApplyCommitInterval:   10,
+		ApplyCommitMaxLatency: time.Minute,
+		TrieDBScheme:          "path",
+		PprofEnabled:          true,
+		PprofListenAddr:       "",
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error when pprof is enabled without listen addr")
+	}
+	if !strings.Contains(err.Error(), "pprof-listen-addr is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestConfigValidate_PprofEnabledWithListenAddr(t *testing.T) {
+	cfg := &Config{
+		OutboxRPCEndpoint:     "http://localhost:8545",
+		DataDir:               "/tmp/test",
+		ApplyCommitInterval:   10,
+		ApplyCommitMaxLatency: time.Minute,
+		TrieDBScheme:          "path",
+		PprofEnabled:          true,
+		PprofListenAddr:       "127.0.0.1:6061",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid config, got: %v", err)
+	}
+}

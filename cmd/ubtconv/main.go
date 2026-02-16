@@ -38,6 +38,16 @@ var (
 		Usage: "Geth RPC endpoint for outbox consumption",
 		Value: "http://localhost:8545",
 	}
+	outboxReadBatchFlag = &cli.Uint64Flag{
+		Name:  "outbox-read-batch",
+		Usage: "Number of outbox events to prefetch per read (1 = disable prefetch, max 1000)",
+		Value: 1,
+	}
+	outboxReadAheadFlag = &cli.Uint64Flag{
+		Name:  "outbox-read-ahead",
+		Usage: "Consumer-side read-ahead window size (1 = disabled)",
+		Value: 64,
+	}
 	dataDirectoryFlag = &cli.StringFlag{
 		Name:  "datadir",
 		Usage: "Data directory for UBT trie database",
@@ -52,6 +62,16 @@ var (
 		Name:  "apply-commit-max-latency",
 		Usage: "Maximum time between UBT trie commits",
 		Value: 10 * time.Second,
+	}
+	pendingStatePersistIntervalFlag = &cli.DurationFlag{
+		Name:  "pending-state-persist-interval",
+		Usage: "Debounce interval for pending-seq state writes (0 = persist every transition)",
+		Value: 200 * time.Millisecond,
+	}
+	treatNoEventAsIdleFlag = &cli.BoolFlag{
+		Name:  "treat-no-event-as-idle",
+		Usage: "Treat missing next outbox event as idle (avoid exponential backoff)",
+		Value: true,
 	}
 	maxRecoverableReorgDepthFlag = &cli.Uint64Flag{
 		Name:  "max-recoverable-reorg-depth",
@@ -82,6 +102,16 @@ var (
 		Name:  "query-rpc-listen-addr",
 		Usage: "Listen address for UBT query RPC server",
 		Value: "localhost:8560",
+	}
+	pprofEnabledFlag = &cli.BoolFlag{
+		Name:  "pprof-enabled",
+		Usage: "Enable pprof HTTP server for CPU/heap profiling",
+		Value: false,
+	}
+	pprofListenAddrFlag = &cli.StringFlag{
+		Name:  "pprof-listen-addr",
+		Usage: "Listen address for pprof HTTP server",
+		Value: "127.0.0.1:6061",
 	}
 	queryRPCMaxBatchFlag = &cli.Uint64Flag{
 		Name:  "query-rpc-max-batch",
@@ -121,7 +151,7 @@ var (
 	backpressureLagThresholdFlag = &cli.Uint64Flag{
 		Name:  "backpressure-lag-threshold",
 		Usage: "Outbox seq lag that triggers faster commits (0 = disabled)",
-		Value: 1000,
+		Value: 5000,
 	}
 	outboxDiskBudgetBytesFlag = &cli.Uint64Flag{
 		Name:  "outbox-disk-budget-bytes",
@@ -143,6 +173,11 @@ var (
 		Usage: "Explicit Cancun fork block number for slot index boundary (0 = estimate from chain config timestamp)",
 		Value: 0,
 	}
+	slotIndexEnabledFlag = &cli.BoolFlag{
+		Name:  "slot-index-enabled",
+		Usage: "Enable pre-Cancun slot index tracking",
+		Value: true,
+	}
 	validationStrictFlag = &cli.BoolFlag{
 		Name:  "validation-strict",
 		Usage: "Enable strict validation of all accounts/storage in diff against MPT (plan §13: default on)",
@@ -152,6 +187,26 @@ var (
 		Name:  "validation-halt-on-mismatch",
 		Usage: "Halt daemon on strict validation mismatch",
 		Value: false,
+	}
+	validationStrictCatchupSampleRateFlag = &cli.Uint64Flag{
+		Name:  "validation-strict-catchup-sample-rate",
+		Usage: "Strict validation sampling rate while backlog is high (0 = disable strict validation during catch-up)",
+		Value: 0,
+	}
+	validationStrictAsyncFlag = &cli.BoolFlag{
+		Name:  "validation-strict-async",
+		Usage: "Run strict validation asynchronously when halt-on-mismatch is disabled",
+		Value: true,
+	}
+	validationQueueCapacityFlag = &cli.Uint64Flag{
+		Name:  "validation-queue-capacity",
+		Usage: "Async strict validation queue capacity",
+		Value: 2048,
+	}
+	blockRootIndexStrideHighLagFlag = &cli.Uint64Flag{
+		Name:  "block-root-index-stride-high-lag",
+		Usage: "Write block-root index every N blocks while lag is high (1 = disabled)",
+		Value: 16,
 	}
 	executionClassRPCEnabledFlag = &cli.BoolFlag{
 		Name:  "execution-class-rpc-enabled",
@@ -164,15 +219,21 @@ func init() {
 	app.Action = runDaemon
 	app.Flags = []cli.Flag{
 		outboxRPCEndpointFlag,
+		outboxReadBatchFlag,
+		outboxReadAheadFlag,
 		dataDirectoryFlag,
 		applyCommitIntervalFlag,
 		applyCommitMaxLatencyFlag,
+		pendingStatePersistIntervalFlag,
+		treatNoEventAsIdleFlag,
 		maxRecoverableReorgDepthFlag,
 		trieDBSchemeFlag,
 		trieDBStateHistoryFlag,
 		requireArchiveReplayFlag,
 		queryRPCEnabledFlag,
 		queryRPCListenAddrFlag,
+		pprofEnabledFlag,
+		pprofListenAddrFlag,
 		queryRPCMaxBatchFlag,
 		anchorSnapshotIntervalFlag,
 		anchorSnapshotRetentionFlag,
@@ -185,8 +246,13 @@ func init() {
 		outboxAlertThresholdPctFlag,
 		slotIndexDiskBudgetFlag,
 		cancunBlockFlag,
+		slotIndexEnabledFlag,
 		validationStrictFlag,
 		validationHaltOnMismatchFlag,
+		validationStrictCatchupSampleRateFlag,
+		validationStrictAsyncFlag,
+		validationQueueCapacityFlag,
+		blockRootIndexStrideHighLagFlag,
 		executionClassRPCEnabledFlag,
 	}
 }
@@ -235,30 +301,41 @@ func runDaemon(ctx *cli.Context) error {
 
 func buildConfigFromCLI(ctx *cli.Context) *Config {
 	return &Config{
-		OutboxRPCEndpoint:        ctx.String(outboxRPCEndpointFlag.Name),
-		DataDir:                  ctx.String(dataDirectoryFlag.Name),
-		ApplyCommitInterval:      ctx.Uint64(applyCommitIntervalFlag.Name),
-		ApplyCommitMaxLatency:    ctx.Duration(applyCommitMaxLatencyFlag.Name),
-		MaxRecoverableReorgDepth: ctx.Uint64(maxRecoverableReorgDepthFlag.Name),
-		TrieDBScheme:             ctx.String(trieDBSchemeFlag.Name),
-		TrieDBStateHistory:       ctx.Uint64(trieDBStateHistoryFlag.Name),
-		RequireArchiveReplay:     ctx.Bool(requireArchiveReplayFlag.Name),
-		QueryRPCEnabled:          ctx.Bool(queryRPCEnabledFlag.Name),
-		QueryRPCListenAddr:       ctx.String(queryRPCListenAddrFlag.Name),
-		QueryRPCMaxBatch:         ctx.Uint64(queryRPCMaxBatchFlag.Name),
-		AnchorSnapshotInterval:   ctx.Uint64(anchorSnapshotIntervalFlag.Name),
-		AnchorSnapshotRetention:  ctx.Uint64(anchorSnapshotRetentionFlag.Name),
-		ValidationEnabled:        ctx.Bool(validationEnabledFlag.Name),
-		ValidationSampleRate:     ctx.Uint64(validationSampleRateFlag.Name),
-		ChainID:                  ctx.Uint64(chainIDFlag.Name),
-		RPCGasCap:                ctx.Uint64(rpcGasCapFlag.Name),
-		BackpressureLagThreshold: ctx.Uint64(backpressureLagThresholdFlag.Name),
-		OutboxDiskBudgetBytes:    ctx.Uint64(outboxDiskBudgetBytesFlag.Name),
-		OutboxAlertThresholdPct:  ctx.Uint64(outboxAlertThresholdPctFlag.Name),
-		SlotIndexDiskBudget:      ctx.Uint64(slotIndexDiskBudgetFlag.Name),
-		CancunBlock:              ctx.Uint64(cancunBlockFlag.Name),
-		ValidationStrictMode:     ctx.Bool(validationStrictFlag.Name),
-		ValidationHaltOnMismatch: ctx.Bool(validationHaltOnMismatchFlag.Name),
-		ExecutionClassRPCEnabled: ctx.Bool(executionClassRPCEnabledFlag.Name),
+		OutboxRPCEndpoint:                 ctx.String(outboxRPCEndpointFlag.Name),
+		OutboxReadBatch:                   ctx.Uint64(outboxReadBatchFlag.Name),
+		OutboxReadAhead:                   ctx.Uint64(outboxReadAheadFlag.Name),
+		DataDir:                           ctx.String(dataDirectoryFlag.Name),
+		ApplyCommitInterval:               ctx.Uint64(applyCommitIntervalFlag.Name),
+		ApplyCommitMaxLatency:             ctx.Duration(applyCommitMaxLatencyFlag.Name),
+		PendingStatePersistInterval:       ctx.Duration(pendingStatePersistIntervalFlag.Name),
+		TreatNoEventAsIdle:                ctx.Bool(treatNoEventAsIdleFlag.Name),
+		MaxRecoverableReorgDepth:          ctx.Uint64(maxRecoverableReorgDepthFlag.Name),
+		TrieDBScheme:                      ctx.String(trieDBSchemeFlag.Name),
+		TrieDBStateHistory:                ctx.Uint64(trieDBStateHistoryFlag.Name),
+		RequireArchiveReplay:              ctx.Bool(requireArchiveReplayFlag.Name),
+		QueryRPCEnabled:                   ctx.Bool(queryRPCEnabledFlag.Name),
+		QueryRPCListenAddr:                ctx.String(queryRPCListenAddrFlag.Name),
+		PprofEnabled:                      ctx.Bool(pprofEnabledFlag.Name),
+		PprofListenAddr:                   ctx.String(pprofListenAddrFlag.Name),
+		QueryRPCMaxBatch:                  ctx.Uint64(queryRPCMaxBatchFlag.Name),
+		AnchorSnapshotInterval:            ctx.Uint64(anchorSnapshotIntervalFlag.Name),
+		AnchorSnapshotRetention:           ctx.Uint64(anchorSnapshotRetentionFlag.Name),
+		ValidationEnabled:                 ctx.Bool(validationEnabledFlag.Name),
+		ValidationSampleRate:              ctx.Uint64(validationSampleRateFlag.Name),
+		ChainID:                           ctx.Uint64(chainIDFlag.Name),
+		RPCGasCap:                         ctx.Uint64(rpcGasCapFlag.Name),
+		BackpressureLagThreshold:          ctx.Uint64(backpressureLagThresholdFlag.Name),
+		OutboxDiskBudgetBytes:             ctx.Uint64(outboxDiskBudgetBytesFlag.Name),
+		OutboxAlertThresholdPct:           ctx.Uint64(outboxAlertThresholdPctFlag.Name),
+		SlotIndexDiskBudget:               ctx.Uint64(slotIndexDiskBudgetFlag.Name),
+		CancunBlock:                       ctx.Uint64(cancunBlockFlag.Name),
+		SlotIndexEnabled:                  ctx.Bool(slotIndexEnabledFlag.Name),
+		ValidationStrictMode:              ctx.Bool(validationStrictFlag.Name),
+		ValidationHaltOnMismatch:          ctx.Bool(validationHaltOnMismatchFlag.Name),
+		ValidationStrictCatchupSampleRate: ctx.Uint64(validationStrictCatchupSampleRateFlag.Name),
+		ValidationStrictAsync:             ctx.Bool(validationStrictAsyncFlag.Name),
+		ValidationQueueCapacity:           ctx.Uint64(validationQueueCapacityFlag.Name),
+		ExecutionClassRPCEnabled:          ctx.Bool(executionClassRPCEnabledFlag.Name),
+		BlockRootIndexStrideHighLag:       ctx.Uint64(blockRootIndexStrideHighLagFlag.Name),
 	}
 }

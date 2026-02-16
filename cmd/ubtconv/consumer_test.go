@@ -23,6 +23,62 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 )
 
+func TestEffectiveBlockRootIndexStride(t *testing.T) {
+	tests := []struct {
+		name      string
+		base      uint64
+		threshold uint64
+		lag       uint64
+		want      uint64
+	}{
+		{name: "disabled by base stride", base: 1, threshold: 5000, lag: 50000, want: 1},
+		{name: "disabled by threshold", base: 64, threshold: 0, lag: 50000, want: 1},
+		{name: "below threshold", base: 64, threshold: 5000, lag: 4999, want: 1},
+		{name: "just above threshold uses base", base: 64, threshold: 5000, lag: 7000, want: 64},
+		{name: "ratio 8 bumps to 128", base: 64, threshold: 5000, lag: 40000, want: 128},
+		{name: "ratio 16 bumps to 256", base: 64, threshold: 5000, lag: 80000, want: 256},
+		{name: "ratio 32 bumps to 1024", base: 64, threshold: 5000, lag: 160000, want: 1024},
+		{name: "ratio 64 bumps to 2048", base: 64, threshold: 5000, lag: 320000, want: 2048},
+		{name: "ratio 128 bumps to 4096", base: 64, threshold: 5000, lag: 640000, want: 4096},
+		{name: "base higher than adaptive keeps base", base: 1024, threshold: 5000, lag: 160000, want: 1024},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Consumer{
+				cfg: &Config{
+					BlockRootIndexStrideHighLag: tt.base,
+					BackpressureLagThreshold:    tt.threshold,
+				},
+				outboxLag: tt.lag,
+			}
+			got := c.effectiveBlockRootIndexStride()
+			if got != tt.want {
+				t.Fatalf("effectiveBlockRootIndexStride()=%d want=%d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShouldWriteBlockRootIndex_WithAdaptiveStride(t *testing.T) {
+	c := &Consumer{
+		cfg: &Config{
+			BlockRootIndexStrideHighLag: 64,
+			BackpressureLagThreshold:    5000,
+		},
+		outboxLag:    160000, // ratio 32 => stride 1024
+		pendingBlock: 12345,
+	}
+	if c.shouldWriteBlockRootIndex(1024) != true {
+		t.Fatal("expected stride-aligned block to be written")
+	}
+	if c.shouldWriteBlockRootIndex(1025) != false {
+		t.Fatal("expected non-stride block to be skipped")
+	}
+	if c.shouldWriteBlockRootIndex(c.pendingBlock) != true {
+		t.Fatal("expected pending block to be written")
+	}
+}
+
 // TestShouldCommit_BlockThreshold verifies commit triggered by block count.
 func TestShouldCommit_BlockThreshold(t *testing.T) {
 	tests := []struct {

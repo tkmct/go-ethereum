@@ -259,7 +259,8 @@ func (m *mockOutboxAPI) Status(ctx context.Context) (map[string]any, error) {
 	defer m.mu.Unlock()
 	return map[string]any{
 		"enabled":    true,
-		"latestSeq":  m.latestSeq,
+		"latestSeq":  hexutil.Uint64(m.latestSeq),
+		"lowestSeq":  hexutil.Uint64(m.pruneBelow),
 		"pruneBelow": m.pruneBelow,
 	}, nil
 }

@@ -261,6 +261,13 @@ func (s *OutboxStore) LatestSeq() uint64 {
 	return s.latestSeqLocked()
 }
 
+// LowestSeq returns the lowest retained sequence number.
+func (s *OutboxStore) LowestSeq() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lowestSeq
+}
+
 func (s *OutboxStore) latestSeqLocked() uint64 {
 	if s.nextSeq == 0 {
 		return 0

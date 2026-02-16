@@ -81,6 +81,8 @@ Notes:
 - Script forces geth full-sync (`--syncmode full`).
 - Script waits for `Lighthouse started` in lighthouse log before continuing.
 - Lighthouse HTTP readiness can lag after process startup; script warns and continues if process is healthy.
+- Script defaults ubtconv outbox ingest to geth IPC (`${GETH_DATADIR}/geth.ipc`) for lower RPC overhead.
+  Override with `UBT_OUTBOX_RPC_ENDPOINT=http://127.0.0.1:8545` when HTTP is preferred.
 - Logs are under `${WORKDIR:-$HOME/.ubt-mainnet}/logs/`.
 
 ### Option B: Manual startup
@@ -137,7 +139,7 @@ lighthouse bn \
 
 ```bash
 build/bin/ubtconv \
-  --outbox-rpc-endpoint http://127.0.0.1:8545 \
+  --outbox-rpc-endpoint /path/to/geth-datadir/geth.ipc \
   --datadir /path/to/ubtconv-datadir \
   --query-rpc-enabled \
   --query-rpc-listen-addr 127.0.0.1:8560 \
@@ -234,6 +236,46 @@ curl -s -H 'Content-Type: application/json' \
 - `accountsTouched/storageTouched/codeTouched` can be empty depending on selected block/root.
 - For strict direct/proxy comparison, query both methods with the **same explicit block**.
 
+## Catch-up Throughput Controls
+
+When backlog is high (`outboxLag > backpressure-lag-threshold`), ubtconv now:
+
+1. Samples strict validation by `--validation-strict-catchup-sample-rate`.
+2. Uses prefetch for outbox reads via `--outbox-read-batch` (default disabled).
+3. Coalesces duplicate account/storage/code mutations per diff (last-write-wins).
+4. Applies adaptive write shedding for pending state and block-root index writes while lag is high.
+5. Avoids per-block backpressure commits (uses a bounded faster-commit policy).
+6. Skips strict block validation early when geth returns `historical state ... is not available`.
+
+Mainnet full-sync recommendation:
+- Keep `--outbox-read-batch=1` unless profiling proves improvement in your environment.
+- Keep `--validation-strict-catchup-sample-rate=1` by default.
+
+## Profiling and Bottleneck Analysis
+
+`ubtconv` now exposes per-stage metrics for catch-up analysis:
+
+- Outbox read path: event/range RPC latency and queue-hit counters.
+- Decode/apply path: diff decode, reorg decode, diff apply latency.
+- Apply internals: account/storage/code phase latency and entry counters.
+- Commit/compaction: trie commit latency, batch write latency, compaction total/RPC latency.
+
+Enable pprof when deep profiling is needed:
+
+```bash
+build/bin/ubtconv \
+  ... \
+  --pprof-enabled \
+  --pprof-listen-addr 127.0.0.1:6061
+```
+
+Then capture profiles:
+
+```bash
+go tool pprof http://127.0.0.1:6061/debug/pprof/profile?seconds=30
+go tool pprof http://127.0.0.1:6061/debug/pprof/heap
+```
+
 ## Selector and Parity Guidance
 
 Supported selectors:
@@ -317,7 +359,8 @@ Action:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--outbox-rpc-endpoint` | `http://localhost:8545` | geth RPC endpoint for outbox consumption |
+| `--outbox-rpc-endpoint` | `http://localhost:8545` | geth outbox endpoint (HTTP/WebSocket or IPC path) |
+| `--outbox-read-batch` | `1` | Number of events prefetched per outbox read (1 disables prefetch, max 1000) |
 | `--datadir` | `./ubtconv-data` | ubtconv data directory |
 | `--apply-commit-interval` | `128` | Commit every N applied blocks |
 | `--apply-commit-max-latency` | `10s` | Commit max latency |
@@ -327,11 +370,15 @@ Action:
 | `--require-archive-replay` | `true` | Require archive replay client for deep recovery |
 | `--query-rpc-enabled` | `true` | Enable ubt query RPC server |
 | `--query-rpc-listen-addr` | `localhost:8560` | Query RPC listen address |
+| `--pprof-enabled` | `false` | Enable pprof HTTP server |
+| `--pprof-listen-addr` | `127.0.0.1:6061` | pprof HTTP listen address |
 | `--query-rpc-max-batch` | `100` | Max batch size for list-style RPC |
 | `--validation-strict` | `true` | Strict validation against MPT |
 | `--validation-halt-on-mismatch` | `false` | Stop daemon on strict mismatch |
+| `--validation-strict-catchup-sample-rate` | `0` | Strict validation sampling while backlog is high (0 = disable strict validation during catch-up) |
 | `--execution-class-rpc-enabled` | `false` | Enable `ubt_callUBT` and `ubt_executionWitnessUBT` |
 | `--backpressure-lag-threshold` | `1000` | Force fast commit above lag threshold |
+| `--block-root-index-stride-high-lag` | `16` | Base stride for block-root index writes while lag is high (adaptive, `1` disables) |
 | `--outbox-disk-budget-bytes` | `0` | Outbox disk budget (0 = unlimited) |
 | `--outbox-alert-threshold-pct` | `80` | Outbox compaction alert threshold |
 | `--cancun-block` | `0` | Explicit Cancun block (`0` = estimate from chain config timestamp) |

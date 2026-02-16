@@ -18,9 +18,12 @@ package bintrie
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethdb/memorydb"
+	"github.com/ethereum/go-ethereum/triedb/database"
 )
 
 // memoryProofDb is an in-memory key-value store for proof nodes
@@ -318,4 +321,89 @@ func TestProve_ColocatedValues(t *testing.T) {
 	}
 
 	t.Logf("Colocated values proof contains %d nodes", len(proofDb1.nodes))
+}
+
+type pathAwareNodeReader struct {
+	root  common.Hash
+	nodes map[string]map[common.Hash][]byte
+}
+
+func (r *pathAwareNodeReader) Node(owner common.Hash, path []byte, hash common.Hash) ([]byte, error) {
+	if owner != (common.Hash{}) {
+		return nil, fmt.Errorf("unexpected owner %x", owner)
+	}
+	byHash, ok := r.nodes[string(path)]
+	if !ok {
+		return nil, fmt.Errorf("unexpected path %x", path)
+	}
+	blob, ok := byHash[hash]
+	if !ok {
+		return nil, fmt.Errorf("unexpected hash %x for path %x", hash, path)
+	}
+	return bytes.Clone(blob), nil
+}
+
+type pathAwareNodeDB struct {
+	reader *pathAwareNodeReader
+}
+
+func (db *pathAwareNodeDB) NodeReader(stateRoot common.Hash) (database.NodeReader, error) {
+	if stateRoot != db.reader.root {
+		return nil, fmt.Errorf("unknown root %x", stateRoot)
+	}
+	return db.reader, nil
+}
+
+func TestProve_HashedChildUsesCorrectPath(t *testing.T) {
+	key := common.HexToHash("0000000000000000000000000000000000000000000000000000000000000001")
+	val := common.HexToHash("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+	values := make([][]byte, StemNodeWidth)
+	values[key[31]] = val.Bytes()
+	stem := &StemNode{
+		Stem:   append([]byte(nil), key[:StemSize]...),
+		Values: values,
+	}
+	stemHash := stem.Hash()
+
+	rootNode := &InternalNode{
+		left:  HashedNode(stemHash),
+		right: Empty{},
+		depth: 0,
+	}
+	rootHash := rootNode.Hash()
+
+	rootBlob := SerializeNode(rootNode)
+	stemBlob := SerializeNode(stem)
+
+	db := &pathAwareNodeDB{
+		reader: &pathAwareNodeReader{
+			root: rootHash,
+			nodes: map[string]map[common.Hash][]byte{
+				string([]byte{}): {
+					rootHash: rootBlob,
+				},
+				string([]byte{0}): {
+					stemHash: stemBlob,
+				},
+			},
+		},
+	}
+
+	tr, err := NewBinaryTrie(rootHash, db)
+	if err != nil {
+		t.Fatalf("NewBinaryTrie: %v", err)
+	}
+
+	proofDb := memorydb.New()
+	if err := tr.Prove(key.Bytes(), proofDb); err != nil {
+		t.Fatalf("Prove failed: %v", err)
+	}
+	got, err := VerifyProof(rootHash, key.Bytes(), proofDb)
+	if err != nil {
+		t.Fatalf("VerifyProof failed: %v", err)
+	}
+	if !bytes.Equal(got, val.Bytes()) {
+		t.Fatalf("proof value mismatch: got %x want %x", got, val.Bytes())
+	}
 }

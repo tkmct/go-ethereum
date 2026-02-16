@@ -697,6 +697,33 @@ func TestTC_MetricsDefined(t *testing.T) {
 	if daemonRecoveryFailures == nil {
 		t.Error("daemonRecoveryFailures is nil")
 	}
+	if consumerReadEventLatency == nil {
+		t.Error("consumerReadEventLatency is nil")
+	}
+	if consumerReadRangeLatency == nil {
+		t.Error("consumerReadRangeLatency is nil")
+	}
+	if consumerDecodeDiffLatency == nil {
+		t.Error("consumerDecodeDiffLatency is nil")
+	}
+	if consumerApplyDiffLatency == nil {
+		t.Error("consumerApplyDiffLatency is nil")
+	}
+	if applierApplyAccountsLatency == nil {
+		t.Error("applierApplyAccountsLatency is nil")
+	}
+	if applierApplyStorageLatency == nil {
+		t.Error("applierApplyStorageLatency is nil")
+	}
+	if applierApplyCodeLatency == nil {
+		t.Error("applierApplyCodeLatency is nil")
+	}
+	if compactionLatency == nil {
+		t.Error("compactionLatency is nil")
+	}
+	if compactionRPCLatency == nil {
+		t.Error("compactionRPCLatency is nil")
+	}
 }
 
 // ===== Existing test delegation (TC-* naming for CI) =====

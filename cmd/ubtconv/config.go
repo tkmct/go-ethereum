@@ -26,10 +26,17 @@ import (
 
 // Config holds the ubtconv daemon configuration.
 type Config struct {
-	OutboxRPCEndpoint        string
-	DataDir                  string
-	ApplyCommitInterval      uint64
-	ApplyCommitMaxLatency    time.Duration
+	OutboxRPCEndpoint     string
+	OutboxReadBatch       uint64 // Number of events to prefetch per outbox read (1 = disabled)
+	OutboxReadAhead       uint64 // Consumer-side read-ahead window size (1 = disabled)
+	DataDir               string
+	ApplyCommitInterval   uint64
+	ApplyCommitMaxLatency time.Duration
+	// PendingStatePersistInterval debounces pending-seq durability writes in hot path.
+	// 0 disables debounce (persist every transition).
+	PendingStatePersistInterval time.Duration
+	// TreatNoEventAsIdle avoids backoff escalation when the next sequence is not yet emitted.
+	TreatNoEventAsIdle       bool
 	MaxRecoverableReorgDepth uint64
 	TrieDBScheme             string // "path"
 	TrieDBStateHistory       uint64
@@ -44,6 +51,8 @@ type Config struct {
 	ValidationSampleRate     uint64
 	QueryRPCEnabled          bool   // Enable query RPC server
 	QueryRPCListenAddr       string // Listen address for query RPC (default: "localhost:8560")
+	PprofEnabled             bool   // Enable pprof HTTP server for profiling
+	PprofListenAddr          string // Listen address for pprof HTTP server
 	ChainID                  uint64 // Chain ID for EVM execution (default: 1 = mainnet)
 	RPCGasCap                uint64 // Gas cap for CallUBT RPC (default: 50_000_000, same as geth)
 	BackpressureLagThreshold uint64 // If outboxLag > threshold, commit is forced each loop (0 = disabled)
@@ -55,6 +64,7 @@ type Config struct {
 	// Slot index (Chunk 4)
 	SlotIndexDiskBudget uint64 // 0 = unlimited
 	CancunBlock         uint64 // Explicit Cancun fork block number (0 = auto-detect from chain config)
+	SlotIndexEnabled    bool   // Enable pre-Cancun slot-index tracking
 
 	// Query RPC limits
 	QueryRPCMaxBatch uint64 // Max batch size for list-style RPC methods (default: 100)
@@ -62,10 +72,21 @@ type Config struct {
 	// Strict validation (Chunk 5)
 	ValidationStrictMode     bool // Validate ALL accounts/storage in diff against MPT
 	ValidationHaltOnMismatch bool // Halt daemon on strict validation mismatch
+	// ValidationStrictCatchupSampleRate controls strict validation sampling while
+	// backlog is high (outboxLag > BackpressureLagThreshold). 1 means validate every block.
+	ValidationStrictCatchupSampleRate uint64
+	// ValidationStrictAsync runs strict validation off the apply hot path when halt-on-mismatch is disabled.
+	ValidationStrictAsync bool
+	// ValidationQueueCapacity bounds async strict validation queue.
+	ValidationQueueCapacity uint64
 
 	// Execution-class RPC gate.
 	// Default false; must be explicitly enabled by operator.
 	ExecutionClassRPCEnabled bool
+
+	// BlockRootIndexStrideHighLag reduces per-block root index writes while lag is high.
+	// 1 means write every block (disabled).
+	BlockRootIndexStrideHighLag uint64
 }
 
 // Validate checks if the configuration is valid.
@@ -78,6 +99,9 @@ func (c *Config) Validate() error {
 	}
 	if c.TrieDBScheme != "path" {
 		return fmt.Errorf("triedb-scheme must be 'path', got %q", c.TrieDBScheme)
+	}
+	if c.PprofEnabled && c.PprofListenAddr == "" {
+		return fmt.Errorf("pprof-listen-addr is required when pprof is enabled")
 	}
 	if c.ApplyCommitInterval == 0 {
 		return fmt.Errorf("apply-commit-interval must be > 0")

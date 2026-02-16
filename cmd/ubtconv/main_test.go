@@ -51,3 +51,48 @@ func TestBuildConfigFromCLI_ExecutionClassRPCEnabled_True(t *testing.T) {
 		t.Fatalf("expected ExecutionClassRPCEnabled=true when flag is set")
 	}
 }
+
+func TestBuildConfigFromCLI_Pprof_DefaultDisabled(t *testing.T) {
+	set := flag.NewFlagSet("ubtconv-test", flag.ContinueOnError)
+	if err := pprofEnabledFlag.Apply(set); err != nil {
+		t.Fatalf("apply pprof-enabled flag: %v", err)
+	}
+	if err := pprofListenAddrFlag.Apply(set); err != nil {
+		t.Fatalf("apply pprof-listen-addr flag: %v", err)
+	}
+
+	ctx := cli.NewContext(app, set, nil)
+	cfg := buildConfigFromCLI(ctx)
+	if cfg.PprofEnabled {
+		t.Fatalf("expected PprofEnabled=false by default")
+	}
+	if cfg.PprofListenAddr == "" {
+		t.Fatalf("expected default pprof listen addr to be set")
+	}
+}
+
+func TestBuildConfigFromCLI_Pprof_Enabled(t *testing.T) {
+	set := flag.NewFlagSet("ubtconv-test", flag.ContinueOnError)
+	if err := pprofEnabledFlag.Apply(set); err != nil {
+		t.Fatalf("apply pprof-enabled flag: %v", err)
+	}
+	if err := pprofListenAddrFlag.Apply(set); err != nil {
+		t.Fatalf("apply pprof-listen-addr flag: %v", err)
+	}
+	if err := set.Set(pprofEnabledFlag.Name, "true"); err != nil {
+		t.Fatalf("set pprof-enabled=true: %v", err)
+	}
+	wantAddr := "127.0.0.1:7061"
+	if err := set.Set(pprofListenAddrFlag.Name, wantAddr); err != nil {
+		t.Fatalf("set pprof-listen-addr: %v", err)
+	}
+
+	ctx := cli.NewContext(app, set, nil)
+	cfg := buildConfigFromCLI(ctx)
+	if !cfg.PprofEnabled {
+		t.Fatalf("expected PprofEnabled=true when flag is set")
+	}
+	if cfg.PprofListenAddr != wantAddr {
+		t.Fatalf("unexpected pprof listen addr: got %s want %s", cfg.PprofListenAddr, wantAddr)
+	}
+}

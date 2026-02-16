@@ -17,8 +17,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,6 +70,22 @@ func (e *errReorgReplayRequired) Error() string {
 }
 func (e *errReorgReplayRequired) Unwrap() error { return e.err }
 
+// errOutboxGap indicates the consumer fell behind retained outbox range.
+type errOutboxGap struct {
+	targetSeq uint64
+	lowestSeq uint64
+	latestSeq uint64
+}
+
+func (e *errOutboxGap) Error() string {
+	if e.latestSeq > 0 {
+		return fmt.Sprintf("outbox gap detected: required seq %d is below retained lowest seq %d (latest=%d)", e.targetSeq, e.lowestSeq, e.latestSeq)
+	}
+	return fmt.Sprintf("outbox gap detected: required seq %d is below retained lowest seq %d", e.targetSeq, e.lowestSeq)
+}
+
+var errNoEventAvailable = errors.New("no outbox event available")
+
 // ConsumerState tracks the consumer's durable checkpoint.
 type ConsumerState struct {
 	PendingSeq       uint64
@@ -90,6 +108,12 @@ type pendingBlockRoot struct {
 type consumeDecision struct {
 	targetSeq uint64
 	env       *ubtemit.OutboxEnvelope
+}
+
+type strictValidationTask struct {
+	block uint64
+	root  common.Hash
+	diff  *ubtemit.QueuedDiffV1
 }
 
 // Consumer reads outbox events and applies them to the UBT.
@@ -126,8 +150,22 @@ type Consumer struct {
 	// Backpressure: latest known outbox seq for lag computation
 	outboxLag uint64
 
+	// Consumer-side read-ahead queue for sequential consumption.
+	readAheadQueue   []*ubtemit.OutboxEnvelope
+	readAheadNextSeq uint64
+
 	// Last diff for strict validation (retained between ConsumeNext and commit)
 	lastDiff *ubtemit.QueuedDiffV1
+
+	// Debounced durability for pending state.
+	stateDirty         bool
+	lastStatePersistAt time.Time
+
+	// Async strict validation (only used when halt-on-mismatch is disabled).
+	pendingStrictValidations map[uint64]*ubtemit.QueuedDiffV1
+	validationQueue          chan strictValidationTask
+	validationStop           chan struct{}
+	validationWG             sync.WaitGroup
 }
 
 // NewConsumer creates a new outbox consumer.
@@ -142,6 +180,9 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 
 	// Create outbox reader (RPC client)
 	reader := NewOutboxReader(cfg.OutboxRPCEndpoint)
+	if cfg.OutboxReadBatch > 0 {
+		reader.SetPrefetchBatch(cfg.OutboxReadBatch)
+	}
 
 	var validator *Validator
 	if (cfg.ValidationEnabled && cfg.ValidationSampleRate > 0) || cfg.ValidationStrictMode {
@@ -154,12 +195,15 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 	}
 
 	c := &Consumer{
-		cfg:            cfg,
-		db:             db,
-		reader:         reader,
-		validator:      validator,
-		replayClient:   replayClient,
-		lastCommitTime: time.Now(),
+		cfg:                      cfg,
+		db:                       db,
+		reader:                   reader,
+		validator:                validator,
+		replayClient:             replayClient,
+		lastCommitTime:           time.Now(),
+		lastStatePersistAt:       time.Now(),
+		readAheadQueue:           make([]*ubtemit.OutboxEnvelope, 0),
+		pendingStrictValidations: make(map[uint64]*ubtemit.QueuedDiffV1),
 	}
 
 	// Load consumer state from DB first
@@ -177,8 +221,11 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 		c.processedSeq = ^uint64(0) // sentinel: +1 overflows to 0
 	}
 
-	// Create applier with the expected root from loaded state
-	applier, err := NewApplier(cfg, c.state.AppliedRoot)
+	// Create applier with the expected root from loaded state.
+	// On some platforms/filesystems, reopening LevelDB right after a failed open
+	// can transiently return "resource temporarily unavailable" (LOCK not yet released).
+	// Retry a few times to make restarts stable.
+	applier, err := newApplierWithRetry(cfg, c.state.AppliedRoot, 8, 300*time.Millisecond)
 	if err != nil && c.hasState {
 		// Startup recovery: trie is corrupted but we have persisted state.
 		// Try opening with empty root and restoring from anchor.
@@ -187,7 +234,7 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 			"expectedRoot", c.state.AppliedRoot, "err", originalErr)
 		daemonRecoveryAttempts.Inc(1)
 
-		applier, err = NewApplier(cfg, common.Hash{})
+		applier, err = newApplierWithRetry(cfg, common.Hash{}, 30, 500*time.Millisecond)
 		if err != nil {
 			db.Close()
 			daemonRecoveryFailures.Inc(1)
@@ -223,10 +270,50 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 				"estimated", cancunBlock, "cancunTime", *chainCfg.CancunTime)
 		}
 	}
-	si := NewSlotIndex(c.db, cancunBlock, cfg.SlotIndexDiskBudget, 80)
-	applier.SetSlotIndex(si)
+	if cfg.SlotIndexEnabled {
+		si := NewSlotIndex(c.db, cancunBlock, cfg.SlotIndexDiskBudget, 80)
+		applier.SetSlotIndex(si)
+	}
+
+	// Start async strict validation worker when enabled and halt-on-mismatch is off.
+	if c.validator != nil && c.cfg.ValidationStrictMode && c.cfg.ValidationStrictAsync && !c.cfg.ValidationHaltOnMismatch {
+		capacity := c.cfg.ValidationQueueCapacity
+		if capacity == 0 {
+			capacity = 1024
+		}
+		c.validationQueue = make(chan strictValidationTask, capacity)
+		c.validationStop = make(chan struct{})
+		c.validationWG.Add(1)
+		go c.validationLoop()
+	}
 
 	return c, nil
+}
+
+func newApplierWithRetry(cfg *Config, expectedRoot common.Hash, attempts int, delay time.Duration) (*Applier, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		applier, err := NewApplier(cfg, expectedRoot)
+		if err == nil {
+			return applier, nil
+		}
+		lastErr = err
+		if !isRetryableApplierOpenError(err) || i == attempts-1 {
+			break
+		}
+		time.Sleep(delay)
+	}
+	return nil, lastErr
+}
+
+func isRetryableApplierOpenError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "resource temporarily unavailable") ||
+		strings.Contains(msg, "lock") ||
+		strings.Contains(msg, "temporarily unavailable")
 }
 
 // loadState reads the persisted consumer checkpoint.
@@ -279,13 +366,37 @@ func (c *Consumer) loadState() error {
 // ConsumeNext reads and processes the next outbox event.
 func (c *Consumer) ConsumeNext() error {
 	start := time.Now()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	decision, err := c.decideNextAction()
+	targetSeq := c.nextTargetSeq()
+	env, err := c.readNextEnvelope(targetSeq)
 	if err != nil {
 		return err
 	}
+	if env == nil {
+		if c.maybeBootstrapFromOutboxFloor(targetSeq) {
+			return nil
+		}
+		if c.cfg.TreatNoEventAsIdle {
+			c.mu.Lock()
+			lag := c.outboxLag
+			c.mu.Unlock()
+			if lag > 0 {
+				if err := c.checkOutboxGap(targetSeq); err != nil {
+					return err
+				}
+			}
+			return errNoEventAvailable
+		}
+		if err := c.checkOutboxGap(targetSeq); err != nil {
+			return err
+		}
+		consumerErrorsTotal.Inc(1)
+		return fmt.Errorf("no event at seq %d", targetSeq)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	decision := &consumeDecision{targetSeq: targetSeq, env: env}
 	handled, err := c.executeTransition(decision, start)
 	if err != nil {
 		return err
@@ -309,19 +420,165 @@ func (c *Consumer) ConsumeNext() error {
 	return nil
 }
 
-func (c *Consumer) decideNextAction() (*consumeDecision, error) {
+// maybeBootstrapFromOutboxFloor advances fresh-start processedSeq to the
+// outbox floor when historical events were compacted.
+func (c *Consumer) maybeBootstrapFromOutboxFloor(targetSeq uint64) bool {
+	c.mu.Lock()
+	freshStart := !c.hasState && c.processedSeq == ^uint64(0) && targetSeq == 0
+	c.mu.Unlock()
+	if !freshStart {
+		return false
+	}
+
+	lowestSeq, err := c.reader.LowestSeq()
+	if err != nil || lowestSeq == 0 {
+		return false
+	}
+	latestSeq, err := c.reader.LatestSeq()
+	if err != nil || latestSeq < lowestSeq {
+		return false
+	}
+
+	c.mu.Lock()
+	// Re-check freshness in case state advanced while probing RPC.
+	if !c.hasState && c.processedSeq == ^uint64(0) {
+		c.processedSeq = lowestSeq - 1
+		c.mu.Unlock()
+		log.Warn("UBT consumer bootstrapped to compacted outbox floor",
+			"lowestSeq", lowestSeq, "latestSeq", latestSeq, "nextTarget", lowestSeq)
+		return true
+	}
+	c.mu.Unlock()
+	return false
+}
+
+func (c *Consumer) checkOutboxGap(targetSeq uint64) error {
+	lowestSeq, err := c.reader.LowestSeq()
+	if err != nil || lowestSeq == 0 {
+		return nil
+	}
+	if targetSeq >= lowestSeq {
+		return nil
+	}
+	latestSeq, err := c.reader.LatestSeq()
+	if err != nil {
+		latestSeq = 0
+	}
+	return &errOutboxGap{
+		targetSeq: targetSeq,
+		lowestSeq: lowestSeq,
+		latestSeq: latestSeq,
+	}
+}
+
+func (c *Consumer) nextTargetSeq() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	// Use processedSeq (in-memory) to determine next target, NOT AppliedSeq (durable).
-	targetSeq := c.processedSeq + 1
-	env, err := c.reader.ReadEvent(targetSeq)
+	return c.processedSeq + 1
+}
+
+func (c *Consumer) readNextEnvelope(targetSeq uint64) (*ubtemit.OutboxEnvelope, error) {
+	c.mu.Lock()
+	if len(c.readAheadQueue) > 0 {
+		// Queue is sequence-ordered; drop it if it doesn't match next target.
+		if c.readAheadNextSeq == targetSeq && c.readAheadQueue[0] != nil && c.readAheadQueue[0].Seq == targetSeq {
+			env := c.readAheadQueue[0]
+			c.readAheadQueue[0] = nil
+			c.readAheadQueue = c.readAheadQueue[1:]
+			c.readAheadNextSeq++
+			if len(c.readAheadQueue) == 0 {
+				c.readAheadNextSeq = 0
+			}
+			c.mu.Unlock()
+			consumerReadQueueHitTotal.Inc(1)
+			return env, nil
+		}
+		c.readAheadQueue = c.readAheadQueue[:0]
+		c.readAheadNextSeq = 0
+	}
+	lag := c.outboxLag
+	c.mu.Unlock()
+
+	window := c.readAheadWindow(lag)
+	if window <= 1 {
+		readStart := time.Now()
+		env, err := c.reader.ReadEvent(targetSeq)
+		consumerReadEventLatency.UpdateSince(readStart)
+		consumerReadRPCEventTotal.Inc(1)
+		if err != nil {
+			consumerErrorsTotal.Inc(1)
+			return nil, fmt.Errorf("read event %d: %w", targetSeq, err)
+		}
+		return env, nil
+	}
+
+	toSeq := targetSeq + window - 1
+	if toSeq < targetSeq {
+		toSeq = ^uint64(0)
+	}
+	readStart := time.Now()
+	envs, err := c.reader.ReadRange(targetSeq, toSeq)
+	consumerReadRangeLatency.UpdateSince(readStart)
+	consumerReadRPCRangeTotal.Inc(1)
 	if err != nil {
 		consumerErrorsTotal.Inc(1)
-		return nil, fmt.Errorf("read event %d: %w", targetSeq, err)
+		return nil, fmt.Errorf("read events [%d,%d]: %w", targetSeq, toSeq, err)
 	}
-	if env == nil {
-		consumerErrorsTotal.Inc(1)
-		return nil, fmt.Errorf("no event at seq %d", targetSeq)
+	if len(envs) == 0 {
+		return nil, nil
 	}
-	return &consumeDecision{targetSeq: targetSeq, env: env}, nil
+	if envs[0].Seq != targetSeq {
+		return nil, nil
+	}
+	if len(envs) == 1 {
+		return envs[0], nil
+	}
+
+	c.mu.Lock()
+	c.readAheadQueue = c.readAheadQueue[:0]
+	c.readAheadQueue = append(c.readAheadQueue, envs[1:]...)
+	c.readAheadNextSeq = targetSeq + 1
+	if c.readAheadNextSeq == 0 { // overflow guard
+		c.readAheadQueue = c.readAheadQueue[:0]
+	}
+	c.mu.Unlock()
+	return envs[0], nil
+}
+
+func (c *Consumer) readAheadWindow(lag uint64) uint64 {
+	base := c.cfg.OutboxReadAhead
+	if base == 0 {
+		base = 1
+	}
+	// Adaptive window sizing based on lag keeps small windows near head
+	// and expands during catch-up, while avoiding over-prefetch spikes.
+	if lag > 100000 {
+		if base < 1024 {
+			return 1024
+		}
+	}
+	if lag > 30000 {
+		if base < 512 {
+			return 512
+		}
+	}
+	if lag > 8000 {
+		if base < 256 {
+			return 256
+		}
+	}
+	if lag > 2000 {
+		if base < 128 {
+			return 128
+		}
+	}
+	if lag > 500 {
+		if base < 64 {
+			return 64
+		}
+	}
+	return base
 }
 
 func (c *Consumer) executeTransition(decision *consumeDecision, start time.Time) (bool, error) {
@@ -367,40 +624,71 @@ func (c *Consumer) handleImplicitReorg(decision *consumeDecision) (bool, error) 
 }
 
 func (c *Consumer) executeDiffTransition(decision *consumeDecision, start time.Time) error {
+	decodeStart := time.Now()
 	diff, err := ubtemit.DecodeDiff(decision.env.Payload)
+	consumerDecodeDiffLatency.UpdateSince(decodeStart)
 	if err != nil {
 		consumerErrorsTotal.Inc(1)
 		return fmt.Errorf("decode diff at seq %d: %w", decision.targetSeq, err)
 	}
 	// Crash-consistency: persist pendingSeq AFTER decode validation but BEFORE apply (plan §12).
 	c.markPendingSeq(decision.targetSeq)
-	root, err := c.applier.ApplyDiff(diff, decision.env.BlockNumber)
+	shouldValidateStrict, strictAsync := c.strictValidationPolicy(decision)
+	needIntermediateRoot := c.shouldWriteBlockRootIndex(decision.env.BlockNumber) || (strictAsync && shouldValidateStrict)
+	applyStart := time.Now()
+	var root common.Hash
+	if needIntermediateRoot {
+		root, err = c.applier.ApplyDiff(diff, decision.env.BlockNumber)
+		consumerRootHashComputeTotal.Inc(1)
+	} else {
+		err = c.applier.ApplyDiffFast(diff, decision.env.BlockNumber)
+		consumerRootHashSkipTotal.Inc(1)
+	}
+	consumerApplyDiffLatency.UpdateSince(applyStart)
 	if err != nil {
 		consumerErrorsTotal.Inc(1)
 		return fmt.Errorf("apply diff at seq %d: %w", decision.targetSeq, err)
 	}
-	// Collect addresses for validation sampling.
-	for _, acct := range diff.Accounts {
-		c.recentAddresses = append(c.recentAddresses, acct.Address)
+	// Collect addresses only when sampled validation is enabled.
+	if c.validator != nil && c.cfg.ValidationSampleRate > 0 {
+		for _, acct := range diff.Accounts {
+			c.recentAddresses = append(c.recentAddresses, acct.Address)
+		}
 	}
 	// Track in-memory state (NOT persisted until commit).
-	c.pendingRoot = root
 	c.pendingBlock = decision.env.BlockNumber
 	c.pendingBlockHash = decision.env.BlockHash
 	c.pendingParentHash = decision.env.ParentHash
 	c.lastDiff = diff
-	c.pendingBlockRoots = append(c.pendingBlockRoots, pendingBlockRoot{
-		block:      decision.env.BlockNumber,
-		root:       root,
-		blockHash:  decision.env.BlockHash,
-		parentHash: decision.env.ParentHash,
-	})
+	if needIntermediateRoot {
+		c.pendingRoot = root
+		c.pendingBlockRoots = append(c.pendingBlockRoots, pendingBlockRoot{
+			block:      decision.env.BlockNumber,
+			root:       root,
+			blockHash:  decision.env.BlockHash,
+			parentHash: decision.env.ParentHash,
+		})
+	}
 	consumerAppliedTotal.Inc(1)
 	consumerAppliedLatency.UpdateSince(start)
 
 	// Strict validation: cross-check ALL accounts/storage in diff against MPT.
+	// During heavy catch-up, apply sampling to reduce RPC amplification.
 	if c.cfg.ValidationStrictMode && c.validator != nil {
+		if !shouldValidateStrict {
+			return nil
+		}
+		if strictAsync {
+			if needIntermediateRoot {
+				c.pendingStrictValidations[decision.env.BlockNumber] = diff
+			}
+			return nil
+		}
 		if err := c.validator.ValidateStrict(c.applier.Trie(), decision.env.BlockNumber, diff); err != nil {
+			if errors.Is(err, errHistoricalStateUnavailable) {
+				log.Debug("Strict validation skipped: historical state unavailable", "block", decision.env.BlockNumber)
+				return nil
+			}
 			if c.cfg.ValidationHaltOnMismatch {
 				return &errValidationHalt{err: err}
 			}
@@ -410,8 +698,27 @@ func (c *Consumer) executeDiffTransition(decision *consumeDecision, start time.T
 	return nil
 }
 
+func (c *Consumer) strictValidationPolicy(decision *consumeDecision) (shouldValidate bool, strictAsync bool) {
+	if !c.cfg.ValidationStrictMode || c.validator == nil {
+		return false, false
+	}
+	shouldValidate = true
+	if c.cfg.BackpressureLagThreshold > 0 && c.outboxLag > c.cfg.BackpressureLagThreshold {
+		sampleRate := c.cfg.ValidationStrictCatchupSampleRate
+		if sampleRate == 0 {
+			shouldValidate = false
+		} else {
+			shouldValidate = decision.env.BlockNumber%sampleRate == 0
+		}
+	}
+	strictAsync = c.cfg.ValidationStrictAsync && !c.cfg.ValidationHaltOnMismatch
+	return shouldValidate, strictAsync
+}
+
 func (c *Consumer) executeReorgTransition(decision *consumeDecision) error {
+	decodeStart := time.Now()
 	marker, err := ubtemit.DecodeReorgMarker(decision.env.Payload)
+	consumerDecodeReorgLatency.UpdateSince(decodeStart)
 	if err != nil {
 		consumerErrorsTotal.Inc(1)
 		return fmt.Errorf("decode reorg marker at seq %d: %w", decision.targetSeq, err)
@@ -432,14 +739,35 @@ func (c *Consumer) executeReorgTransition(decision *consumeDecision) error {
 
 // shouldCommit checks if the commit policy dictates a commit.
 func (c *Consumer) shouldCommit() bool {
+	// Backpressure mode: favor throughput over freshness while lag is high by
+	// committing less frequently and in larger batches.
+	if c.cfg.BackpressureLagThreshold > 0 && c.outboxLag > c.cfg.BackpressureLagThreshold {
+		commitInterval := c.cfg.ApplyCommitInterval * 8
+		if commitInterval < 1024 {
+			commitInterval = 1024
+		}
+		if commitInterval > 8192 {
+			commitInterval = 8192
+		}
+		if c.uncommittedBlocks >= commitInterval {
+			return true
+		}
+		maxLatency := c.cfg.ApplyCommitMaxLatency * 6
+		if maxLatency < 60*time.Second {
+			maxLatency = 60 * time.Second
+		}
+		if maxLatency > 3*time.Minute {
+			maxLatency = 3 * time.Minute
+		}
+		if time.Since(c.lastCommitTime) >= maxLatency {
+			return true
+		}
+		return false
+	}
 	if c.uncommittedBlocks >= c.cfg.ApplyCommitInterval {
 		return true
 	}
 	if time.Since(c.lastCommitTime) >= c.cfg.ApplyCommitMaxLatency {
-		return true
-	}
-	// Backpressure: if outboxLag > threshold, commit more aggressively (every block).
-	if c.cfg.BackpressureLagThreshold > 0 && c.outboxLag > c.cfg.BackpressureLagThreshold {
 		return true
 	}
 	return false
@@ -448,27 +776,69 @@ func (c *Consumer) shouldCommit() bool {
 // commit commits the current UBT state to disk.
 func (c *Consumer) commit() error {
 	start := time.Now()
+	trieCommitStart := time.Now()
 	if err := c.applier.CommitAt(c.pendingBlock); err != nil {
 		return err
 	}
+	consumerCommitTrieLatency.UpdateSince(trieCommitStart)
+	committedRoot := c.applier.Root()
+	if c.pendingRoot != (common.Hash{}) && committedRoot != c.pendingRoot {
+		log.Warn("Committed root differs from pending root; using committed root",
+			"pendingRoot", c.pendingRoot, "committedRoot", committedRoot, "block", c.pendingBlock)
+	}
+	c.pendingRoot = committedRoot
 
 	// NOW update durable state - only after successful trie commit
 	c.state.AppliedSeq = c.processedSeq
-	c.state.AppliedRoot = c.pendingRoot
+	c.state.AppliedRoot = committedRoot
 	c.state.AppliedBlock = c.pendingBlock
 	c.clearPendingMetadata()
-	c.persistState()
+
+	// Batch state + root index writes to reduce write amplification.
+	batch := c.db.NewBatch()
+	rawdb.WriteUBTConsumerState(batch, c.consumerStateSnapshot())
+
+	wroteFinalRoot := false
+	for _, pbr := range c.pendingBlockRoots {
+		if !c.shouldWriteBlockRootIndex(pbr.block) {
+			continue
+		}
+		rawdb.WriteUBTBlockRoot(batch, pbr.block, pbr.root)
+		rawdb.WriteUBTCanonicalBlock(batch, pbr.block, pbr.blockHash, pbr.parentHash)
+		if pbr.block == c.state.AppliedBlock {
+			wroteFinalRoot = pbr.root == c.state.AppliedRoot
+		}
+	}
+	// Always write final committed block root/index.
+	if !wroteFinalRoot {
+		rawdb.WriteUBTBlockRoot(batch, c.state.AppliedBlock, c.state.AppliedRoot)
+		rawdb.WriteUBTCanonicalBlock(batch, c.state.AppliedBlock, c.pendingBlockHash, c.pendingParentHash)
+	}
+	batchWriteStart := time.Now()
+	if err := batch.Write(); err != nil {
+		return fmt.Errorf("commit batch write: %w", err)
+	}
+	consumerCommitBatchWriteLatency.UpdateSince(batchWriteStart)
+	c.stateDirty = false
+	c.lastStatePersistAt = time.Now()
 	c.hasState = true
 
-	// Write per-block root index for ALL blocks in this commit batch (§14 R19)
-	for _, pbr := range c.pendingBlockRoots {
-		rawdb.WriteUBTBlockRoot(c.db, pbr.block, pbr.root)
-		rawdb.WriteUBTCanonicalBlock(c.db, pbr.block, pbr.blockHash, pbr.parentHash)
+	// Dispatch any queued strict validation tasks for committed block roots.
+	if c.validator != nil && c.cfg.ValidationStrictMode && c.cfg.ValidationStrictAsync && !c.cfg.ValidationHaltOnMismatch {
+		for _, pbr := range c.pendingBlockRoots {
+			diff := c.pendingStrictValidations[pbr.block]
+			if diff == nil {
+				continue
+			}
+			c.enqueueStrictValidation(strictValidationTask{
+				block: pbr.block,
+				root:  pbr.root,
+				diff:  diff,
+			})
+			delete(c.pendingStrictValidations, pbr.block)
+		}
 	}
 	c.pendingBlockRoots = c.pendingBlockRoots[:0]
-	// Always write the final committed block root
-	rawdb.WriteUBTBlockRoot(c.db, c.state.AppliedBlock, c.state.AppliedRoot)
-	rawdb.WriteUBTCanonicalBlock(c.db, c.state.AppliedBlock, c.pendingBlockHash, c.pendingParentHash)
 
 	c.uncommittedBlocks = 0
 	c.lastCommitTime = time.Now()
@@ -492,6 +862,88 @@ func (c *Consumer) commit() error {
 		c.createAnchorSnapshot()
 	}
 	return nil
+}
+
+func (c *Consumer) consumerStateSnapshot() *rawdb.UBTConsumerState {
+	return &rawdb.UBTConsumerState{
+		PendingSeq:       c.state.PendingSeq,
+		PendingSeqActive: c.state.PendingSeqActive,
+		PendingStatus:    c.state.PendingStatus,
+		PendingUpdatedAt: c.state.PendingUpdatedAt,
+		AppliedSeq:       c.state.AppliedSeq,
+		AppliedRoot:      c.state.AppliedRoot,
+		AppliedBlock:     c.state.AppliedBlock,
+	}
+}
+
+func (c *Consumer) shouldWriteBlockRootIndex(block uint64) bool {
+	stride := c.effectiveBlockRootIndexStride()
+	if stride <= 1 {
+		return true
+	}
+	return block%stride == 0 || block == c.pendingBlock
+}
+
+func (c *Consumer) effectiveBlockRootIndexStride() uint64 {
+	baseStride := c.cfg.BlockRootIndexStrideHighLag
+	if baseStride <= 1 {
+		return 1
+	}
+	threshold := c.cfg.BackpressureLagThreshold
+	if threshold == 0 || c.outboxLag <= threshold {
+		return 1
+	}
+	stride := baseStride
+	ratio := c.outboxLag / threshold
+	switch {
+	case ratio >= 128 && stride < 4096:
+		stride = 4096
+	case ratio >= 64 && stride < 2048:
+		stride = 2048
+	case ratio >= 32 && stride < 1024:
+		stride = 1024
+	case ratio >= 16 && stride < 256:
+		stride = 256
+	case ratio >= 8 && stride < 128:
+		stride = 128
+	case ratio >= 4 && stride < 64:
+		stride = 64
+	}
+	return stride
+}
+
+func (c *Consumer) enqueueStrictValidation(task strictValidationTask) {
+	if c.validationQueue == nil {
+		return
+	}
+	select {
+	case c.validationQueue <- task:
+	default:
+		log.Warn("Strict validation queue full, dropping task", "block", task.block)
+	}
+}
+
+func (c *Consumer) validationLoop() {
+	defer c.validationWG.Done()
+	for {
+		select {
+		case <-c.validationStop:
+			return
+		case task := <-c.validationQueue:
+			tr, err := c.applier.TrieAt(task.root)
+			if err != nil {
+				log.Warn("Strict validation skipped: failed to open trie at root", "block", task.block, "root", task.root, "err", err)
+				continue
+			}
+			if err := c.validator.ValidateStrict(tr, task.block, task.diff); err != nil {
+				if errors.Is(err, errHistoricalStateUnavailable) {
+					log.Debug("Strict validation skipped: historical state unavailable", "block", task.block)
+					continue
+				}
+				log.Error("Strict validation mismatch (async)", "block", task.block, "err", err)
+			}
+		}
+	}
 }
 
 // createAnchorSnapshot creates a new anchor snapshot at the current state.
@@ -553,6 +1005,10 @@ func (c *Consumer) handleReorg(marker *ubtemit.ReorgMarkerV1) error {
 	log.Warn("UBT reorg detected",
 		"from", marker.FromBlockNumber, "to", marker.ToBlockNumber,
 		"ancestor", marker.CommonAncestorNumber, "depth", depth)
+	// Pending strict validation tasks for reverted blocks are no longer relevant.
+	if len(c.pendingStrictValidations) > 0 {
+		c.pendingStrictValidations = make(map[uint64]*ubtemit.QueuedDiffV1)
+	}
 
 	// Look up the UBT root at the common ancestor block
 	ancestorRoot := rawdb.ReadUBTBlockRoot(c.db, ancestorBlock)
@@ -721,15 +1177,46 @@ func (c *Consumer) restoreFromAnchor(targetBlock uint64) error {
 
 // persistState writes the consumer state to the database.
 func (c *Consumer) persistState() {
-	rawdb.WriteUBTConsumerState(c.db, &rawdb.UBTConsumerState{
-		PendingSeq:       c.state.PendingSeq,
-		PendingSeqActive: c.state.PendingSeqActive,
-		PendingStatus:    c.state.PendingStatus,
-		PendingUpdatedAt: c.state.PendingUpdatedAt,
-		AppliedSeq:       c.state.AppliedSeq,
-		AppliedRoot:      c.state.AppliedRoot,
-		AppliedBlock:     c.state.AppliedBlock,
-	})
+	rawdb.WriteUBTConsumerState(c.db, c.consumerStateSnapshot())
+	c.stateDirty = false
+	c.lastStatePersistAt = time.Now()
+}
+
+func (c *Consumer) persistStateMaybe(force bool) {
+	if force {
+		c.persistState()
+		return
+	}
+	if c.cfg == nil {
+		c.persistState()
+		return
+	}
+	interval := c.cfg.PendingStatePersistInterval
+	if c.cfg.BackpressureLagThreshold > 0 && c.outboxLag > c.cfg.BackpressureLagThreshold {
+		ratio := c.outboxLag / c.cfg.BackpressureLagThreshold
+		scale := time.Duration(10)
+		if ratio >= 20 {
+			scale = 25
+		} else if ratio >= 10 {
+			scale = 20
+		}
+		interval *= scale
+		if interval < 2*time.Second {
+			interval = 2 * time.Second
+		}
+		if interval > 20*time.Second {
+			interval = 20 * time.Second
+		}
+	}
+	if interval <= 0 {
+		c.persistState()
+		return
+	}
+	if time.Since(c.lastStatePersistAt) >= interval {
+		c.persistState()
+		return
+	}
+	c.stateDirty = true
 }
 
 func (c *Consumer) pendingInFlight() bool {
@@ -752,7 +1239,7 @@ func (c *Consumer) markPendingSeq(seq uint64) {
 	c.state.PendingSeqActive = true
 	c.state.PendingStatus = rawdb.UBTConsumerPendingInFlight
 	c.state.PendingUpdatedAt = uint64(time.Now().Unix())
-	c.persistState()
+	c.persistStateMaybe(false)
 }
 
 // clearPendingSeq clears in-flight event markers once the event is fully handled.
@@ -761,12 +1248,15 @@ func (c *Consumer) clearPendingSeq() {
 		return
 	}
 	c.clearPendingMetadata()
-	c.persistState()
+	c.persistStateMaybe(true)
 }
 
 // Close closes the consumer and flushes any pending state.
 func (c *Consumer) Close() error {
 	c.mu.Lock()
+	if c.stateDirty {
+		c.persistState()
+	}
 	if c.uncommittedBlocks > 0 {
 		if c.safeToCommit() {
 			if err := c.commit(); err != nil {
@@ -780,6 +1270,11 @@ func (c *Consumer) Close() error {
 		}
 	}
 	c.mu.Unlock()
+
+	if c.validationStop != nil {
+		close(c.validationStop)
+		c.validationWG.Wait()
+	}
 	c.reader.Close()
 	c.applier.Close()
 	return c.db.Close()
