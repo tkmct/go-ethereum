@@ -228,7 +228,7 @@ func TestGateC_RetentionWindowLaggingConsumer(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected lagging consumer error after pruning")
 	}
-	if !strings.Contains(err.Error(), "no event at seq 6") {
+	if !strings.Contains(err.Error(), "outbox gap detected") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if consumer.state != pre {
@@ -315,6 +315,47 @@ func TestFault_CrashDuringApplyBeforeCommit(t *testing.T) {
 	}
 	if c2.processedSeq != 0 {
 		t.Fatalf("expected replay to restart from seq=0, got processedSeq=%d", c2.processedSeq)
+	}
+}
+
+func TestFault_FreshStartBootstrapsToCompactedOutboxFloor(t *testing.T) {
+	srv := newMockOutboxServer(t)
+	addr := common.HexToAddress("0x5555555555555555555555555555555555555555")
+	// Simulate outbox compaction: retained floor starts at seq=50.
+	srv.api.pruneBelow = 50
+	for i := 50; i < 60; i++ {
+		seq := uint64(i)
+		srv.api.addDiff(t, seq, seq+1, addr, seq+1, big.NewInt(int64(i+1)))
+	}
+
+	cfg := defaultTestConfig(srv.Endpoint(), t.TempDir())
+	cfg.ApplyCommitInterval = 100
+	cfg.ApplyCommitMaxLatency = time.Hour
+
+	c := newTestConsumerWithConfig(t, cfg)
+	defer c.Close()
+
+	if c.hasState {
+		t.Fatal("expected fresh-start consumer with no persisted state")
+	}
+	if c.processedSeq != ^uint64(0) {
+		t.Fatalf("expected fresh-start processedSeq sentinel, got %d", c.processedSeq)
+	}
+
+	// First call detects missing seq=0 and bootstraps processedSeq to floor-1.
+	if err := c.ConsumeNext(); err != nil {
+		t.Fatalf("bootstrap ConsumeNext failed: %v", err)
+	}
+	if c.processedSeq != 49 {
+		t.Fatalf("expected processedSeq bootstrapped to 49, got %d", c.processedSeq)
+	}
+
+	// Next call should consume seq=50 successfully.
+	if err := c.ConsumeNext(); err != nil {
+		t.Fatalf("consume at compacted floor failed: %v", err)
+	}
+	if c.processedSeq != 50 {
+		t.Fatalf("expected processedSeq=50 after consume, got %d", c.processedSeq)
 	}
 }
 

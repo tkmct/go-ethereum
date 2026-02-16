@@ -144,8 +144,16 @@ func (api *QueryAPI) trieForQuery(root common.Hash) (*bintrie.BinaryTrie, error)
 	if api.consumer.applier == nil {
 		return nil, fmt.Errorf("UBT trie not initialized")
 	}
-	if root == api.consumer.applier.Root() && api.consumer.applier.Trie() != nil {
-		return api.consumer.applier.Trie(), nil
+	// Reuse live trie only if requested root matches the live trie hash exactly.
+	if tr := api.consumer.applier.Trie(); tr != nil {
+		if root == tr.Hash() {
+			return tr, nil
+		}
+		// Test/in-memory bootstrap compatibility: before first commit, both
+		// requested root and applier.Root can be zero while live trie has data.
+		if root == (common.Hash{}) && api.consumer.applier.Root() == (common.Hash{}) {
+			return tr, nil
+		}
 	}
 	tr, err := api.consumer.applier.TrieAt(root)
 	if err != nil {
@@ -353,22 +361,41 @@ type UBTProofResult struct {
 // Note: This is a raw-key proof against the unified binary trie. For an
 // eth_getProof-compatible interface, use GetAccountProof instead.
 func (api *QueryAPI) GetProof(ctx context.Context, key common.Hash, blockNrOrHash *rpc.BlockNumberOrHash) (*UBTProofResult, error) {
-	// Snapshot state under lock
+	// Hold the consumer lock throughout proof generation to avoid racing with
+	// concurrent apply/commit mutations on trie/pathdb state.
 	api.consumer.mu.Lock()
+	defer api.consumer.mu.Unlock()
 	if api.consumer.applier == nil || api.consumer.applier.Trie() == nil {
-		api.consumer.mu.Unlock()
 		return nil, fmt.Errorf("UBT trie not initialized")
 	}
 	stateRef, err := api.resolveBlockSelector(blockNrOrHash)
-	api.consumer.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
 
-	// Proof generation outside the lock
-	proofMap, err := api.consumer.applier.GenerateProofAt(stateRef.root, key.Bytes())
+	selectedRoot := stateRef.root
+	proofMap, err := api.consumer.applier.GenerateProofAt(selectedRoot, key.Bytes())
 	if err != nil {
-		return nil, fmt.Errorf("generate proof: %w", err)
+		latestReq := blockNrOrHash == nil
+		if !latestReq {
+			if bn, ok := blockNrOrHash.Number(); ok && bn == rpc.LatestBlockNumber {
+				latestReq = true
+			}
+		}
+		if latestReq && api.consumer.applier.Trie() != nil {
+			liveRoot := api.consumer.applier.Trie().Hash()
+			if liveRoot != selectedRoot {
+				if proofMap2, err2 := api.consumer.applier.GenerateProofAt(liveRoot, key.Bytes()); err2 == nil {
+					log.Debug("GetProof fallback to live trie root", "from", selectedRoot, "to", liveRoot)
+					proofMap = proofMap2
+					selectedRoot = liveRoot
+					err = nil
+				}
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("generate proof: %w", err)
+		}
 	}
 
 	// Convert to hex-encoded bytes for JSON serialization
@@ -379,7 +406,7 @@ func (api *QueryAPI) GetProof(ctx context.Context, key common.Hash, blockNrOrHas
 
 	return &UBTProofResult{
 		Key:        key,
-		Root:       stateRef.root,
+		Root:       selectedRoot,
 		ProofNodes: proofNodes,
 	}, nil
 }
@@ -405,21 +432,39 @@ func (api *QueryAPI) GetAccountProof(ctx context.Context, addr common.Address, s
 		return nil, fmt.Errorf("too many storage keys: %d exceeds max batch size %d", len(storageKeys), maxBatch)
 	}
 
-	// Snapshot state under lock
+	// Hold the consumer lock throughout proof generation to avoid racing with
+	// concurrent apply/commit mutations on trie/pathdb state.
 	api.consumer.mu.Lock()
+	defer api.consumer.mu.Unlock()
 	if api.consumer.applier == nil || api.consumer.applier.Trie() == nil {
-		api.consumer.mu.Unlock()
 		return nil, fmt.Errorf("UBT trie not initialized")
 	}
 	stateRef, err := api.resolveBlockSelector(blockNrOrHash)
-	api.consumer.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
 
-	// Proof generation outside the lock
+	latestReq := blockNrOrHash == nil
+	if !latestReq {
+		if bn, ok := blockNrOrHash.Number(); ok && bn == rpc.LatestBlockNumber {
+			latestReq = true
+		}
+	}
+	selectedRoot := stateRef.root
 	accountKey := bintrie.GetBinaryTreeKeyBasicData(addr)
-	accountProofMap, err := api.consumer.applier.GenerateProofAt(stateRef.root, accountKey)
+	accountProofMap, err := api.consumer.applier.GenerateProofAt(selectedRoot, accountKey)
+	if err != nil && latestReq && api.consumer.applier.Trie() != nil {
+		liveRoot := api.consumer.applier.Trie().Hash()
+		if liveRoot != selectedRoot {
+			accountProofMap2, err2 := api.consumer.applier.GenerateProofAt(liveRoot, accountKey)
+			if err2 == nil {
+				log.Debug("GetAccountProof fallback to live trie root", "from", selectedRoot, "to", liveRoot)
+				accountProofMap = accountProofMap2
+				selectedRoot = liveRoot
+				err = nil
+			}
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("generate account proof: %w", err)
 	}
@@ -432,7 +477,7 @@ func (api *QueryAPI) GetAccountProof(ctx context.Context, addr common.Address, s
 	storageProofs := make([]StorageProofEntry, len(storageKeys))
 	for i, slot := range storageKeys {
 		storageKey := bintrie.GetBinaryTreeKeyStorageSlot(addr, slot.Bytes())
-		proofMap, err := api.consumer.applier.GenerateProofAt(stateRef.root, storageKey)
+		proofMap, err := api.consumer.applier.GenerateProofAt(selectedRoot, storageKey)
 		if err != nil {
 			return nil, fmt.Errorf("generate storage proof for slot %s: %w", slot, err)
 		}
@@ -450,7 +495,7 @@ func (api *QueryAPI) GetAccountProof(ctx context.Context, addr common.Address, s
 		Address:      addr,
 		AccountProof: accountProof,
 		StorageProof: storageProofs,
-		Root:         stateRef.root,
+		Root:         selectedRoot,
 	}, nil
 }
 

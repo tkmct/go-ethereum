@@ -114,7 +114,8 @@ func (r *Runner) loop() {
 
 	backoff := time.Second
 	maxBackoff := 30 * time.Second
-	lagCheckInterval := 30 * time.Second
+	lagCheckInterval := 5 * time.Second
+	r.refreshOutboxLag()
 	lastLagCheck := time.Now()
 
 	for {
@@ -126,6 +127,20 @@ func (r *Runner) loop() {
 			consumeErr := r.consumer.ConsumeNext()
 
 			if consumeErr != nil {
+				if errors.Is(consumeErr, errNoEventAvailable) {
+					consumerBackoffGauge.Update(0)
+					select {
+					case <-r.stopCh:
+						return
+					case <-time.After(20 * time.Millisecond):
+					}
+					// Keep lag fresh even when outbox is temporarily idle.
+					if time.Since(lastLagCheck) >= lagCheckInterval {
+						r.refreshOutboxLag()
+						lastLagCheck = time.Now()
+					}
+					continue
+				}
 				// Check for fatal validation halt — stop the daemon, don't retry
 				var haltErr *errValidationHalt
 				if errors.As(consumeErr, &haltErr) {
@@ -142,6 +157,12 @@ func (r *Runner) loop() {
 				if errors.As(consumeErr, &replayErr) {
 					log.Crit("UBT reorg requires archive replay", "err", consumeErr,
 						"action", "Restart with --require-archive-replay=true pointing to an archive node")
+					return
+				}
+				var gapErr *errOutboxGap
+				if errors.As(consumeErr, &gapErr) {
+					log.Crit("UBT consumer fell behind outbox retention window", "err", consumeErr,
+						"action", "Increase geth outbox retention window (or disable retention), then reset ubtconv state and restart")
 					return
 				}
 				// Log and backoff on transient error

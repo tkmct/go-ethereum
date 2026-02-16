@@ -222,7 +222,7 @@ func (a *Applier) CommitAt(blockNumber uint64) error {
 	}
 	a.trie = tr
 
-	log.Info("UBT trie committed", "root", root)
+	log.Debug("UBT trie committed", "root", root)
 	return nil
 }
 
@@ -337,11 +337,15 @@ func (a *Applier) GenerateProofAt(root common.Hash, key []byte) (map[common.Hash
 	if len(key) != 32 {
 		return nil, fmt.Errorf("invalid key length %d, expected 32", len(key))
 	}
+	// Reuse the live trie only when the requested root matches the current
+	// in-memory trie hash exactly (supports uncommitted-root proofs in tests).
+	// For historical/committed-root proofs while newer uncommitted mutations
+	// exist, open an explicit snapshot trie at the requested root.
 	var (
 		tr  *bintrie.BinaryTrie
 		err error
 	)
-	if root == a.root && a.trie != nil {
+	if a.trie != nil && root == a.trie.Hash() {
 		tr = a.trie
 	} else {
 		tr, err = a.TrieAt(root)

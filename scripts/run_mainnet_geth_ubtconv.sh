@@ -31,14 +31,21 @@ LIGHTHOUSE_HTTP_ADDR="${LIGHTHOUSE_HTTP_ADDR:-127.0.0.1}"
 LIGHTHOUSE_HTTP_PORT="${LIGHTHOUSE_HTTP_PORT:-5052}"
 LIGHTHOUSE_P2P_PORT="${LIGHTHOUSE_P2P_PORT:-9000}"
 LIGHTHOUSE_QUIC_PORT="${LIGHTHOUSE_QUIC_PORT:-9001}"
-CHECKPOINT_SYNC_URL="${CHECKPOINT_SYNC_URL:-}"
+CHECKPOINT_SYNC_URL="${CHECKPOINT_SYNC_URL:-https://mainnet.checkpoint.sigp.io}"
 GETH_CACHE_MB="${GETH_CACHE_MB:-512}"
 
-APPLY_COMMIT_INTERVAL="${APPLY_COMMIT_INTERVAL:-128}"
+APPLY_COMMIT_INTERVAL="${APPLY_COMMIT_INTERVAL:-1024}"
 APPLY_COMMIT_MAX_LATENCY="${APPLY_COMMIT_MAX_LATENCY:-10s}"
 TRIEDB_STATE_HISTORY="${TRIEDB_STATE_HISTORY:-90000}"
 MAX_RECOVERABLE_REORG_DEPTH="${MAX_RECOVERABLE_REORG_DEPTH:-128}"
-OUTBOX_RETENTION_SEQ_WINDOW="${OUTBOX_RETENTION_SEQ_WINDOW:-100000}"
+OUTBOX_READ_AHEAD="${OUTBOX_READ_AHEAD:-256}"
+BACKPRESSURE_LAG_THRESHOLD="${BACKPRESSURE_LAG_THRESHOLD:-5000}"
+VALIDATION_STRICT_CATCHUP_SAMPLE_RATE="${VALIDATION_STRICT_CATCHUP_SAMPLE_RATE:-0}"
+VALIDATION_STRICT="${VALIDATION_STRICT:-false}"
+BLOCK_ROOT_INDEX_STRIDE_HIGH_LAG="${BLOCK_ROOT_INDEX_STRIDE_HIGH_LAG:-64}"
+OUTBOX_RETENTION_SEQ_WINDOW="${OUTBOX_RETENTION_SEQ_WINDOW:-0}"
+SLOT_INDEX_ENABLED="${SLOT_INDEX_ENABLED:-false}"
+PENDING_STATE_PERSIST_INTERVAL="${PENDING_STATE_PERSIST_INTERVAL:-2s}"
 MONITOR_PROGRESS_INTERVAL="${MONITOR_PROGRESS_INTERVAL:-30}"
 
 GETH_PID_FILE="${WORKDIR}/geth.pid"
@@ -64,7 +71,11 @@ fail() {
 spawn_process() {
   local log_file="$1"
   shift
-  nohup "$@" >"${log_file}" 2>&1 < /dev/null &
+  if command -v setsid >/dev/null 2>&1; then
+    nohup setsid "$@" >"${log_file}" 2>&1 < /dev/null &
+  else
+    nohup "$@" >"${log_file}" 2>&1 < /dev/null &
+  fi
   echo "$!"
 }
 
@@ -79,7 +90,7 @@ Options:
   --geth-bin PATH           Path to geth binary
   --ubtconv-bin PATH        Path to ubtconv binary
   --lighthouse-bin PATH     Path to lighthouse binary (default: lighthouse in PATH)
-  --checkpoint-sync-url URL Lighthouse checkpoint sync URL (optional)
+  --checkpoint-sync-url URL Lighthouse checkpoint sync URL (default: https://mainnet.checkpoint.sigp.io)
   --skip-build              Skip go build step
   --detach                  Start processes and exit immediately
   --enable-execution-rpc    Start ubtconv with --execution-class-rpc-enabled
@@ -90,9 +101,12 @@ Environment overrides:
   GETH_CACHE_MB
   UBT_HTTP_ADDR, UBT_HTTP_PORT
   LIGHTHOUSE_HTTP_ADDR, LIGHTHOUSE_HTTP_PORT, LIGHTHOUSE_P2P_PORT, LIGHTHOUSE_QUIC_PORT
-  CHECKPOINT_SYNC_URL
+  CHECKPOINT_SYNC_URL (default: https://mainnet.checkpoint.sigp.io)
   APPLY_COMMIT_INTERVAL, APPLY_COMMIT_MAX_LATENCY
+  OUTBOX_READ_AHEAD, BACKPRESSURE_LAG_THRESHOLD
+  VALIDATION_STRICT, VALIDATION_STRICT_CATCHUP_SAMPLE_RATE, BLOCK_ROOT_INDEX_STRIDE_HIGH_LAG
   TRIEDB_STATE_HISTORY, MAX_RECOVERABLE_REORG_DEPTH, OUTBOX_RETENTION_SEQ_WINDOW
+  SLOT_INDEX_ENABLED, PENDING_STATE_PERSIST_INTERVAL
   MONITOR_PROGRESS_INTERVAL
 
 Notes:
@@ -342,15 +356,21 @@ start_ubtconv() {
   local cmd=(
     "${UBTCONV_BIN}"
     --outbox-rpc-endpoint "http://${GETH_HTTP_ADDR}:${GETH_HTTP_PORT}"
+    --outbox-read-ahead "${OUTBOX_READ_AHEAD}"
     --datadir "${UBT_DATADIR}"
     --apply-commit-interval "${APPLY_COMMIT_INTERVAL}"
     --apply-commit-max-latency "${APPLY_COMMIT_MAX_LATENCY}"
+    --pending-state-persist-interval "${PENDING_STATE_PERSIST_INTERVAL}"
+    --backpressure-lag-threshold "${BACKPRESSURE_LAG_THRESHOLD}"
+    --block-root-index-stride-high-lag "${BLOCK_ROOT_INDEX_STRIDE_HIGH_LAG}"
     --query-rpc-enabled
     --query-rpc-listen-addr "${UBT_HTTP_ADDR}:${UBT_HTTP_PORT}"
     --triedb-scheme path
     --triedb-state-history "${TRIEDB_STATE_HISTORY}"
     --max-recoverable-reorg-depth "${MAX_RECOVERABLE_REORG_DEPTH}"
-    --validation-strict=true
+    --validation-strict="${VALIDATION_STRICT}"
+    --validation-strict-catchup-sample-rate "${VALIDATION_STRICT_CATCHUP_SAMPLE_RATE}"
+    --slot-index-enabled="${SLOT_INDEX_ENABLED}"
     --require-archive-replay=true
   )
   if (( ENABLE_EXECUTION_RPC == 1 )); then

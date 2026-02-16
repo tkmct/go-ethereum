@@ -499,8 +499,15 @@ func (t *BinaryTrie) Prove(key []byte, proofDb ethdb.KeyValueWriter) error {
 			return nil
 
 		case HashedNode:
-			// Need to resolve the hashed node first
-			path, err := keyToPath(depth, key)
+			// Need to resolve the hashed node first.
+			// `depth` tracks the current node depth (child depth after stepping
+			// through its parent), while keyToPath expects the parent depth.
+			// Convert child depth -> parent depth to derive the correct node path.
+			resolveDepth := depth - 1
+			if resolveDepth < 0 {
+				resolveDepth = 0
+			}
+			path, err := keyToPath(resolveDepth, key)
 			if err != nil {
 				return fmt.Errorf("failed to generate path at depth %d: %w", depth, err)
 			}

@@ -80,6 +80,11 @@ type OutboxReader struct {
 	timeout        time.Duration
 	lastReconnect  time.Time
 	reconnectDelay time.Duration // minimum delay between reconnection attempts
+	reconnectMin   time.Duration
+	reconnectMax   time.Duration
+	reconnectFails uint32
+	prefetchBatch  uint64
+	prefetchCache  map[uint64]*ubtemit.OutboxEnvelope
 }
 
 // NewOutboxReader creates a new outbox reader for the given RPC endpoint.
@@ -87,7 +92,55 @@ func NewOutboxReader(endpoint string) *OutboxReader {
 	return &OutboxReader{
 		endpoint:       endpoint,
 		timeout:        30 * time.Second,
-		reconnectDelay: 5 * time.Second,
+		reconnectDelay: 250 * time.Millisecond,
+		reconnectMin:   250 * time.Millisecond,
+		reconnectMax:   5 * time.Second,
+		prefetchBatch:  1,
+		prefetchCache:  make(map[uint64]*ubtemit.OutboxEnvelope),
+	}
+}
+
+// SetPrefetchBatch configures how many events ReadEvent should fetch in one RPC call.
+// A value of 1 disables prefetch. The value is clamped to [1, 1000].
+func (r *OutboxReader) SetPrefetchBatch(batch uint64) {
+	if batch == 0 {
+		batch = 1
+	}
+	if batch > 1000 {
+		batch = 1000
+	}
+	r.mu.Lock()
+	r.prefetchBatch = batch
+	r.prefetchCache = make(map[uint64]*ubtemit.OutboxEnvelope)
+	r.mu.Unlock()
+}
+
+func (r *OutboxReader) prefetchConfig() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.prefetchBatch == 0 {
+		return 1
+	}
+	return r.prefetchBatch
+}
+
+func (r *OutboxReader) getPrefetched(seq uint64) (*ubtemit.OutboxEnvelope, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	env, ok := r.prefetchCache[seq]
+	if ok {
+		delete(r.prefetchCache, seq)
+	}
+	return env, ok
+}
+
+func (r *OutboxReader) fillPrefetch(envs []*ubtemit.OutboxEnvelope) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Reset cache each fill to keep memory bounded and sequence-local.
+	r.prefetchCache = make(map[uint64]*ubtemit.OutboxEnvelope, len(envs))
+	for _, env := range envs {
+		r.prefetchCache[env.Seq] = env
 	}
 }
 
@@ -106,13 +159,35 @@ func (r *OutboxReader) connectLocked() error {
 
 	client, err := rpc.DialContext(ctx, r.endpoint)
 	if err != nil {
+		r.bumpReconnectDelayLocked()
 		r.lastReconnect = time.Now()
 		return fmt.Errorf("failed to connect to %s: %w", r.endpoint, err)
 	}
 	r.client = client
+	r.reconnectFails = 0
+	r.reconnectDelay = r.reconnectMin
 	r.lastReconnect = time.Now()
 	log.Info("Connected to geth outbox RPC", "endpoint", r.endpoint)
 	return nil
+}
+
+func (r *OutboxReader) bumpReconnectDelayLocked() {
+	r.reconnectFails++
+	delay := r.reconnectMin
+	for i := uint32(0); i < r.reconnectFails; i++ {
+		delay *= 2
+		if delay >= r.reconnectMax {
+			delay = r.reconnectMax
+			break
+		}
+	}
+	if delay < r.reconnectMin {
+		delay = r.reconnectMin
+	}
+	if delay > r.reconnectMax {
+		delay = r.reconnectMax
+	}
+	r.reconnectDelay = delay
 }
 
 // getClient returns the current RPC client, connecting if necessary.
@@ -184,6 +259,35 @@ func (r *OutboxReader) acquireClient() (*rpc.Client, error) {
 // ReadEvent reads an outbox event by sequence number.
 // Returns nil if no event exists at the given sequence.
 func (r *OutboxReader) ReadEvent(seq uint64) (*ubtemit.OutboxEnvelope, error) {
+	if env, ok := r.getPrefetched(seq); ok {
+		return env, nil
+	}
+
+	batch := r.prefetchConfig()
+	if batch > 1 {
+		to := seq + batch - 1
+		if to < seq { // overflow guard
+			to = ^uint64(0)
+		}
+		envs, err := r.ReadRange(seq, to)
+		if err != nil {
+			return nil, err
+		}
+		if len(envs) == 0 {
+			return nil, nil
+		}
+		// If the first returned seq is not the target, there is a gap at target seq.
+		// Preserve old behavior by reporting target as missing.
+		if envs[0].Seq != seq {
+			return nil, nil
+		}
+		r.fillPrefetch(envs)
+		if env, ok := r.getPrefetched(seq); ok {
+			return env, nil
+		}
+		return nil, nil
+	}
+
 	client, err := r.getClient()
 	if err != nil {
 		return nil, err
@@ -243,6 +347,72 @@ func (r *OutboxReader) LatestSeq() (uint64, error) {
 	return uint64(result), nil
 }
 
+func parseRPCUint64(value any) (uint64, bool) {
+	switch v := value.(type) {
+	case string:
+		if len(v) > 2 && (v[:2] == "0x" || v[:2] == "0X") {
+			n, err := hexutil.DecodeUint64(v)
+			if err != nil {
+				return 0, false
+			}
+			return n, true
+		}
+		var n uint64
+		_, err := fmt.Sscanf(v, "%d", &n)
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	case float64:
+		if v < 0 {
+			return 0, false
+		}
+		return uint64(v), true
+	case int:
+		if v < 0 {
+			return 0, false
+		}
+		return uint64(v), true
+	case int64:
+		if v < 0 {
+			return 0, false
+		}
+		return uint64(v), true
+	case uint64:
+		return v, true
+	case hexutil.Uint64:
+		return uint64(v), true
+	default:
+		return 0, false
+	}
+}
+
+// LowestSeq returns the lowest retained sequence from outbox status.
+// Returns 0 when the field is unavailable.
+func (r *OutboxReader) LowestSeq() (uint64, error) {
+	client, err := r.getClient()
+	if err != nil {
+		return 0, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	defer cancel()
+
+	var status map[string]any
+	err = client.CallContext(ctx, &status, "ubt_status")
+	if err != nil {
+		r.resetConnection(err, "ubt_status")
+		return 0, fmt.Errorf("ubt_status: %w", err)
+	}
+	raw, ok := status["lowestSeq"]
+	if !ok {
+		return 0, nil
+	}
+	if seq, ok := parseRPCUint64(raw); ok {
+		return seq, nil
+	}
+	return 0, nil
+}
+
 // ReadAccountRange reads a page of accounts at a specific block using debug_accountRange.
 func (r *OutboxReader) ReadAccountRange(
 	blockNrOrHash rpc.BlockNumberOrHash,
@@ -274,8 +444,9 @@ func (r *OutboxReader) resetConnection(err error, reason string) {
 	if r.client != nil {
 		r.client.Close()
 		r.client = nil
+		r.bumpReconnectDelayLocked()
 		r.lastReconnect = time.Now()
-		log.Warn("UBT outbox RPC connection reset", "endpoint", r.endpoint, "reason", reason, "err", err, "ts", r.lastReconnect)
+		log.Warn("UBT outbox RPC connection reset", "endpoint", r.endpoint, "reason", reason, "err", err, "ts", r.lastReconnect, "nextReconnectDelay", r.reconnectDelay)
 	}
 }
 
@@ -301,5 +472,7 @@ func (r *OutboxReader) Reconnect(endpoint string) {
 	}
 	r.endpoint = endpoint
 	r.closed = false
+	r.reconnectFails = 0
+	r.reconnectDelay = r.reconnectMin
 	r.lastReconnect = time.Time{} // allow immediate reconnection
 }

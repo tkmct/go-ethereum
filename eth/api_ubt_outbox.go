@@ -117,6 +117,15 @@ func (api *UBTOutboxAPI) LatestSeq(ctx context.Context) (hexutil.Uint64, error) 
 	return hexutil.Uint64(store.LatestSeq()), nil
 }
 
+// LowestSeq returns the lowest retained outbox sequence number.
+func (api *UBTOutboxAPI) LowestSeq(ctx context.Context) (hexutil.Uint64, error) {
+	store := api.eth.OutboxStore()
+	if store == nil {
+		return 0, errors.New("UBT outbox not enabled")
+	}
+	return hexutil.Uint64(store.LowestSeq()), nil
+}
+
 // CompactOutboxBelow deletes outbox events below the given safe sequence number.
 // This is called by the ubtconv daemon to coordinate outbox retention.
 func (api *UBTOutboxAPI) CompactOutboxBelow(ctx context.Context, safeSeq hexutil.Uint64) (map[string]any, error) {
@@ -148,6 +157,7 @@ func (api *UBTOutboxAPI) Status(ctx context.Context) (map[string]any, error) {
 	result := map[string]any{
 		"enabled":   true,
 		"latestSeq": hexutil.Uint64(store.LatestSeq()),
+		"lowestSeq": hexutil.Uint64(store.LowestSeq()),
 	}
 
 	// Add emitter degraded status if service is available

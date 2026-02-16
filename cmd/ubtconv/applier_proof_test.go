@@ -17,11 +17,14 @@
 package main
 
 import (
+	"math/big"
 	"os"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethdb/memorydb"
+	"github.com/ethereum/go-ethereum/trie/bintrie"
 )
 
 // setupTestApplier creates a temporary applier for testing proof methods.
@@ -234,5 +237,56 @@ func TestRoot_InitialValue(t *testing.T) {
 
 	if root != (common.Hash{}) {
 		t.Errorf("Initial root should be zero hash, got %s", root)
+	}
+}
+
+// TestGenerateProofAt_UsesRequestedCommittedRoot verifies proof generation at a
+// committed root remains valid even when newer uncommitted mutations exist.
+func TestGenerateProofAt_UsesRequestedCommittedRoot(t *testing.T) {
+	applier, cleanup := setupTestApplier(t)
+	defer cleanup()
+
+	addr1 := common.HexToAddress("0x1000000000000000000000000000000000000001")
+	diff1 := makeDiff(addr1, 1, big.NewInt(1000))
+	if _, err := applier.ApplyDiff(diff1, 1); err != nil {
+		t.Fatalf("apply diff1: %v", err)
+	}
+	if err := applier.CommitAt(1); err != nil {
+		t.Fatalf("commit diff1: %v", err)
+	}
+	committedRoot := applier.Root()
+	key1 := bintrie.GetBinaryTreeKeyBasicData(addr1)
+
+	// Add uncommitted state mutation that changes current trie root.
+	addr2 := common.HexToAddress("0x2000000000000000000000000000000000000002")
+	diff2 := makeDiff(addr2, 2, big.NewInt(2000))
+	if _, err := applier.ApplyDiff(diff2, 2); err != nil {
+		t.Fatalf("apply diff2: %v", err)
+	}
+	if applier.trie.Hash() == committedRoot {
+		t.Fatalf("expected live trie root to diverge from committed root")
+	}
+
+	// Proof at committedRoot must still verify against committedRoot.
+	proofNodes, err := applier.GenerateProofAt(committedRoot, key1)
+	if err != nil {
+		t.Fatalf("GenerateProofAt(committedRoot): %v", err)
+	}
+	if len(proofNodes) == 0 {
+		t.Fatalf("expected non-empty proof nodes")
+	}
+
+	proofDb := memorydb.New()
+	for hash, blob := range proofNodes {
+		if err := proofDb.Put(hash.Bytes(), blob); err != nil {
+			t.Fatalf("put proof node: %v", err)
+		}
+	}
+	value, err := bintrie.VerifyProof(committedRoot, key1, proofDb)
+	if err != nil {
+		t.Fatalf("verify proof at committed root: %v", err)
+	}
+	if value == nil {
+		t.Fatalf("expected account proof to be present")
 	}
 }

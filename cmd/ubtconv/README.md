@@ -234,6 +234,19 @@ curl -s -H 'Content-Type: application/json' \
 - `accountsTouched/storageTouched/codeTouched` can be empty depending on selected block/root.
 - For strict direct/proxy comparison, query both methods with the **same explicit block**.
 
+## Catch-up Throughput Controls
+
+When backlog is high (`outboxLag > backpressure-lag-threshold`), ubtconv now:
+
+1. Samples strict validation by `--validation-strict-catchup-sample-rate`.
+2. Uses prefetch for outbox reads via `--outbox-read-batch` (default disabled).
+3. Avoids per-block backpressure commits (uses a bounded faster-commit policy).
+4. Skips strict block validation early when geth returns `historical state ... is not available`.
+
+Mainnet full-sync recommendation:
+- Keep `--outbox-read-batch=1` unless profiling proves improvement in your environment.
+- Keep `--validation-strict-catchup-sample-rate=1` by default.
+
 ## Selector and Parity Guidance
 
 Supported selectors:
@@ -318,6 +331,7 @@ Action:
 | Flag | Default | Description |
 |---|---|---|
 | `--outbox-rpc-endpoint` | `http://localhost:8545` | geth RPC endpoint for outbox consumption |
+| `--outbox-read-batch` | `1` | Number of events prefetched per outbox read (1 disables prefetch, max 1000) |
 | `--datadir` | `./ubtconv-data` | ubtconv data directory |
 | `--apply-commit-interval` | `128` | Commit every N applied blocks |
 | `--apply-commit-max-latency` | `10s` | Commit max latency |
@@ -330,6 +344,7 @@ Action:
 | `--query-rpc-max-batch` | `100` | Max batch size for list-style RPC |
 | `--validation-strict` | `true` | Strict validation against MPT |
 | `--validation-halt-on-mismatch` | `false` | Stop daemon on strict mismatch |
+| `--validation-strict-catchup-sample-rate` | `1` | Strict validation sampling while backlog is high (1 = every block) |
 | `--execution-class-rpc-enabled` | `false` | Enable `ubt_callUBT` and `ubt_executionWitnessUBT` |
 | `--backpressure-lag-threshold` | `1000` | Force fast commit above lag threshold |
 | `--outbox-disk-budget-bytes` | `0` | Outbox disk budget (0 = unlimited) |

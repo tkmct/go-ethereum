@@ -26,10 +26,17 @@ import (
 
 // Config holds the ubtconv daemon configuration.
 type Config struct {
-	OutboxRPCEndpoint        string
-	DataDir                  string
-	ApplyCommitInterval      uint64
-	ApplyCommitMaxLatency    time.Duration
+	OutboxRPCEndpoint     string
+	OutboxReadBatch       uint64 // Number of events to prefetch per outbox read (1 = disabled)
+	OutboxReadAhead       uint64 // Consumer-side read-ahead window size (1 = disabled)
+	DataDir               string
+	ApplyCommitInterval   uint64
+	ApplyCommitMaxLatency time.Duration
+	// PendingStatePersistInterval debounces pending-seq durability writes in hot path.
+	// 0 disables debounce (persist every transition).
+	PendingStatePersistInterval time.Duration
+	// TreatNoEventAsIdle avoids backoff escalation when the next sequence is not yet emitted.
+	TreatNoEventAsIdle       bool
 	MaxRecoverableReorgDepth uint64
 	TrieDBScheme             string // "path"
 	TrieDBStateHistory       uint64
@@ -55,6 +62,7 @@ type Config struct {
 	// Slot index (Chunk 4)
 	SlotIndexDiskBudget uint64 // 0 = unlimited
 	CancunBlock         uint64 // Explicit Cancun fork block number (0 = auto-detect from chain config)
+	SlotIndexEnabled    bool   // Enable pre-Cancun slot-index tracking
 
 	// Query RPC limits
 	QueryRPCMaxBatch uint64 // Max batch size for list-style RPC methods (default: 100)
@@ -62,10 +70,21 @@ type Config struct {
 	// Strict validation (Chunk 5)
 	ValidationStrictMode     bool // Validate ALL accounts/storage in diff against MPT
 	ValidationHaltOnMismatch bool // Halt daemon on strict validation mismatch
+	// ValidationStrictCatchupSampleRate controls strict validation sampling while
+	// backlog is high (outboxLag > BackpressureLagThreshold). 1 means validate every block.
+	ValidationStrictCatchupSampleRate uint64
+	// ValidationStrictAsync runs strict validation off the apply hot path when halt-on-mismatch is disabled.
+	ValidationStrictAsync bool
+	// ValidationQueueCapacity bounds async strict validation queue.
+	ValidationQueueCapacity uint64
 
 	// Execution-class RPC gate.
 	// Default false; must be explicitly enabled by operator.
 	ExecutionClassRPCEnabled bool
+
+	// BlockRootIndexStrideHighLag reduces per-block root index writes while lag is high.
+	// 1 means write every block (disabled).
+	BlockRootIndexStrideHighLag uint64
 }
 
 // Validate checks if the configuration is valid.
