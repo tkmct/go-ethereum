@@ -242,15 +242,21 @@ When backlog is high (`outboxLag > backpressure-lag-threshold`), ubtconv now:
 
 1. Samples strict validation by `--validation-strict-catchup-sample-rate`.
 2. Uses prefetch for outbox reads via `--outbox-read-batch` (default disabled).
+<<<<<<< HEAD
 3. Coalesces duplicate account/storage/code mutations per diff (last-write-wins).
 4. Applies adaptive write shedding for pending state and block-root index writes while lag is high.
 5. Avoids per-block backpressure commits (uses a bounded faster-commit policy).
 6. Skips strict block validation early when geth returns `historical state ... is not available`.
+=======
+3. Avoids per-block backpressure commits (uses a bounded faster-commit policy).
+4. Skips strict block validation early when geth returns `historical state ... is not available`.
+>>>>>>> f131d63cd232fbae8cc05dc1d886c04acd07a0df
 
 Mainnet full-sync recommendation:
 - Keep `--outbox-read-batch=1` unless profiling proves improvement in your environment.
 - Keep `--validation-strict-catchup-sample-rate=1` by default.
 
+<<<<<<< HEAD
 ## Profiling and Bottleneck Analysis
 
 `ubtconv` now exposes per-stage metrics for catch-up analysis:
@@ -276,6 +282,8 @@ go tool pprof http://127.0.0.1:6061/debug/pprof/profile?seconds=30
 go tool pprof http://127.0.0.1:6061/debug/pprof/heap
 ```
 
+=======
+>>>>>>> f131d63cd232fbae8cc05dc1d886c04acd07a0df
 ## Selector and Parity Guidance
 
 Supported selectors:
@@ -359,7 +367,11 @@ Action:
 
 | Flag | Default | Description |
 |---|---|---|
+<<<<<<< HEAD
 | `--outbox-rpc-endpoint` | `http://localhost:8545` | geth outbox endpoint (HTTP/WebSocket or IPC path) |
+=======
+| `--outbox-rpc-endpoint` | `http://localhost:8545` | geth RPC endpoint for outbox consumption |
+>>>>>>> f131d63cd232fbae8cc05dc1d886c04acd07a0df
 | `--outbox-read-batch` | `1` | Number of events prefetched per outbox read (1 disables prefetch, max 1000) |
 | `--datadir` | `./ubtconv-data` | ubtconv data directory |
 | `--apply-commit-interval` | `128` | Commit every N applied blocks |
@@ -375,7 +387,11 @@ Action:
 | `--query-rpc-max-batch` | `100` | Max batch size for list-style RPC |
 | `--validation-strict` | `true` | Strict validation against MPT |
 | `--validation-halt-on-mismatch` | `false` | Stop daemon on strict mismatch |
+<<<<<<< HEAD
 | `--validation-strict-catchup-sample-rate` | `0` | Strict validation sampling while backlog is high (0 = disable strict validation during catch-up) |
+=======
+| `--validation-strict-catchup-sample-rate` | `1` | Strict validation sampling while backlog is high (1 = every block) |
+>>>>>>> f131d63cd232fbae8cc05dc1d886c04acd07a0df
 | `--execution-class-rpc-enabled` | `false` | Enable `ubt_callUBT` and `ubt_executionWitnessUBT` |
 | `--backpressure-lag-threshold` | `1000` | Force fast commit above lag threshold |
 | `--block-root-index-stride-high-lag` | `16` | Base stride for block-root index writes while lag is high (adaptive, `1` disables) |

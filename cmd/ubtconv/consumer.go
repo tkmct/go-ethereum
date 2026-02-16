@@ -491,7 +491,10 @@ func (c *Consumer) readNextEnvelope(targetSeq uint64) (*ubtemit.OutboxEnvelope, 
 				c.readAheadNextSeq = 0
 			}
 			c.mu.Unlock()
+<<<<<<< HEAD
 			consumerReadQueueHitTotal.Inc(1)
+=======
+>>>>>>> f131d63cd232fbae8cc05dc1d886c04acd07a0df
 			return env, nil
 		}
 		c.readAheadQueue = c.readAheadQueue[:0]
@@ -502,10 +505,14 @@ func (c *Consumer) readNextEnvelope(targetSeq uint64) (*ubtemit.OutboxEnvelope, 
 
 	window := c.readAheadWindow(lag)
 	if window <= 1 {
+<<<<<<< HEAD
 		readStart := time.Now()
 		env, err := c.reader.ReadEvent(targetSeq)
 		consumerReadEventLatency.UpdateSince(readStart)
 		consumerReadRPCEventTotal.Inc(1)
+=======
+		env, err := c.reader.ReadEvent(targetSeq)
+>>>>>>> f131d63cd232fbae8cc05dc1d886c04acd07a0df
 		if err != nil {
 			consumerErrorsTotal.Inc(1)
 			return nil, fmt.Errorf("read event %d: %w", targetSeq, err)
@@ -517,10 +524,14 @@ func (c *Consumer) readNextEnvelope(targetSeq uint64) (*ubtemit.OutboxEnvelope, 
 	if toSeq < targetSeq {
 		toSeq = ^uint64(0)
 	}
+<<<<<<< HEAD
 	readStart := time.Now()
 	envs, err := c.reader.ReadRange(targetSeq, toSeq)
 	consumerReadRangeLatency.UpdateSince(readStart)
 	consumerReadRPCRangeTotal.Inc(1)
+=======
+	envs, err := c.reader.ReadRange(targetSeq, toSeq)
+>>>>>>> f131d63cd232fbae8cc05dc1d886c04acd07a0df
 	if err != nil {
 		consumerErrorsTotal.Inc(1)
 		return nil, fmt.Errorf("read events [%d,%d]: %w", targetSeq, toSeq, err)
@@ -675,6 +686,7 @@ func (c *Consumer) executeDiffTransition(decision *consumeDecision, start time.T
 	// Strict validation: cross-check ALL accounts/storage in diff against MPT.
 	// During heavy catch-up, apply sampling to reduce RPC amplification.
 	if c.cfg.ValidationStrictMode && c.validator != nil {
+<<<<<<< HEAD
 		if !shouldValidateStrict {
 			return nil
 		}
@@ -682,6 +694,22 @@ func (c *Consumer) executeDiffTransition(decision *consumeDecision, start time.T
 			if needIntermediateRoot {
 				c.pendingStrictValidations[decision.env.BlockNumber] = diff
 			}
+=======
+		shouldValidate := true
+		if c.cfg.BackpressureLagThreshold > 0 && c.outboxLag > c.cfg.BackpressureLagThreshold {
+			sampleRate := c.cfg.ValidationStrictCatchupSampleRate
+			if sampleRate == 0 {
+				shouldValidate = false
+			} else {
+				shouldValidate = decision.env.BlockNumber%sampleRate == 0
+			}
+		}
+		if !shouldValidate {
+			return nil
+		}
+		if c.cfg.ValidationStrictAsync && !c.cfg.ValidationHaltOnMismatch {
+			c.pendingStrictValidations[decision.env.BlockNumber] = diff
+>>>>>>> f131d63cd232fbae8cc05dc1d886c04acd07a0df
 			return nil
 		}
 		if err := c.validator.ValidateStrict(c.applier.Trie(), decision.env.BlockNumber, diff); err != nil {
@@ -780,6 +808,7 @@ func (c *Consumer) commit() error {
 	if err := c.applier.CommitAt(c.pendingBlock); err != nil {
 		return err
 	}
+<<<<<<< HEAD
 	consumerCommitTrieLatency.UpdateSince(trieCommitStart)
 	committedRoot := c.applier.Root()
 	if c.pendingRoot != (common.Hash{}) && committedRoot != c.pendingRoot {
@@ -787,6 +816,14 @@ func (c *Consumer) commit() error {
 			"pendingRoot", c.pendingRoot, "committedRoot", committedRoot, "block", c.pendingBlock)
 	}
 	c.pendingRoot = committedRoot
+=======
+	committedRoot := c.applier.Root()
+	if committedRoot != c.pendingRoot {
+		log.Warn("Committed root differs from pending root; using committed root",
+			"pendingRoot", c.pendingRoot, "committedRoot", committedRoot, "block", c.pendingBlock)
+		c.pendingRoot = committedRoot
+	}
+>>>>>>> f131d63cd232fbae8cc05dc1d886c04acd07a0df
 
 	// NOW update durable state - only after successful trie commit
 	c.state.AppliedSeq = c.processedSeq
@@ -814,11 +851,17 @@ func (c *Consumer) commit() error {
 		rawdb.WriteUBTBlockRoot(batch, c.state.AppliedBlock, c.state.AppliedRoot)
 		rawdb.WriteUBTCanonicalBlock(batch, c.state.AppliedBlock, c.pendingBlockHash, c.pendingParentHash)
 	}
+<<<<<<< HEAD
 	batchWriteStart := time.Now()
 	if err := batch.Write(); err != nil {
 		return fmt.Errorf("commit batch write: %w", err)
 	}
 	consumerCommitBatchWriteLatency.UpdateSince(batchWriteStart)
+=======
+	if err := batch.Write(); err != nil {
+		return fmt.Errorf("commit batch write: %w", err)
+	}
+>>>>>>> f131d63cd232fbae8cc05dc1d886c04acd07a0df
 	c.stateDirty = false
 	c.lastStatePersistAt = time.Now()
 	c.hasState = true
@@ -877,6 +920,7 @@ func (c *Consumer) consumerStateSnapshot() *rawdb.UBTConsumerState {
 }
 
 func (c *Consumer) shouldWriteBlockRootIndex(block uint64) bool {
+<<<<<<< HEAD
 	stride := c.effectiveBlockRootIndexStride()
 	if stride <= 1 {
 		return true
@@ -912,6 +956,18 @@ func (c *Consumer) effectiveBlockRootIndexStride() uint64 {
 	return stride
 }
 
+=======
+	stride := c.cfg.BlockRootIndexStrideHighLag
+	if stride <= 1 {
+		return true
+	}
+	if c.cfg.BackpressureLagThreshold == 0 || c.outboxLag <= c.cfg.BackpressureLagThreshold {
+		return true
+	}
+	return block%stride == 0 || block == c.pendingBlock
+}
+
+>>>>>>> f131d63cd232fbae8cc05dc1d886c04acd07a0df
 func (c *Consumer) enqueueStrictValidation(task strictValidationTask) {
 	if c.validationQueue == nil {
 		return
@@ -1193,6 +1249,7 @@ func (c *Consumer) persistStateMaybe(force bool) {
 	}
 	interval := c.cfg.PendingStatePersistInterval
 	if c.cfg.BackpressureLagThreshold > 0 && c.outboxLag > c.cfg.BackpressureLagThreshold {
+<<<<<<< HEAD
 		ratio := c.outboxLag / c.cfg.BackpressureLagThreshold
 		scale := time.Duration(10)
 		if ratio >= 20 {
@@ -1206,6 +1263,14 @@ func (c *Consumer) persistStateMaybe(force bool) {
 		}
 		if interval > 20*time.Second {
 			interval = 20 * time.Second
+=======
+		interval *= 5
+		if interval < time.Second {
+			interval = time.Second
+		}
+		if interval > 5*time.Second {
+			interval = 5 * time.Second
+>>>>>>> f131d63cd232fbae8cc05dc1d886c04acd07a0df
 		}
 	}
 	if interval <= 0 {

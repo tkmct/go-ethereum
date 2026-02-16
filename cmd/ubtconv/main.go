@@ -315,8 +315,11 @@ func buildConfigFromCLI(ctx *cli.Context) *Config {
 		RequireArchiveReplay:              ctx.Bool(requireArchiveReplayFlag.Name),
 		QueryRPCEnabled:                   ctx.Bool(queryRPCEnabledFlag.Name),
 		QueryRPCListenAddr:                ctx.String(queryRPCListenAddrFlag.Name),
+<<<<<<< HEAD
 		PprofEnabled:                      ctx.Bool(pprofEnabledFlag.Name),
 		PprofListenAddr:                   ctx.String(pprofListenAddrFlag.Name),
+=======
+>>>>>>> f131d63cd232fbae8cc05dc1d886c04acd07a0df
 		QueryRPCMaxBatch:                  ctx.Uint64(queryRPCMaxBatchFlag.Name),
 		AnchorSnapshotInterval:            ctx.Uint64(anchorSnapshotIntervalFlag.Name),
 		AnchorSnapshotRetention:           ctx.Uint64(anchorSnapshotRetentionFlag.Name),
