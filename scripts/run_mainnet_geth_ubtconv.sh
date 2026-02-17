@@ -19,15 +19,18 @@ LIGHTHOUSE_DATADIR="${LIGHTHOUSE_DATADIR:-${WORKDIR}/lighthouse}"
 LOG_DIR="${LOG_DIR:-${WORKDIR}/logs}"
 JWT_SECRET_FILE="${JWT_SECRET_FILE:-${WORKDIR}/jwtsecret.hex}"
 
-GETH_HTTP_ADDR="${GETH_HTTP_ADDR:-127.0.0.1}"
+GETH_HTTP_ADDR="${GETH_HTTP_ADDR:-0.0.0.0}"
 GETH_HTTP_PORT="${GETH_HTTP_PORT:-8545}"
+GETH_HTTP_CORSDOMAIN="${GETH_HTTP_CORSDOMAIN:-*}"
+GETH_HTTP_VHOSTS="${GETH_HTTP_VHOSTS:-*}"
 GETH_P2P_PORT="${GETH_P2P_PORT:-30303}"
-GETH_AUTHRPC_ADDR="${GETH_AUTHRPC_ADDR:-127.0.0.1}"
+GETH_AUTHRPC_ADDR="${GETH_AUTHRPC_ADDR:-0.0.0.0}"
 GETH_AUTHRPC_PORT="${GETH_AUTHRPC_PORT:-8551}"
+GETH_AUTHRPC_VHOSTS="${GETH_AUTHRPC_VHOSTS:-*}"
 GETH_IPC_PATH="${GETH_IPC_PATH:-${GETH_DATADIR}/geth.ipc}"
 UBT_OUTBOX_RPC_ENDPOINT="${UBT_OUTBOX_RPC_ENDPOINT:-${GETH_IPC_PATH}}"
 
-UBT_HTTP_ADDR="${UBT_HTTP_ADDR:-127.0.0.1}"
+UBT_HTTP_ADDR="${UBT_HTTP_ADDR:-0.0.0.0}"
 UBT_HTTP_PORT="${UBT_HTTP_PORT:-8560}"
 LIGHTHOUSE_HTTP_ADDR="${LIGHTHOUSE_HTTP_ADDR:-127.0.0.1}"
 LIGHTHOUSE_HTTP_PORT="${LIGHTHOUSE_HTTP_PORT:-5052}"
@@ -99,6 +102,9 @@ Options:
   --geth-bin PATH           Path to geth binary
   --ubtconv-bin PATH        Path to ubtconv binary
   --lighthouse-bin PATH     Path to lighthouse binary (default: lighthouse in PATH)
+  --geth-http-corsdomain D  geth --http.corsdomain value (comma-separated)
+  --geth-http-vhosts V      geth --http.vhosts value (comma-separated)
+  --geth-authrpc-vhosts V   geth --authrpc.vhosts value (comma-separated)
   --checkpoint-sync-url URL Lighthouse checkpoint sync URL (default: https://mainnet.checkpoint.sigp.io)
   --skip-build              Skip go build step
   --detach                  Start processes and exit immediately
@@ -106,7 +112,8 @@ Options:
   --help                    Show this help
 
 Environment overrides:
-  GETH_HTTP_ADDR, GETH_HTTP_PORT, GETH_P2P_PORT, GETH_AUTHRPC_ADDR, GETH_AUTHRPC_PORT
+  GETH_HTTP_ADDR, GETH_HTTP_PORT, GETH_HTTP_CORSDOMAIN, GETH_HTTP_VHOSTS
+  GETH_P2P_PORT, GETH_AUTHRPC_ADDR, GETH_AUTHRPC_PORT, GETH_AUTHRPC_VHOSTS
   GETH_IPC_PATH, UBT_OUTBOX_RPC_ENDPOINT
   GETH_MAX_PEERS, GETH_CACHE_MB
   GETH_CACHE_DATABASE_PERCENT, GETH_CACHE_TRIE_PERCENT
@@ -252,33 +259,40 @@ start_geth() {
   fi
 
   log "Starting geth (mainnet full-sync)"
-  spawn_process "${GETH_LOG_FILE}" env -u GETH_CACHE_MB "${GETH_BIN}" \
-    --mainnet \
-    --syncmode full \
-    --cache "${GETH_CACHE_MB}" \
-    --cache.database "${GETH_CACHE_DATABASE_PERCENT}" \
-    --cache.trie "${GETH_CACHE_TRIE_PERCENT}" \
-    --cache.gc "${GETH_CACHE_GC_PERCENT}" \
-    --cache.snapshot "${GETH_CACHE_SNAPSHOT_PERCENT}" \
-    --datadir "${GETH_DATADIR}" \
-    --port "${GETH_P2P_PORT}" \
-    --maxpeers "${GETH_MAX_PEERS}" \
-    --ipcpath "${GETH_IPC_PATH}" \
-    --authrpc.addr "${GETH_AUTHRPC_ADDR}" \
-    --authrpc.port "${GETH_AUTHRPC_PORT}" \
-    --authrpc.jwtsecret "${JWT_SECRET_FILE}" \
-    --http --http.addr "${GETH_HTTP_ADDR}" --http.port "${GETH_HTTP_PORT}" \
-    --http.api eth,net,web3,debug,ubt \
-    --ubt.conversion-enabled \
-    --ubt.decoupled \
-    --ubt.outbox-db-path "${GETH_DATADIR}/ubt-outbox" \
-    --ubt.outbox-retention-seq-window "${OUTBOX_RETENTION_SEQ_WINDOW}" \
-    --ubt.reorg-marker-enabled \
-    --ubt.outbox-read-rpc-enabled \
-    --ubt.debug-rpc-proxy-enabled \
-    --ubt.debug-endpoint "http://${UBT_HTTP_ADDR}:${UBT_HTTP_PORT}" \
-    --ubt.debug-timeout 5s \
-    >"${GETH_PID_FILE}"
+  local cmd=(
+    env -u GETH_CACHE_MB "${GETH_BIN}"
+    --mainnet
+    --syncmode full
+    --cache "${GETH_CACHE_MB}"
+    --cache.database "${GETH_CACHE_DATABASE_PERCENT}"
+    --cache.trie "${GETH_CACHE_TRIE_PERCENT}"
+    --cache.gc "${GETH_CACHE_GC_PERCENT}"
+    --cache.snapshot "${GETH_CACHE_SNAPSHOT_PERCENT}"
+    --datadir "${GETH_DATADIR}"
+    --port "${GETH_P2P_PORT}"
+    --maxpeers "${GETH_MAX_PEERS}"
+    --ipcpath "${GETH_IPC_PATH}"
+    --authrpc.addr "${GETH_AUTHRPC_ADDR}"
+    --authrpc.port "${GETH_AUTHRPC_PORT}"
+    --authrpc.vhosts "${GETH_AUTHRPC_VHOSTS}"
+    --authrpc.jwtsecret "${JWT_SECRET_FILE}"
+    --http --http.addr "${GETH_HTTP_ADDR}" --http.port "${GETH_HTTP_PORT}"
+    --http.vhosts "${GETH_HTTP_VHOSTS}"
+    --http.api eth,net,web3,debug,ubt
+    --ubt.conversion-enabled
+    --ubt.decoupled
+    --ubt.outbox-db-path "${GETH_DATADIR}/ubt-outbox"
+    --ubt.outbox-retention-seq-window "${OUTBOX_RETENTION_SEQ_WINDOW}"
+    --ubt.reorg-marker-enabled
+    --ubt.outbox-read-rpc-enabled
+    --ubt.debug-rpc-proxy-enabled
+    --ubt.debug-endpoint "http://${UBT_HTTP_ADDR}:${UBT_HTTP_PORT}"
+    --ubt.debug-timeout 5s
+  )
+  if [[ -n "${GETH_HTTP_CORSDOMAIN}" ]]; then
+    cmd+=(--http.corsdomain "${GETH_HTTP_CORSDOMAIN}")
+  fi
+  spawn_process "${GETH_LOG_FILE}" "${cmd[@]}" >"${GETH_PID_FILE}"
 
   if ! wait_for_rpc "http://${GETH_HTTP_ADDR}:${GETH_HTTP_PORT}" "rpc_modules" 180; then
     fail "geth RPC did not become ready (log: ${GETH_LOG_FILE})"
@@ -467,9 +481,12 @@ show_status() {
     printf 'lighthouse running: no\n'
   fi
   printf 'geth rpc: http://%s:%s\n' "${GETH_HTTP_ADDR}" "${GETH_HTTP_PORT}"
+  printf 'geth http corsdomain: %s\n' "${GETH_HTTP_CORSDOMAIN:-<empty>}"
+  printf 'geth http vhosts: %s\n' "${GETH_HTTP_VHOSTS}"
   printf 'geth ipc: %s\n' "${GETH_IPC_PATH}"
   printf 'ubt outbox endpoint: %s\n' "${UBT_OUTBOX_RPC_ENDPOINT}"
   printf 'geth authrpc: http://%s:%s\n' "${GETH_AUTHRPC_ADDR}" "${GETH_AUTHRPC_PORT}"
+  printf 'geth authrpc vhosts: %s\n' "${GETH_AUTHRPC_VHOSTS}"
   printf 'lighthouse http: http://%s:%s\n' "${LIGHTHOUSE_HTTP_ADDR}" "${LIGHTHOUSE_HTTP_PORT}"
   printf 'ubt rpc:  http://%s:%s\n' "${UBT_HTTP_ADDR}" "${UBT_HTTP_PORT}"
   printf 'logs: %s , %s , %s\n' "${GETH_LOG_FILE}" "${LIGHTHOUSE_LOG_FILE}" "${UBT_LOG_FILE}"
@@ -619,6 +636,18 @@ parse_args() {
         ;;
       --lighthouse-bin)
         LIGHTHOUSE_BIN="$(require_opt_value "$1" "${2:-}")"
+        shift 2
+        ;;
+      --geth-http-corsdomain)
+        GETH_HTTP_CORSDOMAIN="$(require_opt_value "$1" "${2:-}")"
+        shift 2
+        ;;
+      --geth-http-vhosts)
+        GETH_HTTP_VHOSTS="$(require_opt_value "$1" "${2:-}")"
+        shift 2
+        ;;
+      --geth-authrpc-vhosts)
+        GETH_AUTHRPC_VHOSTS="$(require_opt_value "$1" "${2:-}")"
         shift 2
         ;;
       --checkpoint-sync-url)
