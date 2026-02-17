@@ -55,7 +55,7 @@ type Config struct {
 	PprofListenAddr          string // Listen address for pprof HTTP server
 	ChainID                  uint64 // Chain ID for EVM execution (default: 1 = mainnet)
 	RPCGasCap                uint64 // Gas cap for CallUBT RPC (default: 50_000_000, same as geth)
-	BackpressureLagThreshold uint64 // If outboxLag > threshold, commit is forced each loop (0 = disabled)
+	BackpressureLagThreshold uint64 // If outboxLag > threshold, use memory-protective commit caps (0 = disabled)
 
 	// Outbox disk budget (Chunk 2)
 	OutboxDiskBudgetBytes   uint64 // 0 = unlimited

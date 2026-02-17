@@ -274,6 +274,79 @@ func TestShouldCommit_BothThresholds(t *testing.T) {
 	}
 }
 
+func TestShouldCommit_BackpressureCaps(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name              string
+		interval          uint64
+		maxLatency        time.Duration
+		threshold         uint64
+		outboxLag         uint64
+		uncommittedBlocks uint64
+		elapsed           time.Duration
+		want              bool
+	}{
+		{
+			name:              "high lag caps block interval to 128",
+			interval:          1024,
+			maxLatency:        time.Minute,
+			threshold:         5000,
+			outboxLag:         6000,
+			uncommittedBlocks: 127,
+			elapsed:           time.Second,
+			want:              false,
+		},
+		{
+			name:              "high lag commits at capped block interval",
+			interval:          1024,
+			maxLatency:        time.Minute,
+			threshold:         5000,
+			outboxLag:         6000,
+			uncommittedBlocks: 128,
+			elapsed:           time.Second,
+			want:              true,
+		},
+		{
+			name:              "high lag caps max latency to 15s",
+			interval:          1024,
+			maxLatency:        3 * time.Minute,
+			threshold:         5000,
+			outboxLag:         10000,
+			uncommittedBlocks: 1,
+			elapsed:           20 * time.Second,
+			want:              true,
+		},
+		{
+			name:              "without high lag keeps configured interval",
+			interval:          1024,
+			maxLatency:        time.Minute,
+			threshold:         5000,
+			outboxLag:         4000,
+			uncommittedBlocks: 128,
+			elapsed:           time.Second,
+			want:              false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Consumer{
+				cfg: &Config{
+					ApplyCommitInterval:      tt.interval,
+					ApplyCommitMaxLatency:    tt.maxLatency,
+					BackpressureLagThreshold: tt.threshold,
+				},
+				outboxLag:         tt.outboxLag,
+				uncommittedBlocks: tt.uncommittedBlocks,
+				lastCommitTime:    now.Add(-tt.elapsed),
+			}
+			got := c.shouldCommit()
+			if got != tt.want {
+				t.Fatalf("shouldCommit()=%v want=%v", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestShouldCommit_ImmediateCommitScenarios tests scenarios where commit should happen immediately.
 func TestShouldCommit_ImmediateCommitScenarios(t *testing.T) {
 	tests := []struct {

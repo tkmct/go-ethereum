@@ -739,25 +739,21 @@ func (c *Consumer) executeReorgTransition(decision *consumeDecision) error {
 
 // shouldCommit checks if the commit policy dictates a commit.
 func (c *Consumer) shouldCommit() bool {
-	// Backpressure mode: favor throughput over freshness while lag is high by
-	// committing less frequently and in larger batches.
+	// Backpressure mode: cap commit interval/latency while lag is high to bound
+	// in-memory trie growth during catch-up.
 	if c.cfg.BackpressureLagThreshold > 0 && c.outboxLag > c.cfg.BackpressureLagThreshold {
-		commitInterval := c.cfg.ApplyCommitInterval * 8
-		if commitInterval < 1024 {
-			commitInterval = 1024
-		}
-		if commitInterval > 8192 {
-			commitInterval = 8192
+		commitInterval := c.cfg.ApplyCommitInterval
+		const commitIntervalCap = uint64(128)
+		if commitInterval > commitIntervalCap {
+			commitInterval = commitIntervalCap
 		}
 		if c.uncommittedBlocks >= commitInterval {
 			return true
 		}
-		maxLatency := c.cfg.ApplyCommitMaxLatency * 6
-		if maxLatency < 60*time.Second {
-			maxLatency = 60 * time.Second
-		}
-		if maxLatency > 3*time.Minute {
-			maxLatency = 3 * time.Minute
+		maxLatency := c.cfg.ApplyCommitMaxLatency
+		const maxLatencyCap = 15 * time.Second
+		if maxLatency > maxLatencyCap {
+			maxLatency = maxLatencyCap
 		}
 		if time.Since(c.lastCommitTime) >= maxLatency {
 			return true

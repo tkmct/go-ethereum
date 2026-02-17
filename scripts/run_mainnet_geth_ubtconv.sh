@@ -44,11 +44,11 @@ GETH_CACHE_TRIE_PERCENT="${GETH_CACHE_TRIE_PERCENT:-20}"
 GETH_CACHE_GC_PERCENT="${GETH_CACHE_GC_PERCENT:-15}"
 GETH_CACHE_SNAPSHOT_PERCENT="${GETH_CACHE_SNAPSHOT_PERCENT:-5}"
 
-APPLY_COMMIT_INTERVAL="${APPLY_COMMIT_INTERVAL:-1024}"
+APPLY_COMMIT_INTERVAL="${APPLY_COMMIT_INTERVAL:-128}"
 APPLY_COMMIT_MAX_LATENCY="${APPLY_COMMIT_MAX_LATENCY:-10s}"
 TRIEDB_STATE_HISTORY="${TRIEDB_STATE_HISTORY:-90000}"
 MAX_RECOVERABLE_REORG_DEPTH="${MAX_RECOVERABLE_REORG_DEPTH:-128}"
-OUTBOX_READ_AHEAD="${OUTBOX_READ_AHEAD:-256}"
+OUTBOX_READ_AHEAD="${OUTBOX_READ_AHEAD:-64}"
 BACKPRESSURE_LAG_THRESHOLD="${BACKPRESSURE_LAG_THRESHOLD:-5000}"
 VALIDATION_STRICT_CATCHUP_SAMPLE_RATE="${VALIDATION_STRICT_CATCHUP_SAMPLE_RATE:-0}"
 VALIDATION_STRICT="${VALIDATION_STRICT:-false}"
@@ -59,6 +59,9 @@ PENDING_STATE_PERSIST_INTERVAL="${PENDING_STATE_PERSIST_INTERVAL:-2s}"
 PPROF_ENABLED="${PPROF_ENABLED:-false}"
 PPROF_LISTEN_ADDR="${PPROF_LISTEN_ADDR:-127.0.0.1:6061}"
 MONITOR_PROGRESS_INTERVAL="${MONITOR_PROGRESS_INTERVAL:-30}"
+UBTCONV_GOMEMLIMIT="${UBTCONV_GOMEMLIMIT:-}"
+STOP_GRACE_SECONDS_DEFAULT="${STOP_GRACE_SECONDS_DEFAULT:-10}"
+STOP_GRACE_SECONDS_UBTCONV="${STOP_GRACE_SECONDS_UBTCONV:-120}"
 
 GETH_PID_FILE="${WORKDIR}/geth.pid"
 UBT_PID_FILE="${WORKDIR}/ubtconv.pid"
@@ -128,6 +131,9 @@ Environment overrides:
   SLOT_INDEX_ENABLED, PENDING_STATE_PERSIST_INTERVAL
   PPROF_ENABLED, PPROF_LISTEN_ADDR
   MONITOR_PROGRESS_INTERVAL
+  UBTCONV_GOMEMLIMIT
+  STOP_GRACE_SECONDS_DEFAULT
+  STOP_GRACE_SECONDS_UBTCONV
 
 Notes:
   - This script forces geth sync mode to full-sync: --syncmode full.
@@ -406,6 +412,9 @@ start_ubtconv() {
     --slot-index-enabled="${SLOT_INDEX_ENABLED}"
     --require-archive-replay=true
   )
+  if [[ -n "${UBTCONV_GOMEMLIMIT}" ]]; then
+    cmd=(env "GOMEMLIMIT=${UBTCONV_GOMEMLIMIT}" "${cmd[@]}")
+  fi
   if [[ "${PPROF_ENABLED}" == "true" ]]; then
     cmd+=(--pprof-enabled --pprof-listen-addr "${PPROF_LISTEN_ADDR}")
   fi
@@ -424,6 +433,7 @@ start_ubtconv() {
 stop_pid_file() {
   local name="$1"
   local pid_file="$2"
+  local grace_seconds="${3:-${STOP_GRACE_SECONDS_DEFAULT}}"
   if [[ ! -f "${pid_file}" ]]; then
     log "${name}: pid file not found"
     return
@@ -439,14 +449,16 @@ stop_pid_file() {
   if pid_running "${pid}"; then
     log "Stopping ${name} (pid=${pid})"
     kill "${pid}" 2>/dev/null || true
-    for _ in $(seq 1 20); do
+    local waited=0
+    while (( waited < grace_seconds * 2 )); do
       if ! pid_running "${pid}"; then
         break
       fi
       sleep 0.5
+      waited=$((waited + 1))
     done
     if pid_running "${pid}"; then
-      warn "${name} did not stop gracefully, sending SIGKILL"
+      warn "${name} did not stop within ${grace_seconds}s, sending SIGKILL"
       kill -9 "${pid}" 2>/dev/null || true
     fi
   else
@@ -598,9 +610,9 @@ monitor_loop() {
 
 cleanup_on_signal() {
   log "Signal received, stopping processes"
-  stop_pid_file "ubtconv" "${UBT_PID_FILE}"
-  stop_pid_file "lighthouse" "${LIGHTHOUSE_PID_FILE}"
-  stop_pid_file "geth" "${GETH_PID_FILE}"
+  stop_pid_file "ubtconv" "${UBT_PID_FILE}" "${STOP_GRACE_SECONDS_UBTCONV}"
+  stop_pid_file "lighthouse" "${LIGHTHOUSE_PID_FILE}" "${STOP_GRACE_SECONDS_DEFAULT}"
+  stop_pid_file "geth" "${GETH_PID_FILE}" "${STOP_GRACE_SECONDS_DEFAULT}"
   exit 0
 }
 
@@ -694,9 +706,9 @@ main() {
       exit 0
       ;;
     down)
-      stop_pid_file "ubtconv" "${UBT_PID_FILE}"
-      stop_pid_file "lighthouse" "${LIGHTHOUSE_PID_FILE}"
-      stop_pid_file "geth" "${GETH_PID_FILE}"
+      stop_pid_file "ubtconv" "${UBT_PID_FILE}" "${STOP_GRACE_SECONDS_UBTCONV}"
+      stop_pid_file "lighthouse" "${LIGHTHOUSE_PID_FILE}" "${STOP_GRACE_SECONDS_DEFAULT}"
+      stop_pid_file "geth" "${GETH_PID_FILE}" "${STOP_GRACE_SECONDS_DEFAULT}"
       show_status
       exit 0
       ;;
