@@ -31,7 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/trie/bintrie"
 )
 
-// TC-* test suite mapping for implementation_roadmap.md compliance.
+// TC-* test suite mapping for UBT conversion verification coverage.
 // This file provides organized test naming and new tests for gaps 1-10.
 
 // ===== Gap 1: Snapshot Restore + Slow-Path Recovery =====

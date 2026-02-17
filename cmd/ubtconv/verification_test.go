@@ -17,7 +17,7 @@
 package main
 
 // Verification Gate B: Focused integration tests covering the integration test matrix.
-// Scenarios are from verification_process.md Section 2 "Integration Test Matrix".
+// Scenarios are from docs/ubt/ubtconv_test_matrix.md.
 //
 // Matrix dimensions:
 //   - Full-sync startup and resume behavior
