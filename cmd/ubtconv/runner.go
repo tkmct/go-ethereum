@@ -23,11 +23,16 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"os"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/ubtemit"
 	"github.com/ethereum/go-ethereum/log"
 )
 
@@ -324,6 +329,7 @@ func (r *Runner) compactionLoop() {
 		case <-r.stopCh:
 			return
 		case <-ticker.C:
+			r.logProcessingSnapshot()
 			r.tryCompaction(&lastCompactedBelow)
 			r.pruneStaleBlockRoots()
 
@@ -338,6 +344,106 @@ func (r *Runner) compactionLoop() {
 			r.consumer.mu.Unlock()
 		}
 	}
+}
+
+func (r *Runner) logProcessingSnapshot() {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	r.consumer.mu.Lock()
+	appliedSeq := r.consumer.state.AppliedSeq
+	appliedBlock := r.consumer.state.AppliedBlock
+	processedSeq := r.consumer.processedSeq
+	outboxLag := r.consumer.outboxLag
+	uncommittedBlocks := r.consumer.uncommittedBlocks
+	readAheadQueueLen := len(r.consumer.readAheadQueue)
+	var readAheadPayloadBytes uint64
+	for _, env := range r.consumer.readAheadQueue {
+		if env != nil {
+			readAheadPayloadBytes += uint64(len(env.Payload))
+		}
+	}
+	pendingBlockRoots := len(r.consumer.pendingBlockRoots)
+	pendingStrictValidations := len(r.consumer.pendingStrictValidations)
+	lastDiffAccounts := 0
+	lastDiffStorage := 0
+	lastDiffCodes := 0
+	var lastDiffCodeBytes uint64
+	var lastDiffEstimatedBytes uint64
+	if r.consumer.lastDiff != nil {
+		lastDiffAccounts = len(r.consumer.lastDiff.Accounts)
+		lastDiffStorage = len(r.consumer.lastDiff.Storage)
+		lastDiffCodes = len(r.consumer.lastDiff.Codes)
+		for _, code := range r.consumer.lastDiff.Codes {
+			lastDiffCodeBytes += uint64(len(code.Code))
+		}
+		lastDiffEstimatedBytes = estimateDiffMemory(r.consumer.lastDiff)
+	}
+	r.consumer.mu.Unlock()
+
+	logCtx := []any{
+		"appliedSeq", appliedSeq,
+		"appliedBlock", appliedBlock,
+		"processedSeq", processedSeq,
+		"outboxLag", outboxLag,
+		"uncommittedBlocks", uncommittedBlocks,
+		"readAheadQueueLen", readAheadQueueLen,
+		"readAheadPayloadBytes", readAheadPayloadBytes,
+		"pendingBlockRoots", pendingBlockRoots,
+		"pendingStrictValidations", pendingStrictValidations,
+		"lastDiffAccounts", lastDiffAccounts,
+		"lastDiffStorage", lastDiffStorage,
+		"lastDiffCodes", lastDiffCodes,
+		"lastDiffCodeBytes", lastDiffCodeBytes,
+		"lastDiffEstimatedBytes", lastDiffEstimatedBytes,
+		"goHeapAllocMB", bytesToMiB(m.HeapAlloc),
+		"goHeapInuseMB", bytesToMiB(m.HeapInuse),
+		"goStackInuseMB", bytesToMiB(m.StackInuse),
+		"goSysMB", bytesToMiB(m.Sys),
+		"goNumGC", m.NumGC,
+	}
+	if rssBytes, ok := readSelfRSSBytes(); ok {
+		logCtx = append(logCtx, "rssMB", bytesToMiB(rssBytes), "rssBytes", rssBytes)
+	}
+	log.Info("UBT processing snapshot", logCtx...)
+}
+
+func estimateDiffMemory(diff *ubtemit.QueuedDiffV1) uint64 {
+	if diff == nil {
+		return 0
+	}
+	// Rough in-memory estimate for sizing decisions (not exact runtime object size).
+	estimated := uint64(len(diff.Accounts))*128 + uint64(len(diff.Storage))*96 + uint64(len(diff.Codes))*64
+	for _, code := range diff.Codes {
+		estimated += uint64(len(code.Code))
+	}
+	return estimated
+}
+
+func readSelfRSSBytes() (uint64, bool) {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return 0, false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "VmRSS:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0, false
+		}
+		kib, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		return kib * 1024, true
+	}
+	return 0, false
+}
+
+func bytesToMiB(b uint64) uint64 {
+	return b / (1024 * 1024)
 }
 
 // tryCompaction attempts to compact outbox events below a safe threshold.
