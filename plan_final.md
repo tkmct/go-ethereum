@@ -1,5 +1,8 @@
 # MPT -> UBT Conversion Final Plan (Hardened v3)
 
+> Implementation simplification note (2026-02):
+> Current code is full-sync-first only. `ubtconv` bootstrap modes (`tail` / `backfill-direct`) and snap-oriented catch-up flow are removed from runtime behavior.
+
 ## 1. Objective
 Implement a production-grade MPT-to-UBT conversion system that:
 1. Processes from genesis, block-by-block.
@@ -246,12 +249,9 @@ Correctness requirements:
 ## 15. Bootstrap and Genesis Strategy
 1. Daemon never writes outbox events.
 2. Daemon never opens outbox DB files directly.
-3. Modes:
-   1. `tail`: consume outbox via RPC from `appliedSeq + 1`.
-   2. `backfill-direct`: replay canonical blocks directly into UBT/checkpoints when historical outbox range is absent.
-4. Genesis:
-   1. Fresh startup may begin in `backfill-direct` from block 0, then cut over to `tail`.
-   2. Initialized DB resumes in `tail`.
+3. Full-sync-only flow:
+   1. Fresh startup consumes outbox from `seq=0` and builds UBT incrementally.
+   2. Initialized DB resumes from `appliedSeq + 1`.
 
 ## 16. Config and Flags
 ### 16.1 Geth config
@@ -276,15 +276,14 @@ Correctness requirements:
 4. `ValidationSampleRate float64`.
 5. `LegacySlotIndexMode string` (`auto|on|off`).
 6. `MaxRecoverableReorgDepth uint64`.
-7. `BootstrapMode string` (`tail|backfill-direct`).
-8. `AnchorSnapshotInterval uint64`.
-9. `AnchorSnapshotRetention uint64`.
-10. `RequireArchiveReplay bool` (default true).
-11. `OutboxDiskBudgetBytes uint64`.
-12. `OutboxAlertThresholdPct uint64`.
-13. `OutboxRPCEndpoint string`.
-14. `UBTQueryRPCEnabled bool` (default true).
-15. `UBTQueryRPCListenAddr string`.
+7. `AnchorSnapshotInterval uint64`.
+8. `AnchorSnapshotRetention uint64`.
+9. `RequireArchiveReplay bool` (default true).
+10. `OutboxDiskBudgetBytes uint64`.
+11. `OutboxAlertThresholdPct uint64`.
+12. `OutboxRPCEndpoint string`.
+13. `UBTQueryRPCEnabled bool` (default true).
+14. `UBTQueryRPCListenAddr string`.
 16. `UBTQueryRPCMaxBatch uint64`.
 17. `UBTTrieDBScheme string` (`path`) (default `path` for historical query support).
 18. `UBTTrieDBStateHistory uint64` (default `90000` blocks).
@@ -385,7 +384,7 @@ Operational SLO baselines:
 4. Phase 4: snapshots + slow-path fallback + migration workflow, deep recovery tests passing.
 5. Phase 5: strict/deep validation + observability + perf tuning, stress/perf suites passing, and `BinaryTrie.Prove()` implementation completed.
 6. Phase 6: witness/proof integration and proof-readiness validation.
-7. Phase 7 (future work): UBT-backed execution adapter and execution-class RPCs (`debug_callUBT`, `debug_executionWitnessUBT`).
+7. Phase 7 (delivered): UBT-backed execution adapter and execution-class RPCs (`debug_callUBT`, `debug_executionWitnessUBT`) with explicit feature gate.
 
 ## 22. Acceptance Criteria
 1. Canonical block import remains unaffected by converter lag/failure.
@@ -403,7 +402,7 @@ Operational SLO baselines:
 13. UBT debug RPC proxy endpoints return schema-compatible results for `getStorageAt`, `getBalance`, and `getCode`.
 14. `debug_getUBTProof` returns a documented UBT-native proof schema and passes verifier conformance tests.
 15. Block selector resolution rules for UBT debug RPCs are deterministic and tested (`latest` by daemon applied head, unsupported tags return explicit errors).
-16. `debug_callUBT` and `debug_executionWitnessUBT` are explicitly tracked as Phase 7 scope and are not required for Phase 1-6 completion.
+16. `debug_callUBT` and `debug_executionWitnessUBT` are Phase 7 scope and are delivered behind `--execution-class-rpc-enabled` (default disabled).
 17. Historical UBT debug RPC queries are bounded by daemon `UBTTrieDBStateHistory`, and out-of-window queries return explicit `state not available`.
 
 ## 23. Testing Strategy and Coverage Requirements
@@ -437,7 +436,7 @@ Mandatory test scenarios:
    2. `debug_getUBTBalance` response compatibility with `eth_getBalance`.
    3. `debug_getUBTCode` response compatibility with `eth_getCode`.
    4. `debug_getUBTProof` UBT-native schema and verifier compatibility tests.
-   5. `debug_callUBT` and `debug_executionWitnessUBT` gating tests (disabled/unavailable before Phase 7 readiness).
+   5. `debug_callUBT` and `debug_executionWitnessUBT` gating tests (default disabled, enabled with explicit flag).
    6. state-history window tests for within-window success and out-of-window explicit errors.
 
 Coverage targets:
@@ -449,6 +448,7 @@ Verification gates:
 1. Each PR must include implemented test cases and pass evidence.
 2. CI merge gate requires all mandatory suites passing.
 3. Final rollout gate requires full matrix rerun with reproducible results.
+4. If package-level coverage targets are not met, rollout requires an explicit exception record with rationale and compensating controls in `docs/testing/ubtconv_test_matrix.md`.
 
 ## 24. Import Cycle Safety
 1. `core/ubtemit -> core/state` direct type coupling is prohibited.
@@ -461,7 +461,7 @@ Verification gates:
 Goal:
 1. Add UBT-backed debug RPC endpoints that mirror existing MPT RPC signatures as closely as possible.
 2. Keep geth as RPC ingress only; data is returned through proxy calls to `ubtconv` query API.
-3. Separate read-class RPCs (current scope) from execution-class RPCs (future scope).
+3. Separate read-class RPCs and execution-class RPCs, with execution-class controlled by explicit feature flag.
 
 Transport and ownership:
 1. Geth debug RPC handlers do not open UBT DB directly.
@@ -479,9 +479,9 @@ Planned RPC methods (debug namespace):
    1. Input signature mirrors `eth_getProof` as far as possible.
    2. Output is UBT-native (not `AccountResult` compatible), because MPT and UBT proof encodings and storage-root model differ.
    3. Enabled after `BinaryTrie.Prove()` prerequisite is complete.
-5. `debug_executionWitnessUBT(blockNumberOrHash) -> ExtWitness-compatible object` (Phase 7)
+5. `debug_executionWitnessUBT(blockNumberOrHash) -> ExtWitness-compatible object` (Phase 7 delivered; flag-gated)
    1. Requires UBT-backed execution adapter and EVM re-execution on UBT state.
-6. `debug_callUBT(callObject, blockNumberOrHash, stateOverrides?, blockOverrides?) -> DATA` (Phase 7)
+6. `debug_callUBT(callObject, blockNumberOrHash, stateOverrides?, blockOverrides?) -> DATA` (Phase 7 delivered; flag-gated)
    1. Input/return shape mirrors `eth_call`.
    2. Requires UBT-backed execution adapter.
 
@@ -515,12 +515,12 @@ Delivery staging:
 2. Stage B:
    1. `debug_getUBTProof` after `BinaryTrie.Prove()` implementation.
 3. Stage C:
-   1. `debug_callUBT`, `debug_executionWitnessUBT` after UBT execution adapter validation (Phase 7).
+   1. `debug_callUBT`, `debug_executionWitnessUBT` after UBT execution adapter validation (Phase 7, feature flag required).
 
 Phase dependency mapping:
 1. Stage A starts after Phase 2 (daemon apply baseline available).
 2. Stage B starts after Phase 5 (`BinaryTrie.Prove()` complete).
-3. Stage C starts after Phase 6 and is delivered in Phase 7.
+3. Stage C starts after Phase 6 and is delivered in Phase 7 (flag default disabled).
 
 Test requirements for this section:
 1. Golden tests comparing UBT debug RPC outputs against MPT outputs on the same canonical blocks.
@@ -530,7 +530,7 @@ Test requirements for this section:
    3. partial batch failure.
 3. Prerequisite gating tests:
    1. `debug_getUBTProof` unavailable before prove implementation.
-   2. `debug_callUBT` and `debug_executionWitnessUBT` unavailable before execution adapter readiness.
+   2. `debug_callUBT` and `debug_executionWitnessUBT` return explicit disabled errors unless execution-class feature flag is enabled.
 4. Selector-resolution tests:
    1. `latest` maps to daemon-applied head.
    2. unsupported tags return expected errors.

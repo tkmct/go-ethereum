@@ -56,7 +56,7 @@
 | `TC-PROOF-*` | Witness/proof integration and root consistency | PR11 | Proof integration suites | Covered |
 | `TC-RPC-READ-*` | Stage A debug RPC compatibility, selector semantics, and history-window behavior | PR12 | Debug RPC Stage A suite | Covered |
 | `TC-RPC-PROOF-*` | Stage B UBT proof schema and verifier conformance | PR13 | Debug RPC Stage B suite | Covered |
-| `TC-RPC-EXEC-*` | Stage C execution-class RPC correctness and gating | PR14 | Debug RPC Stage C suite | Covered (Phase 7) |
+| `TC-RPC-EXEC-*` | Stage C execution-class RPC correctness and gating | PR14 | Debug RPC Stage C suite | Covered (Phase 7 delivered; flag-gated) |
 
 ## Test Case Pass Verification Rules
 1. Each PR must implement its mapped test cases before PR completion.
@@ -64,7 +64,8 @@
 3. Merge is blocked if any mandatory mapped suite fails.
 4. Coverage gates (80% touched, 90% critical new logic) are mandatory.
 5. Final rollout is blocked until full mandatory matrix rerun passes reproducibly.
-6. Phase 7 rollout additionally requires `TC-RPC-EXEC-*` pass evidence.
+6. Phase 7 rollout evidence is recorded in `docs/testing/ubtconv_test_matrix.md`.
+7. Coverage shortfall is allowed only with explicit exception record + compensating controls in `docs/testing/ubtconv_test_matrix.md`.
 
 ## Conflict Check
 1. No roadmap PR assigns outbox writes to daemon.
@@ -78,8 +79,9 @@
 9. Historical UBT debug queries are consistently bounded by daemon trie-history retention with explicit pruned-history errors.
 
 ## Gaps Found
-1. No blocking gap found.
-2. Optional enhancement: add `docs/testing/ubtconv_test_matrix.md` as machine-generated CI pass ledger.
+1. No blocking architecture or test-ownership gap found.
+2. Test pass ledger is maintained in `docs/testing/ubtconv_test_matrix.md`.
+3. Coverage shortfall handling is explicitly documented with compensating controls in `docs/testing/ubtconv_test_matrix.md`.
 
 ## Validation Result
 Roadmap coverage is complete for `plan_final.md` Sections 1-25, and all critical architecture, staged UBT debug RPC delivery, and testing obligations are represented with explicit implementation and verification ownership.

@@ -8,7 +8,7 @@ This roadmap executes `plan_final.md` with strict boundaries and test gates:
 4. Archive replay is required for deep recovery.
 5. Every PR must implement and verify its mapped tests.
 6. Daemon consumes outbox via geth RPC transport (no direct outbox DB open).
-7. UBT debug RPC delivery is staged: read-class (Stage A), proof (Stage B), execution-class (Stage C, Phase 7).
+7. UBT debug RPC delivery is staged: read-class (Stage A), proof (Stage B), execution-class (Stage C, Phase 7; delivered with feature flag).
 
 ## Delivery Model
 1. Keep PRs reviewable and independently testable.
@@ -41,7 +41,8 @@ This roadmap executes `plan_final.md` with strict boundaries and test gates:
 3. Pass gates:
    1. No PR merges with failing mandatory suites.
    2. Phase 1-6 rollout requires full mandatory matrix pass excluding `TC-RPC-EXEC-*`.
-   3. Phase 7 rollout requires `TC-RPC-EXEC-*` pass evidence in addition to prior suites.
+   3. Phase 7 rollout requires `TC-RPC-EXEC-*` pass evidence in addition to prior suites (completed).
+   4. If coverage percentages are below gate targets, record explicit exception + compensating controls in `docs/testing/ubtconv_test_matrix.md` before rollout.
 
 ## PR0: Contract and Interface Freeze
 Goal:
@@ -101,7 +102,7 @@ Changes:
 5. Add geth CLI/config wiring:
    1. `--ubt.conversion-enabled`, `--ubt.decoupled`.
    2. `--ubt.outbox-db-path`, `--ubt.outbox-write-timeout`.
-   3. `--ubt.reorg-marker-enabled`, `--ubt.replay-rpc-enabled`, `--ubt.replay-rpc-endpoint`.
+   3. `--ubt.reorg-marker-enabled`.
 
 Test implementation tasks:
 1. `TC-EMIT-001..006`: commit-to-outbox path and sequence correctness.
@@ -275,10 +276,9 @@ Goal:
 
 Changes:
 1. Implement deletion helper semantics.
-2. Implement `LegacySlotIndexMode` with Cancun boundary behavior.
+2. Implement fixed slot-index behavior with Cancun boundary freeze.
 3. Add index sizing counters and budget guards.
-4. Add daemon CLI/config wiring:
-   1. `--ubt.legacy-slot-index-mode`.
+4. Add daemon CLI/config wiring for `--cancun-block` boundary control.
 
 Test implementation tasks:
 1. `TC-DEL-001..008`: deletion behavior across fork regimes.
@@ -419,7 +419,7 @@ Goal:
 Changes:
 1. Implement UBT-backed execution adapter for EVM read/execution paths.
 2. Add Phase 7 debug handlers for execution-class methods with compatibility-focused signatures.
-3. Add feature gating so execution-class RPCs stay disabled before adapter readiness.
+3. Add feature gating so execution-class RPCs are default-disabled and enabled only with explicit operator flag.
 4. Define operational SLOs and resource limits for execution-class proxy workloads.
 
 Test implementation tasks:
@@ -432,7 +432,7 @@ Verification:
 2. Verify all `TC-RPC-EXEC-*` pass.
 
 Exit criteria:
-1. Phase 7 execution-class UBT debug RPCs are validated.
+1. Phase 7 execution-class UBT debug RPCs are validated and available behind `--execution-class-rpc-enabled`.
 2. This PR is not required for Phase 1-6 completion.
 
 ## PR Sequence and Dependency Graph
@@ -460,13 +460,13 @@ Exit criteria:
 6. Phase 6: PR11.
 7. RPC Stage A (post-Phase 2): PR12.
 8. RPC Stage B (post-Phase 5): PR13.
-9. Phase 7 / RPC Stage C: PR14.
+9. Phase 7 / RPC Stage C: PR14 (delivered).
 
 ## CLI Flag Attribution by PR
 1. PR2:
    1. `--ubt.conversion-enabled`, `--ubt.decoupled`.
    2. `--ubt.outbox-db-path`, `--ubt.outbox-write-timeout`.
-   3. `--ubt.reorg-marker-enabled`, `--ubt.replay-rpc-enabled`, `--ubt.replay-rpc-endpoint`.
+   3. `--ubt.reorg-marker-enabled`.
 2. PR3:
    1. `--ubt.outbox-read-rpc-enabled`.
    2. `--ubt.outbox-rpc-endpoint`, `--ubt.require-archive-replay`.
@@ -483,12 +483,14 @@ Exit criteria:
 7. PR8:
    1. `--ubt.anchor-snapshot-interval`, `--ubt.anchor-snapshot-retention`.
 8. PR9:
-   1. `--ubt.legacy-slot-index-mode`.
+   1. `--cancun-block`.
 9. PR10b:
    1. `--ubt.validation-enabled`, `--ubt.validation-sample-rate`.
 10. PR12:
    1. `--ubt.debug-rpc-proxy-enabled`, `--ubt.debug-rpc-endpoint`, `--ubt.debug-rpc-timeout`.
    2. `--ubt.query-rpc-enabled`, `--ubt.query-rpc-listen-addr`, `--ubt.query-rpc-max-batch`.
+11. PR14:
+   1. `--execution-class-rpc-enabled`.
 
 ## Go/No-Go Checkpoints
 1. After PR2: Phase 1 gate, emitter correctness and non-blocking guarantees (`TC-EMIT-*` pass).
