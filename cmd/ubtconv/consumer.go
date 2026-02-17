@@ -243,13 +243,17 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 		c.applier = applier
 
 		if restoreErr := c.restoreFromAnchor(c.state.AppliedBlock); restoreErr != nil {
-			applier.Close()
-			db.Close()
-			daemonRecoveryFailures.Inc(1)
-			return nil, fmt.Errorf("startup recovery failed: anchor restore: %w (original error: %v)", restoreErr, originalErr)
+			log.Warn("Anchor restore failed during startup, falling back to genesis",
+				"targetBlock", c.state.AppliedBlock, "err", restoreErr)
+			if genesisErr := c.restoreToGenesis(c.state.AppliedBlock, fmt.Sprintf("startup anchor restore failed: %v", restoreErr)); genesisErr != nil {
+				applier.Close()
+				db.Close()
+				daemonRecoveryFailures.Inc(1)
+				return nil, fmt.Errorf("startup recovery failed: anchor restore err=%v; genesis fallback err=%w (original error: %v)", restoreErr, genesisErr, originalErr)
+			}
 		}
 		daemonRecoverySuccesses.Inc(1)
-		log.Info("Startup recovery via anchor restore succeeded")
+		log.Info("Startup recovery succeeded")
 		return c, nil
 	} else if err != nil {
 		db.Close()
@@ -1104,6 +1108,35 @@ func (c *Consumer) handleReorg(marker *ubtemit.ReorgMarkerV1) error {
 	return nil
 }
 
+func (c *Consumer) restoreToGenesis(targetBlock uint64, reason string) error {
+	log.Warn("Falling back to genesis state for recovery", "targetBlock", targetBlock, "reason", reason)
+	if err := c.applier.Revert(common.Hash{}); err != nil {
+		return fmt.Errorf("revert to genesis root: %w", err)
+	}
+	c.state.AppliedSeq = 0
+	c.state.AppliedRoot = common.Hash{}
+	c.state.AppliedBlock = 0
+	c.processedSeq = ^uint64(0) // will wrap to 0 on next consume
+	c.pendingRoot = common.Hash{}
+	c.pendingBlock = 0
+	c.pendingBlockHash = common.Hash{}
+	c.pendingParentHash = common.Hash{}
+	c.uncommittedBlocks = 0
+	c.pendingBlockRoots = c.pendingBlockRoots[:0]
+	if c.pendingStrictValidations != nil {
+		for block := range c.pendingStrictValidations {
+			delete(c.pendingStrictValidations, block)
+		}
+	}
+	c.clearPendingMetadata()
+	// Mark as fresh start to enable outbox-floor bootstrap when early events are compacted.
+	c.hasState = false
+	c.persistState()
+	daemonSnapshotRestoreTotal.Inc(1)
+	log.Info("Restored to genesis state for recovery")
+	return nil
+}
+
 // restoreFromAnchor finds the best anchor at or below targetBlock and restores from it.
 func (c *Consumer) restoreFromAnchor(targetBlock uint64) error {
 	start := time.Now()
@@ -1112,63 +1145,56 @@ func (c *Consumer) restoreFromAnchor(targetBlock uint64) error {
 		return fmt.Errorf("no anchor snapshots available for recovery")
 	}
 
-	// Iterate anchors from latest to oldest to find best match
-	var bestAnchor *rawdb.UBTAnchorSnapshot
+	// Iterate anchors from latest to oldest and restore the first readable anchor.
+	candidates := 0
 	for i := int64(count) - 1; i >= 0; i-- {
 		snap := rawdb.ReadUBTAnchorSnapshot(c.db, uint64(i))
 		if snap == nil {
 			continue
 		}
-		if snap.BlockNumber <= targetBlock {
-			bestAnchor = snap
-			break
+		if snap.BlockNumber > targetBlock {
+			continue
 		}
-	}
+		candidates++
+		// Revert to the candidate anchor root.
+		if err := c.applier.Revert(snap.BlockRoot); err != nil {
+			log.Warn("Anchor revert failed, trying older anchor",
+				"anchorBlock", snap.BlockNumber,
+				"anchorRoot", snap.BlockRoot,
+				"targetBlock", targetBlock,
+				"err", err)
+			continue
+		}
 
-	if bestAnchor == nil {
-		// §11 R14: Genesis fallback — no anchor found, start from block 0 (empty state)
-		log.Warn("No anchor snapshot found, falling back to genesis (block 0)", "targetBlock", targetBlock)
-		if err := c.applier.Revert(common.Hash{}); err != nil {
-			return fmt.Errorf("revert to genesis root: %w", err)
-		}
-		c.state.AppliedSeq = 0
-		c.state.AppliedRoot = common.Hash{}
-		c.state.AppliedBlock = 0
-		c.processedSeq = ^uint64(0) // will wrap to 0 on next consume
-		c.pendingRoot = common.Hash{}
-		c.pendingBlock = 0
+		// Update consumer state.
+		c.state.AppliedSeq = snap.Seq
+		c.state.AppliedRoot = snap.BlockRoot
+		c.state.AppliedBlock = snap.BlockNumber
+		c.processedSeq = snap.Seq
+		c.pendingRoot = snap.BlockRoot
+		c.pendingBlock = snap.BlockNumber
+		c.pendingBlockHash = rawdb.ReadUBTCanonicalBlockHash(c.db, snap.BlockNumber)
+		c.pendingParentHash = rawdb.ReadUBTCanonicalParentHash(c.db, snap.BlockNumber)
 		c.uncommittedBlocks = 0
-		c.pendingBlockRoots = c.pendingBlockRoots[:0]
+		c.hasState = true
 		c.persistState()
+
 		daemonSnapshotRestoreTotal.Inc(1)
-		log.Info("Restored to genesis state for recovery")
+		daemonSnapshotRestoreLatency.UpdateSince(start)
+
+		log.Info("Restored from anchor snapshot",
+			"anchorBlock", snap.BlockNumber,
+			"anchorRoot", snap.BlockRoot,
+			"anchorSeq", snap.Seq,
+			"targetBlock", targetBlock)
 		return nil
 	}
 
-	// Revert to the anchor root
-	if err := c.applier.Revert(bestAnchor.BlockRoot); err != nil {
-		return fmt.Errorf("revert to anchor root %s at block %d: %w", bestAnchor.BlockRoot, bestAnchor.BlockNumber, err)
+	// No usable anchor was found.
+	if candidates == 0 {
+		return fmt.Errorf("no anchor snapshot found at or below target block %d", targetBlock)
 	}
-
-	// Update consumer state
-	c.state.AppliedSeq = bestAnchor.Seq
-	c.state.AppliedRoot = bestAnchor.BlockRoot
-	c.state.AppliedBlock = bestAnchor.BlockNumber
-	c.processedSeq = bestAnchor.Seq
-	c.pendingRoot = bestAnchor.BlockRoot
-	c.pendingBlock = bestAnchor.BlockNumber
-	c.uncommittedBlocks = 0
-	c.persistState()
-
-	daemonSnapshotRestoreTotal.Inc(1)
-	daemonSnapshotRestoreLatency.UpdateSince(start)
-
-	log.Info("Restored from anchor snapshot",
-		"anchorBlock", bestAnchor.BlockNumber,
-		"anchorRoot", bestAnchor.BlockRoot,
-		"anchorSeq", bestAnchor.Seq,
-		"targetBlock", targetBlock)
-	return nil
+	return fmt.Errorf("all candidate anchors failed to open for target block %d", targetBlock)
 }
 
 // persistState writes the consumer state to the database.
