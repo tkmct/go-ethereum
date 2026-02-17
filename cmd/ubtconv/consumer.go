@@ -19,6 +19,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -236,9 +237,22 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 
 		applier, err = newApplierWithRetry(cfg, common.Hash{}, 30, 500*time.Millisecond)
 		if err != nil {
-			db.Close()
-			daemonRecoveryFailures.Inc(1)
-			return nil, fmt.Errorf("failed to create applier for recovery: %w (original: %v)", err, originalErr)
+			log.Warn("Recovery open on existing trie DB failed, rotating trie DB and retrying clean open", "err", err)
+			rotatedPath, rotateErr := rotateCorruptTrieDB(cfg)
+			if rotateErr != nil {
+				db.Close()
+				daemonRecoveryFailures.Inc(1)
+				return nil, fmt.Errorf("failed to create applier for recovery: %w; trie DB rotate failed: %v (original: %v)", err, rotateErr, originalErr)
+			}
+			if rotatedPath != "" {
+				log.Warn("Rotated corrupted trie DB", "to", rotatedPath)
+			}
+			applier, err = newApplierWithRetry(cfg, common.Hash{}, 12, 300*time.Millisecond)
+			if err != nil {
+				db.Close()
+				daemonRecoveryFailures.Inc(1)
+				return nil, fmt.Errorf("failed to create fresh applier after trie DB rotation: %w (original: %v)", err, originalErr)
+			}
 		}
 		c.applier = applier
 
@@ -246,10 +260,31 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 			log.Warn("Anchor restore failed during startup, falling back to genesis",
 				"targetBlock", c.state.AppliedBlock, "err", restoreErr)
 			if genesisErr := c.restoreToGenesis(c.state.AppliedBlock, fmt.Sprintf("startup anchor restore failed: %v", restoreErr)); genesisErr != nil {
+				log.Warn("Genesis fallback on existing trie DB failed, rotating trie DB and retrying",
+					"targetBlock", c.state.AppliedBlock, "err", genesisErr)
 				applier.Close()
-				db.Close()
-				daemonRecoveryFailures.Inc(1)
-				return nil, fmt.Errorf("startup recovery failed: anchor restore err=%v; genesis fallback err=%w (original error: %v)", restoreErr, genesisErr, originalErr)
+				rotatedPath, rotateErr := rotateCorruptTrieDB(cfg)
+				if rotateErr != nil {
+					db.Close()
+					daemonRecoveryFailures.Inc(1)
+					return nil, fmt.Errorf("startup recovery failed: anchor restore err=%v; genesis fallback err=%v; trie DB rotate failed: %w (original error: %v)", restoreErr, genesisErr, rotateErr, originalErr)
+				}
+				if rotatedPath != "" {
+					log.Warn("Rotated corrupted trie DB", "to", rotatedPath)
+				}
+				applier, err = newApplierWithRetry(cfg, common.Hash{}, 12, 300*time.Millisecond)
+				if err != nil {
+					db.Close()
+					daemonRecoveryFailures.Inc(1)
+					return nil, fmt.Errorf("startup recovery failed: anchor restore err=%v; fresh applier open err=%w (original error: %v)", restoreErr, err, originalErr)
+				}
+				c.applier = applier
+				if retryGenesisErr := c.restoreToGenesis(c.state.AppliedBlock, fmt.Sprintf("startup recovery retry after trie DB rotation; anchor restore failed: %v", restoreErr)); retryGenesisErr != nil {
+					applier.Close()
+					db.Close()
+					daemonRecoveryFailures.Inc(1)
+					return nil, fmt.Errorf("startup recovery failed after trie DB rotation: %w (original error: %v)", retryGenesisErr, originalErr)
+				}
 			}
 		}
 		daemonRecoverySuccesses.Inc(1)
@@ -318,6 +353,24 @@ func isRetryableApplierOpenError(err error) bool {
 	return strings.Contains(msg, "resource temporarily unavailable") ||
 		strings.Contains(msg, "lock") ||
 		strings.Contains(msg, "temporarily unavailable")
+}
+
+func rotateCorruptTrieDB(cfg *Config) (string, error) {
+	dbPath := filepath.Join(cfg.DataDir, "triedb")
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	backupPath := fmt.Sprintf("%s.corrupt.%s", dbPath, time.Now().UTC().Format("20060102-150405"))
+	if err := os.Rename(dbPath, backupPath); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dbPath, 0o755); err != nil {
+		return "", err
+	}
+	return backupPath, nil
 }
 
 // loadState reads the persisted consumer checkpoint.
