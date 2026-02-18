@@ -444,6 +444,7 @@ func (c *Consumer) restoreFromMaterializedAnchor(targetBlock uint64) error {
 		c.state.AppliedBlock = manifest.BlockNumber
 		c.processedSeq = manifest.Seq
 		c.pendingRoot = manifest.BlockRoot
+		c.pendingRootKnown = true
 		c.pendingBlock = manifest.BlockNumber
 		c.pendingBlockHash = rawdb.ReadUBTCanonicalBlockHash(c.db, manifest.BlockNumber)
 		c.pendingParentHash = rawdb.ReadUBTCanonicalParentHash(c.db, manifest.BlockNumber)

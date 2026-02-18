@@ -133,6 +133,7 @@ type Consumer struct {
 	// In-memory tracking (not persisted until commit)
 	processedSeq      uint64      // Last event applied to trie (not necessarily committed)
 	pendingRoot       common.Hash // Root after latest in-memory apply (not committed)
+	pendingRootKnown  bool        // True when pendingRoot is known for current pendingBlock
 	pendingBlock      uint64      // Block number after latest in-memory apply
 	pendingBlockHash  common.Hash // Canonical hash for pendingBlock
 	pendingParentHash common.Hash // Canonical parent hash for pendingBlock
@@ -169,10 +170,10 @@ type Consumer struct {
 	validationWG             sync.WaitGroup
 
 	// Recovery anchor observability/state.
-	recoveryMode             string
-	latestRecoveryAnchorSeq  uint64
+	recoveryMode              string
+	latestRecoveryAnchorSeq   uint64
 	latestRecoveryAnchorBlock uint64
-	hasRecoveryAnchor        bool
+	hasRecoveryAnchor         bool
 }
 
 // NewConsumer creates a new outbox consumer.
@@ -264,58 +265,58 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 		}
 		c.applier = applier
 
-			if restoreErr := c.restoreFromAnchor(c.state.AppliedBlock); restoreErr != nil {
-				log.Warn("Anchor restore failed during startup, attempting materialized recovery anchor restore",
+		if restoreErr := c.restoreFromAnchor(c.state.AppliedBlock); restoreErr != nil {
+			log.Warn("Anchor restore failed during startup, attempting materialized recovery anchor restore",
+				"targetBlock", c.state.AppliedBlock, "err", restoreErr)
+
+			anchorRestoreErr := c.restoreFromMaterializedAnchor(c.state.AppliedBlock)
+			if anchorRestoreErr != nil {
+				log.Warn("Materialized recovery anchor restore failed during startup",
+					"targetBlock", c.state.AppliedBlock, "err", anchorRestoreErr)
+
+				if c.cfg.RecoveryStrict && !c.cfg.RecoveryAllowGenesisFallback {
+					if c.applier != nil {
+						c.applier.Close()
+					}
+					db.Close()
+					daemonRecoveryFailures.Inc(1)
+					return nil, fmt.Errorf("startup recovery failed: anchor restore err=%v; materialized anchor restore err=%v; strict recovery is enabled (original error: %v)", restoreErr, anchorRestoreErr, originalErr)
+				}
+
+				log.Warn("Anchor restore failed during startup, falling back to genesis",
 					"targetBlock", c.state.AppliedBlock, "err", restoreErr)
-
-				anchorRestoreErr := c.restoreFromMaterializedAnchor(c.state.AppliedBlock)
-				if anchorRestoreErr != nil {
-					log.Warn("Materialized recovery anchor restore failed during startup",
-						"targetBlock", c.state.AppliedBlock, "err", anchorRestoreErr)
-
-					if c.cfg.RecoveryStrict && !c.cfg.RecoveryAllowGenesisFallback {
-						if c.applier != nil {
-							c.applier.Close()
-						}
+				if genesisErr := c.restoreToGenesis(c.state.AppliedBlock, fmt.Sprintf("startup anchor restore failed: %v; materialized anchor restore failed: %v", restoreErr, anchorRestoreErr)); genesisErr != nil {
+					log.Warn("Genesis fallback on existing trie DB failed, rotating trie DB and retrying",
+						"targetBlock", c.state.AppliedBlock, "err", genesisErr)
+					if c.applier != nil {
+						c.applier.Close()
+					}
+					rotatedPath, rotateErr := rotateCorruptTrieDB(cfg)
+					if rotateErr != nil {
 						db.Close()
 						daemonRecoveryFailures.Inc(1)
-						return nil, fmt.Errorf("startup recovery failed: anchor restore err=%v; materialized anchor restore err=%v; strict recovery is enabled (original error: %v)", restoreErr, anchorRestoreErr, originalErr)
+						return nil, fmt.Errorf("startup recovery failed: anchor restore err=%v; materialized anchor restore err=%v; genesis fallback err=%v; trie DB rotate failed: %w (original error: %v)", restoreErr, anchorRestoreErr, genesisErr, rotateErr, originalErr)
 					}
-
-					log.Warn("Anchor restore failed during startup, falling back to genesis",
-						"targetBlock", c.state.AppliedBlock, "err", restoreErr)
-					if genesisErr := c.restoreToGenesis(c.state.AppliedBlock, fmt.Sprintf("startup anchor restore failed: %v; materialized anchor restore failed: %v", restoreErr, anchorRestoreErr)); genesisErr != nil {
-						log.Warn("Genesis fallback on existing trie DB failed, rotating trie DB and retrying",
-							"targetBlock", c.state.AppliedBlock, "err", genesisErr)
-						if c.applier != nil {
-							c.applier.Close()
-						}
-						rotatedPath, rotateErr := rotateCorruptTrieDB(cfg)
-						if rotateErr != nil {
-							db.Close()
-							daemonRecoveryFailures.Inc(1)
-							return nil, fmt.Errorf("startup recovery failed: anchor restore err=%v; materialized anchor restore err=%v; genesis fallback err=%v; trie DB rotate failed: %w (original error: %v)", restoreErr, anchorRestoreErr, genesisErr, rotateErr, originalErr)
-						}
-						if rotatedPath != "" {
-							log.Warn("Rotated corrupted trie DB", "to", rotatedPath)
-						}
-						applier, err = newApplierWithRetry(cfg, common.Hash{}, 12, 300*time.Millisecond)
-						if err != nil {
-							db.Close()
-							daemonRecoveryFailures.Inc(1)
-							return nil, fmt.Errorf("startup recovery failed: anchor restore err=%v; materialized anchor restore err=%v; fresh applier open err=%w (original error: %v)", restoreErr, anchorRestoreErr, err, originalErr)
-						}
-						c.applier = applier
-						if retryGenesisErr := c.restoreToGenesis(c.state.AppliedBlock, fmt.Sprintf("startup recovery retry after trie DB rotation; anchor restore failed: %v; materialized anchor restore failed: %v", restoreErr, anchorRestoreErr)); retryGenesisErr != nil {
-							applier.Close()
-							db.Close()
-							daemonRecoveryFailures.Inc(1)
-							return nil, fmt.Errorf("startup recovery failed after trie DB rotation: %w (original error: %v)", retryGenesisErr, originalErr)
-						}
+					if rotatedPath != "" {
+						log.Warn("Rotated corrupted trie DB", "to", rotatedPath)
 					}
-					c.recoveryMode = "genesis-fallback"
+					applier, err = newApplierWithRetry(cfg, common.Hash{}, 12, 300*time.Millisecond)
+					if err != nil {
+						db.Close()
+						daemonRecoveryFailures.Inc(1)
+						return nil, fmt.Errorf("startup recovery failed: anchor restore err=%v; materialized anchor restore err=%v; fresh applier open err=%w (original error: %v)", restoreErr, anchorRestoreErr, err, originalErr)
+					}
+					c.applier = applier
+					if retryGenesisErr := c.restoreToGenesis(c.state.AppliedBlock, fmt.Sprintf("startup recovery retry after trie DB rotation; anchor restore failed: %v; materialized anchor restore failed: %v", restoreErr, anchorRestoreErr)); retryGenesisErr != nil {
+						applier.Close()
+						db.Close()
+						daemonRecoveryFailures.Inc(1)
+						return nil, fmt.Errorf("startup recovery failed after trie DB rotation: %w (original error: %v)", retryGenesisErr, originalErr)
+					}
 				}
+				c.recoveryMode = "genesis-fallback"
 			}
+		}
 		daemonRecoverySuccesses.Inc(1)
 		log.Info("Startup recovery succeeded")
 		return c, nil
@@ -698,6 +699,7 @@ func (c *Consumer) handleImplicitReorg(decision *consumeDecision) (bool, error) 
 			return false, fmt.Errorf("revert on parent-hash mismatch: %w", err)
 		}
 		c.pendingRoot = c.state.AppliedRoot
+		c.pendingRootKnown = true
 		c.pendingBlock = c.state.AppliedBlock
 		c.pendingBlockHash = rawdb.ReadUBTCanonicalBlockHash(c.db, c.state.AppliedBlock)
 		c.pendingParentHash = rawdb.ReadUBTCanonicalParentHash(c.db, c.state.AppliedBlock)
@@ -748,12 +750,18 @@ func (c *Consumer) executeDiffTransition(decision *consumeDecision, start time.T
 	c.lastDiff = diff
 	if needIntermediateRoot {
 		c.pendingRoot = root
+		c.pendingRootKnown = true
 		c.pendingBlockRoots = append(c.pendingBlockRoots, pendingBlockRoot{
 			block:      decision.env.BlockNumber,
 			root:       root,
 			blockHash:  decision.env.BlockHash,
 			parentHash: decision.env.ParentHash,
 		})
+	} else {
+		// Root hashing was intentionally skipped for this diff to reduce catch-up
+		// overhead, so pendingRoot is stale for pendingBlock and must not be used
+		// for commit-time mismatch warning.
+		c.pendingRootKnown = false
 	}
 	consumerAppliedTotal.Inc(1)
 	consumerAppliedLatency.UpdateSince(start)
@@ -864,11 +872,12 @@ func (c *Consumer) commit() error {
 	}
 	consumerCommitTrieLatency.UpdateSince(trieCommitStart)
 	committedRoot := c.applier.Root()
-	if c.pendingRoot != (common.Hash{}) && committedRoot != c.pendingRoot {
+	if c.shouldWarnCommittedRootMismatch(committedRoot) {
 		log.Warn("Committed root differs from pending root; using committed root",
 			"pendingRoot", c.pendingRoot, "committedRoot", committedRoot, "block", c.pendingBlock)
 	}
 	c.pendingRoot = committedRoot
+	c.pendingRootKnown = true
 
 	// NOW update durable state - only after successful trie commit
 	c.state.AppliedSeq = c.processedSeq
@@ -1109,6 +1118,7 @@ func (c *Consumer) handleReorg(marker *ubtemit.ReorgMarkerV1) error {
 			}
 			// Update pending state to match committed state
 			c.pendingRoot = c.state.AppliedRoot
+			c.pendingRootKnown = true
 			c.pendingBlock = c.state.AppliedBlock
 			c.pendingBlockHash = rawdb.ReadUBTCanonicalBlockHash(c.db, c.state.AppliedBlock)
 			c.pendingParentHash = rawdb.ReadUBTCanonicalParentHash(c.db, c.state.AppliedBlock)
@@ -1139,6 +1149,7 @@ func (c *Consumer) handleReorg(marker *ubtemit.ReorgMarkerV1) error {
 					return fmt.Errorf("slow-path apply block %d: %w", block, err)
 				}
 				c.pendingRoot = root
+				c.pendingRootKnown = true
 				c.pendingBlock = block
 				c.uncommittedBlocks++
 				daemonReplayBlocksPerSec.Mark(1)
@@ -1170,6 +1181,7 @@ func (c *Consumer) handleReorg(marker *ubtemit.ReorgMarkerV1) error {
 
 	// Update pending state to reflect the revert
 	c.pendingRoot = ancestorRoot
+	c.pendingRootKnown = true
 	c.pendingBlock = ancestorBlock
 	c.pendingBlockHash = marker.CommonAncestorHash
 	c.pendingParentHash = rawdb.ReadUBTCanonicalParentHash(c.db, ancestorBlock)
@@ -1204,6 +1216,7 @@ func (c *Consumer) restoreToGenesis(targetBlock uint64, reason string) error {
 	c.state.AppliedBlock = 0
 	c.processedSeq = ^uint64(0) // will wrap to 0 on next consume
 	c.pendingRoot = common.Hash{}
+	c.pendingRootKnown = true
 	c.pendingBlock = 0
 	c.pendingBlockHash = common.Hash{}
 	c.pendingParentHash = common.Hash{}
@@ -1259,6 +1272,7 @@ func (c *Consumer) restoreFromAnchor(targetBlock uint64) error {
 		c.state.AppliedBlock = snap.BlockNumber
 		c.processedSeq = snap.Seq
 		c.pendingRoot = snap.BlockRoot
+		c.pendingRootKnown = true
 		c.pendingBlock = snap.BlockNumber
 		c.pendingBlockHash = rawdb.ReadUBTCanonicalBlockHash(c.db, snap.BlockNumber)
 		c.pendingParentHash = rawdb.ReadUBTCanonicalParentHash(c.db, snap.BlockNumber)
@@ -1326,6 +1340,16 @@ func (c *Consumer) persistStateMaybe(force bool) {
 		return
 	}
 	c.stateDirty = true
+}
+
+func (c *Consumer) shouldWarnCommittedRootMismatch(committedRoot common.Hash) bool {
+	if !c.pendingRootKnown {
+		return false
+	}
+	if c.pendingRoot == (common.Hash{}) {
+		return false
+	}
+	return committedRoot != c.pendingRoot
 }
 
 func (c *Consumer) pendingInFlight() bool {

@@ -1035,3 +1035,54 @@ func TestPendingState_TracksInMemoryChanges(t *testing.T) {
 		t.Errorf("AppliedBlock should be updated after commit")
 	}
 }
+
+func TestShouldWarnCommittedRootMismatch(t *testing.T) {
+	tests := []struct {
+		name             string
+		pendingRoot      [32]byte
+		pendingRootKnown bool
+		committedRoot    [32]byte
+		want             bool
+	}{
+		{
+			name:             "unknown pending root does not warn",
+			pendingRoot:      [32]byte{0xaa},
+			pendingRootKnown: false,
+			committedRoot:    [32]byte{0xbb},
+			want:             false,
+		},
+		{
+			name:             "known matching roots do not warn",
+			pendingRoot:      [32]byte{0xaa},
+			pendingRootKnown: true,
+			committedRoot:    [32]byte{0xaa},
+			want:             false,
+		},
+		{
+			name:             "known mismatching roots warn",
+			pendingRoot:      [32]byte{0xaa},
+			pendingRootKnown: true,
+			committedRoot:    [32]byte{0xbb},
+			want:             true,
+		},
+		{
+			name:             "empty pending root does not warn",
+			pendingRoot:      [32]byte{},
+			pendingRootKnown: true,
+			committedRoot:    [32]byte{0xbb},
+			want:             false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Consumer{
+				pendingRoot:      tt.pendingRoot,
+				pendingRootKnown: tt.pendingRootKnown,
+			}
+			if got := c.shouldWarnCommittedRootMismatch(tt.committedRoot); got != tt.want {
+				t.Fatalf("shouldWarnCommittedRootMismatch()=%v want=%v", got, tt.want)
+			}
+		})
+	}
+}
