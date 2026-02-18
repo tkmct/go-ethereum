@@ -181,6 +181,10 @@ var (
 	ubtBlockNumberByHashPrefix = []byte("ubt-h2n-")       // ubt-h2n- + block hash (32 bytes) -> block number (8 bytes big-endian)
 	ubtAnchorSnapshotPrefix    = []byte("ubt-anchor-")    // ubt-anchor- + index (8 bytes big-endian) -> RLP-encoded UBTAnchorSnapshot
 	ubtAnchorSnapshotCountKey  = []byte("ubt-anchor-cnt") // Total count of anchor snapshots
+	// Materialized recovery anchors (MRA)
+	ubtRecoveryAnchorPrefix       = []byte("ubt-rec-anchor-")       // ubt-rec-anchor- + index (8 bytes big-endian) -> RLP-encoded UBTRecoveryAnchorManifest
+	ubtRecoveryAnchorCountKey     = []byte("ubt-rec-anchor-cnt")    // Total number of recovery anchors ever created
+	ubtRecoveryAnchorLatestReadyKey = []byte("ubt-rec-anchor-ready") // Latest ready recovery anchor index (8 bytes big-endian)
 )
 
 // LegacyTxLookupEntry is the legacy TxLookupEntry definition with some unnecessary
@@ -525,5 +529,14 @@ func ubtAnchorSnapshotKey(index uint64) []byte {
 	key := make([]byte, len(ubtAnchorSnapshotPrefix)+8)
 	copy(key, ubtAnchorSnapshotPrefix)
 	binary.BigEndian.PutUint64(key[len(ubtAnchorSnapshotPrefix):], index)
+	return key
+}
+
+// ubtRecoveryAnchorKey creates the key for a recovery anchor manifest by index.
+// ubtRecoveryAnchorKey = ubtRecoveryAnchorPrefix + index (8 bytes big-endian)
+func ubtRecoveryAnchorKey(index uint64) []byte {
+	key := make([]byte, len(ubtRecoveryAnchorPrefix)+8)
+	copy(key, ubtRecoveryAnchorPrefix)
+	binary.BigEndian.PutUint64(key[len(ubtRecoveryAnchorPrefix):], index)
 	return key
 }

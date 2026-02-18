@@ -43,6 +43,10 @@ type Config struct {
 	RequireArchiveReplay     bool
 	AnchorSnapshotInterval   uint64 // Create anchor every N commits (0 = disabled)
 	AnchorSnapshotRetention  uint64 // Keep last N anchors (0 = keep all)
+	RecoveryAnchorInterval   uint64 // Create materialized recovery anchor every N commits (0 = disabled)
+	RecoveryAnchorRetention  uint64 // Keep last N materialized recovery anchors (0 = keep all)
+	RecoveryStrict           bool   // Fail startup if root is unavailable and no usable recovery anchor exists
+	RecoveryAllowGenesisFallback bool // Allow fallback to genesis when strict recovery cannot restore a valid anchor
 	ValidationEnabled        bool   // Enable validation checkpoint logging
 	// ValidationSampleRate specifies validation frequency as every Nth block (0 = disabled).
 	// Note: plan §16.2 specifies float64 (random probability), but uint64 was chosen for

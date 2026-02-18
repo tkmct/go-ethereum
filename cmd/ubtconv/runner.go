@@ -455,6 +455,8 @@ func (r *Runner) tryCompaction(lastCompactedBelow *uint64) {
 
 	r.consumer.mu.Lock()
 	safeSeq := r.consumer.state.AppliedSeq
+	hasRecoveryAnchor := r.consumer.hasRecoveryAnchor
+	latestRecoveryAnchorSeq := r.consumer.latestRecoveryAnchorSeq
 	r.consumer.mu.Unlock()
 
 	if safeSeq <= compactionSafetyMargin {
@@ -462,6 +464,12 @@ func (r *Runner) tryCompaction(lastCompactedBelow *uint64) {
 	}
 
 	compactBelow := safeSeq - compactionSafetyMargin
+	if hasRecoveryAnchor {
+		recoveryFloor := latestRecoveryAnchorSeq + 1
+		if recoveryFloor != 0 && compactBelow > recoveryFloor {
+			compactBelow = recoveryFloor
+		}
+	}
 	if compactBelow <= *lastCompactedBelow {
 		return // Already compacted up to this point
 	}
@@ -476,7 +484,7 @@ func (r *Runner) tryCompaction(lastCompactedBelow *uint64) {
 		*lastCompactedBelow = compactBelow
 		compactionSuccessTotal.Inc(1)
 		compactionLastRunGauge.Update(time.Now().Unix())
-		log.Info("Outbox compaction triggered", "compactBelow", compactBelow, "safeSeq", safeSeq)
+		log.Info("Outbox compaction triggered", "compactBelow", compactBelow, "safeSeq", safeSeq, "hasRecoveryAnchor", hasRecoveryAnchor, "latestRecoveryAnchorSeq", latestRecoveryAnchorSeq)
 	}
 }
 

@@ -276,6 +276,13 @@ func (api *QueryAPI) Status(ctx context.Context) (map[string]any, error) {
 	pendingStatus := api.consumer.state.PendingStatus
 	pendingUpdatedAt := api.consumer.state.PendingUpdatedAt
 	outboxLag := api.consumer.outboxLag
+	recoveryMode := api.consumer.recoveryMode
+	if recoveryMode == "" {
+		recoveryMode = "normal"
+	}
+	latestRecoveryAnchorSeq := api.consumer.latestRecoveryAnchorSeq
+	latestRecoveryAnchorBlock := api.consumer.latestRecoveryAnchorBlock
+	hasRecoveryAnchor := api.consumer.hasRecoveryAnchor
 	backpressureLagThreshold := uint64(0)
 	executionClassRPCEnabled := false
 	if api.consumer.cfg != nil {
@@ -285,16 +292,20 @@ func (api *QueryAPI) Status(ctx context.Context) (map[string]any, error) {
 	api.consumer.mu.Unlock()
 
 	result := map[string]any{
-		"appliedSeq":               appliedSeq,
-		"appliedBlock":             appliedBlock,
-		"appliedRoot":              appliedRoot,
-		"pendingSeq":               pendingSeq,
-		"pendingState":             pendingStatus.String(),
-		"pendingUpdatedAt":         pendingUpdatedAt,
-		"outboxLag":                outboxLag,
-		"backpressureLagThreshold": backpressureLagThreshold,
-		"backpressureTriggered":    backpressureLagThreshold > 0 && outboxLag > backpressureLagThreshold,
-		"executionClassRPCEnabled": executionClassRPCEnabled,
+		"appliedSeq":                appliedSeq,
+		"appliedBlock":              appliedBlock,
+		"appliedRoot":               appliedRoot,
+		"pendingSeq":                pendingSeq,
+		"pendingState":              pendingStatus.String(),
+		"pendingUpdatedAt":          pendingUpdatedAt,
+		"outboxLag":                 outboxLag,
+		"recoveryMode":              recoveryMode,
+		"latestRecoveryAnchorSeq":   latestRecoveryAnchorSeq,
+		"latestRecoveryAnchorBlock": latestRecoveryAnchorBlock,
+		"hasRecoveryAnchor":         hasRecoveryAnchor,
+		"backpressureLagThreshold":  backpressureLagThreshold,
+		"backpressureTriggered":     backpressureLagThreshold > 0 && outboxLag > backpressureLagThreshold,
+		"executionClassRPCEnabled":  executionClassRPCEnabled,
 	}
 
 	return result, nil

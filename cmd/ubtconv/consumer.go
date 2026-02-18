@@ -167,6 +167,12 @@ type Consumer struct {
 	validationQueue          chan strictValidationTask
 	validationStop           chan struct{}
 	validationWG             sync.WaitGroup
+
+	// Recovery anchor observability/state.
+	recoveryMode             string
+	latestRecoveryAnchorSeq  uint64
+	latestRecoveryAnchorBlock uint64
+	hasRecoveryAnchor        bool
 }
 
 // NewConsumer creates a new outbox consumer.
@@ -205,6 +211,7 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 		lastStatePersistAt:       time.Now(),
 		readAheadQueue:           make([]*ubtemit.OutboxEnvelope, 0),
 		pendingStrictValidations: make(map[uint64]*ubtemit.QueuedDiffV1),
+		recoveryMode:             "normal",
 	}
 
 	// Load consumer state from DB first
@@ -212,6 +219,7 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 		db.Close()
 		return nil, fmt.Errorf("failed to load consumer state: %w", err)
 	}
+	c.refreshLatestRecoveryAnchorMetadata()
 
 	// Initialize in-memory processed counter from durable state.
 	// For fresh starts (no persisted state), use ^uint64(0) so that
@@ -256,37 +264,58 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 		}
 		c.applier = applier
 
-		if restoreErr := c.restoreFromAnchor(c.state.AppliedBlock); restoreErr != nil {
-			log.Warn("Anchor restore failed during startup, falling back to genesis",
-				"targetBlock", c.state.AppliedBlock, "err", restoreErr)
-			if genesisErr := c.restoreToGenesis(c.state.AppliedBlock, fmt.Sprintf("startup anchor restore failed: %v", restoreErr)); genesisErr != nil {
-				log.Warn("Genesis fallback on existing trie DB failed, rotating trie DB and retrying",
-					"targetBlock", c.state.AppliedBlock, "err", genesisErr)
-				applier.Close()
-				rotatedPath, rotateErr := rotateCorruptTrieDB(cfg)
-				if rotateErr != nil {
-					db.Close()
-					daemonRecoveryFailures.Inc(1)
-					return nil, fmt.Errorf("startup recovery failed: anchor restore err=%v; genesis fallback err=%v; trie DB rotate failed: %w (original error: %v)", restoreErr, genesisErr, rotateErr, originalErr)
-				}
-				if rotatedPath != "" {
-					log.Warn("Rotated corrupted trie DB", "to", rotatedPath)
-				}
-				applier, err = newApplierWithRetry(cfg, common.Hash{}, 12, 300*time.Millisecond)
-				if err != nil {
-					db.Close()
-					daemonRecoveryFailures.Inc(1)
-					return nil, fmt.Errorf("startup recovery failed: anchor restore err=%v; fresh applier open err=%w (original error: %v)", restoreErr, err, originalErr)
-				}
-				c.applier = applier
-				if retryGenesisErr := c.restoreToGenesis(c.state.AppliedBlock, fmt.Sprintf("startup recovery retry after trie DB rotation; anchor restore failed: %v", restoreErr)); retryGenesisErr != nil {
-					applier.Close()
-					db.Close()
-					daemonRecoveryFailures.Inc(1)
-					return nil, fmt.Errorf("startup recovery failed after trie DB rotation: %w (original error: %v)", retryGenesisErr, originalErr)
+			if restoreErr := c.restoreFromAnchor(c.state.AppliedBlock); restoreErr != nil {
+				log.Warn("Anchor restore failed during startup, attempting materialized recovery anchor restore",
+					"targetBlock", c.state.AppliedBlock, "err", restoreErr)
+
+				anchorRestoreErr := c.restoreFromMaterializedAnchor(c.state.AppliedBlock)
+				if anchorRestoreErr != nil {
+					log.Warn("Materialized recovery anchor restore failed during startup",
+						"targetBlock", c.state.AppliedBlock, "err", anchorRestoreErr)
+
+					if c.cfg.RecoveryStrict && !c.cfg.RecoveryAllowGenesisFallback {
+						if c.applier != nil {
+							c.applier.Close()
+						}
+						db.Close()
+						daemonRecoveryFailures.Inc(1)
+						return nil, fmt.Errorf("startup recovery failed: anchor restore err=%v; materialized anchor restore err=%v; strict recovery is enabled (original error: %v)", restoreErr, anchorRestoreErr, originalErr)
+					}
+
+					log.Warn("Anchor restore failed during startup, falling back to genesis",
+						"targetBlock", c.state.AppliedBlock, "err", restoreErr)
+					if genesisErr := c.restoreToGenesis(c.state.AppliedBlock, fmt.Sprintf("startup anchor restore failed: %v; materialized anchor restore failed: %v", restoreErr, anchorRestoreErr)); genesisErr != nil {
+						log.Warn("Genesis fallback on existing trie DB failed, rotating trie DB and retrying",
+							"targetBlock", c.state.AppliedBlock, "err", genesisErr)
+						if c.applier != nil {
+							c.applier.Close()
+						}
+						rotatedPath, rotateErr := rotateCorruptTrieDB(cfg)
+						if rotateErr != nil {
+							db.Close()
+							daemonRecoveryFailures.Inc(1)
+							return nil, fmt.Errorf("startup recovery failed: anchor restore err=%v; materialized anchor restore err=%v; genesis fallback err=%v; trie DB rotate failed: %w (original error: %v)", restoreErr, anchorRestoreErr, genesisErr, rotateErr, originalErr)
+						}
+						if rotatedPath != "" {
+							log.Warn("Rotated corrupted trie DB", "to", rotatedPath)
+						}
+						applier, err = newApplierWithRetry(cfg, common.Hash{}, 12, 300*time.Millisecond)
+						if err != nil {
+							db.Close()
+							daemonRecoveryFailures.Inc(1)
+							return nil, fmt.Errorf("startup recovery failed: anchor restore err=%v; materialized anchor restore err=%v; fresh applier open err=%w (original error: %v)", restoreErr, anchorRestoreErr, err, originalErr)
+						}
+						c.applier = applier
+						if retryGenesisErr := c.restoreToGenesis(c.state.AppliedBlock, fmt.Sprintf("startup recovery retry after trie DB rotation; anchor restore failed: %v; materialized anchor restore failed: %v", restoreErr, anchorRestoreErr)); retryGenesisErr != nil {
+							applier.Close()
+							db.Close()
+							daemonRecoveryFailures.Inc(1)
+							return nil, fmt.Errorf("startup recovery failed after trie DB rotation: %w (original error: %v)", retryGenesisErr, originalErr)
+						}
+					}
+					c.recoveryMode = "genesis-fallback"
 				}
 			}
-		}
 		daemonRecoverySuccesses.Inc(1)
 		log.Info("Startup recovery succeeded")
 		return c, nil
@@ -914,6 +943,10 @@ func (c *Consumer) commit() error {
 	if c.cfg.AnchorSnapshotInterval > 0 && c.commitCount%c.cfg.AnchorSnapshotInterval == 0 {
 		c.createAnchorSnapshot()
 	}
+	// Create materialized recovery anchor if interval is reached.
+	if c.cfg.RecoveryAnchorInterval > 0 && c.commitCount%c.cfg.RecoveryAnchorInterval == 0 {
+		c.createMaterializedRecoveryAnchor()
+	}
 	return nil
 }
 
@@ -1184,6 +1217,7 @@ func (c *Consumer) restoreToGenesis(targetBlock uint64, reason string) error {
 	c.clearPendingMetadata()
 	// Mark as fresh start to enable outbox-floor bootstrap when early events are compacted.
 	c.hasState = false
+	c.recoveryMode = "genesis-fallback"
 	c.persistState()
 	daemonSnapshotRestoreTotal.Inc(1)
 	log.Info("Restored to genesis state for recovery")

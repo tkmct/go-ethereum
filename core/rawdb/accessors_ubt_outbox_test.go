@@ -698,6 +698,92 @@ func TestUBTAnchorSnapshot_Delete(t *testing.T) {
 	}
 }
 
+func TestUBTRecoveryAnchorManifest_WriteRead(t *testing.T) {
+	db := memorydb.New()
+
+	if got := ReadUBTRecoveryAnchorManifest(db, 0); got != nil {
+		t.Fatalf("expected nil for non-existent recovery anchor manifest, got %v", got)
+	}
+
+	manifest := &UBTRecoveryAnchorManifest{
+		AnchorID:      7,
+		Seq:           1234,
+		BlockNumber:   5678,
+		BlockRoot:     common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"),
+		CreatedAt:     1700000000,
+		FormatVersion: 1,
+		State:         UBTRecoveryAnchorReady,
+	}
+	WriteUBTRecoveryAnchorManifest(db, 7, manifest)
+	got := ReadUBTRecoveryAnchorManifest(db, 7)
+	if got == nil {
+		t.Fatal("expected recovery anchor manifest, got nil")
+	}
+	if got.AnchorID != manifest.AnchorID {
+		t.Fatalf("expected AnchorID %d, got %d", manifest.AnchorID, got.AnchorID)
+	}
+	if got.Seq != manifest.Seq {
+		t.Fatalf("expected Seq %d, got %d", manifest.Seq, got.Seq)
+	}
+	if got.BlockNumber != manifest.BlockNumber {
+		t.Fatalf("expected BlockNumber %d, got %d", manifest.BlockNumber, got.BlockNumber)
+	}
+	if got.BlockRoot != manifest.BlockRoot {
+		t.Fatalf("expected BlockRoot %v, got %v", manifest.BlockRoot, got.BlockRoot)
+	}
+	if got.State != UBTRecoveryAnchorReady {
+		t.Fatalf("expected state %v, got %v", UBTRecoveryAnchorReady, got.State)
+	}
+}
+
+func TestUBTRecoveryAnchorManifest_CountAndLatestReady(t *testing.T) {
+	db := memorydb.New()
+
+	if count := ReadUBTRecoveryAnchorCount(db); count != 0 {
+		t.Fatalf("expected initial count 0, got %d", count)
+	}
+	if _, ok := ReadUBTRecoveryAnchorLatestReady(db); ok {
+		t.Fatal("expected no latest ready marker")
+	}
+
+	WriteUBTRecoveryAnchorCount(db, 10)
+	if count := ReadUBTRecoveryAnchorCount(db); count != 10 {
+		t.Fatalf("expected count 10, got %d", count)
+	}
+
+	WriteUBTRecoveryAnchorLatestReady(db, 8)
+	if idx, ok := ReadUBTRecoveryAnchorLatestReady(db); !ok || idx != 8 {
+		t.Fatalf("expected latest ready index 8, got %d (ok=%v)", idx, ok)
+	}
+
+	DeleteUBTRecoveryAnchorLatestReady(db)
+	if _, ok := ReadUBTRecoveryAnchorLatestReady(db); ok {
+		t.Fatal("expected latest ready marker to be deleted")
+	}
+}
+
+func TestUBTRecoveryAnchorManifest_Delete(t *testing.T) {
+	db := memorydb.New()
+	manifest := &UBTRecoveryAnchorManifest{
+		AnchorID:      1,
+		Seq:           11,
+		BlockNumber:   12,
+		BlockRoot:     common.BytesToHash([]byte{1}),
+		CreatedAt:     13,
+		FormatVersion: 1,
+		State:         UBTRecoveryAnchorBroken,
+		FailureReason: "copy failed",
+	}
+	WriteUBTRecoveryAnchorManifest(db, 1, manifest)
+	if got := ReadUBTRecoveryAnchorManifest(db, 1); got == nil {
+		t.Fatal("expected manifest before delete")
+	}
+	DeleteUBTRecoveryAnchorManifest(db, 1)
+	if got := ReadUBTRecoveryAnchorManifest(db, 1); got != nil {
+		t.Fatalf("expected nil after delete, got %v", got)
+	}
+}
+
 func TestUBTCanonicalBlockMetadata(t *testing.T) {
 	db := memorydb.New()
 

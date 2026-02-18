@@ -128,6 +128,26 @@ var (
 		Usage: "Keep last N anchor snapshots (0 = keep all)",
 		Value: 0,
 	}
+	recoveryAnchorIntervalFlag = &cli.Uint64Flag{
+		Name:  "recovery-anchor-interval",
+		Usage: "Create materialized recovery anchor every N commits (0 = disabled)",
+		Value: 0,
+	}
+	recoveryAnchorRetentionFlag = &cli.Uint64Flag{
+		Name:  "recovery-anchor-retention",
+		Usage: "Keep last N materialized recovery anchors (0 = keep all)",
+		Value: 0,
+	}
+	recoveryStrictFlag = &cli.BoolFlag{
+		Name:  "recovery-strict",
+		Usage: "Fail startup if expected root is unavailable and no usable materialized recovery anchor exists",
+		Value: false,
+	}
+	recoveryAllowGenesisFallbackFlag = &cli.BoolFlag{
+		Name:  "recovery-allow-genesis-fallback",
+		Usage: "Allow fallback to genesis when strict recovery cannot restore a materialized anchor",
+		Value: true,
+	}
 	validationEnabledFlag = &cli.BoolFlag{
 		Name:  "validation-enabled",
 		Usage: "Enable validation checkpoint logging",
@@ -237,6 +257,10 @@ func init() {
 		queryRPCMaxBatchFlag,
 		anchorSnapshotIntervalFlag,
 		anchorSnapshotRetentionFlag,
+		recoveryAnchorIntervalFlag,
+		recoveryAnchorRetentionFlag,
+		recoveryStrictFlag,
+		recoveryAllowGenesisFallbackFlag,
 		validationEnabledFlag,
 		validationSampleRateFlag,
 		chainIDFlag,
@@ -320,6 +344,10 @@ func buildConfigFromCLI(ctx *cli.Context) *Config {
 		QueryRPCMaxBatch:                  ctx.Uint64(queryRPCMaxBatchFlag.Name),
 		AnchorSnapshotInterval:            ctx.Uint64(anchorSnapshotIntervalFlag.Name),
 		AnchorSnapshotRetention:           ctx.Uint64(anchorSnapshotRetentionFlag.Name),
+		RecoveryAnchorInterval:            ctx.Uint64(recoveryAnchorIntervalFlag.Name),
+		RecoveryAnchorRetention:           ctx.Uint64(recoveryAnchorRetentionFlag.Name),
+		RecoveryStrict:                    ctx.Bool(recoveryStrictFlag.Name),
+		RecoveryAllowGenesisFallback:      ctx.Bool(recoveryAllowGenesisFallbackFlag.Name),
 		ValidationEnabled:                 ctx.Bool(validationEnabledFlag.Name),
 		ValidationSampleRate:              ctx.Uint64(validationSampleRateFlag.Name),
 		ChainID:                           ctx.Uint64(chainIDFlag.Name),

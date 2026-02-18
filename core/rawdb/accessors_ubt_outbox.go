@@ -431,6 +431,40 @@ type UBTAnchorSnapshot struct {
 	Timestamp   uint64      // Unix timestamp when anchor was created
 }
 
+// UBTRecoveryAnchorState describes lifecycle state of a materialized recovery anchor.
+type UBTRecoveryAnchorState uint8
+
+const (
+	UBTRecoveryAnchorCreating UBTRecoveryAnchorState = iota
+	UBTRecoveryAnchorReady
+	UBTRecoveryAnchorBroken
+)
+
+func (s UBTRecoveryAnchorState) String() string {
+	switch s {
+	case UBTRecoveryAnchorCreating:
+		return "creating"
+	case UBTRecoveryAnchorReady:
+		return "ready"
+	case UBTRecoveryAnchorBroken:
+		return "broken"
+	default:
+		return "unknown"
+	}
+}
+
+// UBTRecoveryAnchorManifest stores metadata for a materialized recovery anchor.
+type UBTRecoveryAnchorManifest struct {
+	AnchorID      uint64
+	Seq           uint64
+	BlockNumber   uint64
+	BlockRoot     common.Hash
+	CreatedAt     uint64
+	FormatVersion uint16
+	State         UBTRecoveryAnchorState
+	FailureReason string `rlp:"optional"`
+}
+
 // WriteUBTAnchorSnapshot writes an anchor snapshot for the given index.
 func WriteUBTAnchorSnapshot(db ethdb.KeyValueWriter, index uint64, snap *UBTAnchorSnapshot) {
 	data, err := rlp.EncodeToBytes(snap)
@@ -490,5 +524,80 @@ func DeleteUBTAnchorSnapshot(db ethdb.KeyValueWriter, index uint64) {
 	key := ubtAnchorSnapshotKey(index)
 	if err := db.Delete(key); err != nil {
 		log.Crit("Failed to delete UBT anchor snapshot", "index", index, "err", err)
+	}
+}
+
+// WriteUBTRecoveryAnchorManifest writes a recovery anchor manifest at index.
+func WriteUBTRecoveryAnchorManifest(db ethdb.KeyValueWriter, index uint64, manifest *UBTRecoveryAnchorManifest) {
+	data, err := rlp.EncodeToBytes(manifest)
+	if err != nil {
+		log.Crit("Failed to RLP encode UBT recovery anchor manifest", "index", index, "err", err)
+	}
+	if err := db.Put(ubtRecoveryAnchorKey(index), data); err != nil {
+		log.Crit("Failed to write UBT recovery anchor manifest", "index", index, "err", err)
+	}
+}
+
+// ReadUBTRecoveryAnchorManifest reads a recovery anchor manifest by index.
+func ReadUBTRecoveryAnchorManifest(db ethdb.KeyValueReader, index uint64) *UBTRecoveryAnchorManifest {
+	data, err := db.Get(ubtRecoveryAnchorKey(index))
+	if err != nil {
+		return nil
+	}
+	var manifest UBTRecoveryAnchorManifest
+	if err := rlp.DecodeBytes(data, &manifest); err != nil {
+		log.Error("Failed to decode UBT recovery anchor manifest", "index", index, "err", err)
+		return nil
+	}
+	return &manifest
+}
+
+// DeleteUBTRecoveryAnchorManifest deletes a recovery anchor manifest by index.
+func DeleteUBTRecoveryAnchorManifest(db ethdb.KeyValueWriter, index uint64) {
+	if err := db.Delete(ubtRecoveryAnchorKey(index)); err != nil {
+		log.Crit("Failed to delete UBT recovery anchor manifest", "index", index, "err", err)
+	}
+}
+
+// WriteUBTRecoveryAnchorCount writes the total number of created recovery anchors.
+func WriteUBTRecoveryAnchorCount(db ethdb.KeyValueWriter, count uint64) {
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, count)
+	if err := db.Put(ubtRecoveryAnchorCountKey, buf); err != nil {
+		log.Crit("Failed to write UBT recovery anchor count", "count", count, "err", err)
+	}
+}
+
+// ReadUBTRecoveryAnchorCount reads the total number of created recovery anchors.
+func ReadUBTRecoveryAnchorCount(db ethdb.KeyValueReader) uint64 {
+	data, err := db.Get(ubtRecoveryAnchorCountKey)
+	if err != nil || len(data) != 8 {
+		return 0
+	}
+	return binary.BigEndian.Uint64(data)
+}
+
+// WriteUBTRecoveryAnchorLatestReady writes the latest ready recovery anchor index.
+func WriteUBTRecoveryAnchorLatestReady(db ethdb.KeyValueWriter, index uint64) {
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, index)
+	if err := db.Put(ubtRecoveryAnchorLatestReadyKey, buf); err != nil {
+		log.Crit("Failed to write latest ready recovery anchor index", "index", index, "err", err)
+	}
+}
+
+// ReadUBTRecoveryAnchorLatestReady reads the latest ready recovery anchor index.
+func ReadUBTRecoveryAnchorLatestReady(db ethdb.KeyValueReader) (uint64, bool) {
+	data, err := db.Get(ubtRecoveryAnchorLatestReadyKey)
+	if err != nil || len(data) != 8 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint64(data), true
+}
+
+// DeleteUBTRecoveryAnchorLatestReady deletes the latest ready recovery anchor marker.
+func DeleteUBTRecoveryAnchorLatestReady(db ethdb.KeyValueWriter) {
+	if err := db.Delete(ubtRecoveryAnchorLatestReadyKey); err != nil {
+		log.Crit("Failed to delete latest ready recovery anchor marker", "err", err)
 	}
 }

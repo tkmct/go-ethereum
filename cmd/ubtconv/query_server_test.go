@@ -85,6 +85,18 @@ func TestQueryAPI_Status(t *testing.T) {
 	if status["executionClassRPCEnabled"] != true {
 		t.Errorf("Expected executionClassRPCEnabled=true, got %v", status["executionClassRPCEnabled"])
 	}
+	if status["recoveryMode"] != "normal" {
+		t.Errorf("Expected recoveryMode=normal, got %v", status["recoveryMode"])
+	}
+	if status["latestRecoveryAnchorSeq"] != uint64(0) {
+		t.Errorf("Expected latestRecoveryAnchorSeq=0, got %v", status["latestRecoveryAnchorSeq"])
+	}
+	if status["latestRecoveryAnchorBlock"] != uint64(0) {
+		t.Errorf("Expected latestRecoveryAnchorBlock=0, got %v", status["latestRecoveryAnchorBlock"])
+	}
+	if status["hasRecoveryAnchor"] != false {
+		t.Errorf("Expected hasRecoveryAnchor=false, got %v", status["hasRecoveryAnchor"])
+	}
 }
 
 // TestQueryAPI_GetBalance_NoApplier tests that GetBalance returns error when applier is not initialized.

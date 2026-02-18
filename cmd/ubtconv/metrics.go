@@ -58,9 +58,17 @@ var (
 	daemonSnapshotRestoreLatency = metrics.NewRegisteredTimer("ubt/daemon/snapshot/restore/latency", nil)
 
 	// Recovery metrics
-	daemonRecoveryAttempts  = metrics.NewRegisteredCounter("ubt/daemon/recovery/attempts", nil)
-	daemonRecoverySuccesses = metrics.NewRegisteredCounter("ubt/daemon/recovery/successes", nil)
-	daemonRecoveryFailures  = metrics.NewRegisteredCounter("ubt/daemon/recovery/failures", nil)
+	daemonRecoveryAttempts         = metrics.NewRegisteredCounter("ubt/daemon/recovery/attempts", nil)
+	daemonRecoverySuccesses        = metrics.NewRegisteredCounter("ubt/daemon/recovery/successes", nil)
+	daemonRecoveryFailures         = metrics.NewRegisteredCounter("ubt/daemon/recovery/failures", nil)
+	recoveryAnchorCreateAttempts   = metrics.NewRegisteredCounter("ubt/recovery_anchor/create/attempts", nil)
+	recoveryAnchorCreateSuccesses  = metrics.NewRegisteredCounter("ubt/recovery_anchor/create/successes", nil)
+	recoveryAnchorCreateFailures   = metrics.NewRegisteredCounter("ubt/recovery_anchor/create/failures", nil)
+	recoveryAnchorRestoreAttempts  = metrics.NewRegisteredCounter("ubt/recovery_anchor/restore/attempts", nil)
+	recoveryAnchorRestoreSuccesses = metrics.NewRegisteredCounter("ubt/recovery_anchor/restore/successes", nil)
+	recoveryAnchorRestoreFailures  = metrics.NewRegisteredCounter("ubt/recovery_anchor/restore/failures", nil)
+	recoveryAnchorLatestSeqGauge   = metrics.NewRegisteredGauge("ubt/recovery_anchor/latest/seq", nil)
+	recoveryAnchorLatestBlockGauge = metrics.NewRegisteredGauge("ubt/recovery_anchor/latest/block", nil)
 
 	// Compaction metrics
 	compactionAttemptsTotal = metrics.NewRegisteredCounter("ubt/compaction/attempts/total", nil)

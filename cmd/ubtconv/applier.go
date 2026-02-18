@@ -62,6 +62,7 @@ func NewApplier(cfg *Config, expectedRoot common.Hash) (*Applier, error) {
 	}
 
 	trieConfig := &triedb.Config{
+		IsVerkle: true,
 		PathDB: &pathdb.Config{
 			StateHistory:    cfg.TrieDBStateHistory,
 			TrieCleanSize:   256 * 1024 * 1024, // 256 MB
@@ -363,9 +364,14 @@ func (a *Applier) CommitAt(blockNumber uint64) error {
 	set := trienode.NewWithNodeSet(nodes)
 	states := triedb.NewStateSet()
 	parent := a.root
-	if parent == (common.Hash{}) {
-		// PathDB initializes on EmptyRootHash; map zero empty-binary root on first commit.
-		parent = types.EmptyRootHash
+	if parent == (common.Hash{}) || parent == types.EmptyBinaryHash {
+		// PathDB initializes on EmptyRootHash for merkle and EmptyVerkleHash
+		// for binary/verkle mode.
+		if a.trieDB != nil && a.trieDB.IsVerkle() {
+			parent = types.EmptyVerkleHash
+		} else {
+			parent = types.EmptyRootHash
+		}
 	}
 	if err := a.trieDB.Update(root, parent, blockNumber, set, states); err != nil {
 		return fmt.Errorf("trie DB update: %w", err)
