@@ -635,8 +635,10 @@ func (c *Consumer) readNextEnvelope(targetSeq uint64) (*ubtemit.OutboxEnvelope, 
 
 func (c *Consumer) readAheadWindow(lag uint64) uint64 {
 	base := c.cfg.OutboxReadAhead
-	if base == 0 {
+	// Honor explicit prefetch disable (1 = disabled) even under high lag.
+	if base <= 1 {
 		base = 1
+		return base
 	}
 	// Adaptive window sizing based on lag keeps small windows near head
 	// and expands during catch-up, while avoiding over-prefetch spikes.

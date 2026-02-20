@@ -79,6 +79,19 @@ func TestShouldWriteBlockRootIndex_WithAdaptiveStride(t *testing.T) {
 	}
 }
 
+func TestReadAheadWindow_DisabledHonoredUnderHighLag(t *testing.T) {
+	c := &Consumer{
+		cfg: &Config{
+			OutboxReadAhead: 1,
+		},
+	}
+	for _, lag := range []uint64{0, 1000, 50000, 5000000} {
+		if got := c.readAheadWindow(lag); got != 1 {
+			t.Fatalf("readAheadWindow(%d)=%d want=1", lag, got)
+		}
+	}
+}
+
 // TestShouldCommit_BlockThreshold verifies commit triggered by block count.
 func TestShouldCommit_BlockThreshold(t *testing.T) {
 	tests := []struct {
