@@ -20,11 +20,13 @@ import (
 	"errors"
 	"math/big"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/ubtwal"
 )
 
 func TestOutboxStore_AppendAndRead(t *testing.T) {
@@ -662,4 +664,71 @@ func TestOutboxStore_CompactBelow_RejectsBeyondLatestPlusOne(t *testing.T) {
 	if _, err := store.CompactBelow(4); err == nil {
 		t.Fatal("expected boundary error for safeSeq beyond latest+1")
 	}
+}
+
+func TestOutboxStore_CompactBelow_PrunesWALSegments(t *testing.T) {
+	outboxDir := t.TempDir()
+	walDir := filepath.Join(outboxDir, "wal")
+	store, err := NewOutboxStoreWithWAL(outboxDir, 5*time.Second, 0, 0, walDir, 1)
+	if err != nil {
+		t.Fatalf("open store with wal: %v", err)
+	}
+	defer store.Close()
+
+	for i := 0; i < 10; i++ {
+		if _, err := store.Append(&OutboxEnvelope{
+			Version:     EnvelopeVersionV1,
+			Kind:        KindDiff,
+			BlockNumber: uint64(i),
+			Payload:     []byte{byte(i)},
+		}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	before, err := countWALSegments(walDir)
+	if err != nil {
+		t.Fatalf("count wal before compact: %v", err)
+	}
+	if before == 0 {
+		t.Fatal("expected WAL segments before compaction")
+	}
+
+	pruned, err := store.CompactBelow(8)
+	if err != nil {
+		t.Fatalf("compact below with wal: %v", err)
+	}
+	if pruned != 8 {
+		t.Fatalf("expected 8 DB events pruned, got %d", pruned)
+	}
+
+	after, err := countWALSegments(walDir)
+	if err != nil {
+		t.Fatalf("count wal after compact: %v", err)
+	}
+	if after >= before {
+		t.Fatalf("expected WAL segments to shrink after compact, before=%d after=%d", before, after)
+	}
+
+	reader, err := ubtwal.OpenReader(walDir)
+	if err != nil {
+		t.Fatalf("open wal reader: %v", err)
+	}
+	lowest, ok := reader.LowestSeq()
+	if !ok || lowest != 8 {
+		t.Fatalf("expected WAL lowest seq 8, got ok=%v seq=%d", ok, lowest)
+	}
+}
+
+func countWALSegments(dir string) (int, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".wal" {
+			count++
+		}
+	}
+	return count, nil
 }

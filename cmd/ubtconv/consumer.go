@@ -152,10 +152,6 @@ type Consumer struct {
 	// Backpressure: latest known outbox seq for lag computation
 	outboxLag uint64
 
-	// Consumer-side read-ahead queue for sequential consumption.
-	readAheadQueue   []*ubtemit.OutboxEnvelope
-	readAheadNextSeq uint64
-
 	// Last diff for strict validation (retained between ConsumeNext and commit)
 	lastDiff *ubtemit.QueuedDiffV1
 
@@ -188,8 +184,11 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 
 	// Create outbox reader (RPC client)
 	reader := NewOutboxReader(cfg.OutboxRPCEndpoint)
-	if cfg.OutboxReadBatch > 0 {
-		reader.SetPrefetchBatch(cfg.OutboxReadBatch)
+	if cfg.OutboxSource == "wal" {
+		if err := reader.EnableWALSource(cfg.OutboxWALDir, cfg.OutboxWALRefreshInterval); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to enable wal outbox source: %w", err)
+		}
 	}
 
 	var validator *Validator
@@ -210,7 +209,6 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 		replayClient:             replayClient,
 		lastCommitTime:           time.Now(),
 		lastStatePersistAt:       time.Now(),
-		readAheadQueue:           make([]*ubtemit.OutboxEnvelope, 0),
 		pendingStrictValidations: make(map[uint64]*ubtemit.QueuedDiffV1),
 		recoveryMode:             "normal",
 	}
@@ -566,108 +564,15 @@ func (c *Consumer) nextTargetSeq() uint64 {
 }
 
 func (c *Consumer) readNextEnvelope(targetSeq uint64) (*ubtemit.OutboxEnvelope, error) {
-	c.mu.Lock()
-	if len(c.readAheadQueue) > 0 {
-		// Queue is sequence-ordered; drop it if it doesn't match next target.
-		if c.readAheadNextSeq == targetSeq && c.readAheadQueue[0] != nil && c.readAheadQueue[0].Seq == targetSeq {
-			env := c.readAheadQueue[0]
-			c.readAheadQueue[0] = nil
-			c.readAheadQueue = c.readAheadQueue[1:]
-			c.readAheadNextSeq++
-			if len(c.readAheadQueue) == 0 {
-				c.readAheadNextSeq = 0
-			}
-			c.mu.Unlock()
-			consumerReadQueueHitTotal.Inc(1)
-			return env, nil
-		}
-		c.readAheadQueue = c.readAheadQueue[:0]
-		c.readAheadNextSeq = 0
-	}
-	lag := c.outboxLag
-	c.mu.Unlock()
-
-	window := c.readAheadWindow(lag)
-	if window <= 1 {
-		readStart := time.Now()
-		env, err := c.reader.ReadEvent(targetSeq)
-		consumerReadEventLatency.UpdateSince(readStart)
-		consumerReadRPCEventTotal.Inc(1)
-		if err != nil {
-			consumerErrorsTotal.Inc(1)
-			return nil, fmt.Errorf("read event %d: %w", targetSeq, err)
-		}
-		return env, nil
-	}
-
-	toSeq := targetSeq + window - 1
-	if toSeq < targetSeq {
-		toSeq = ^uint64(0)
-	}
 	readStart := time.Now()
-	envs, err := c.reader.ReadRange(targetSeq, toSeq)
-	consumerReadRangeLatency.UpdateSince(readStart)
-	consumerReadRPCRangeTotal.Inc(1)
+	env, err := c.reader.ReadEvent(targetSeq)
+	consumerReadEventLatency.UpdateSince(readStart)
+	consumerReadRPCEventTotal.Inc(1)
 	if err != nil {
 		consumerErrorsTotal.Inc(1)
-		return nil, fmt.Errorf("read events [%d,%d]: %w", targetSeq, toSeq, err)
+		return nil, fmt.Errorf("read event %d: %w", targetSeq, err)
 	}
-	if len(envs) == 0 {
-		return nil, nil
-	}
-	if envs[0].Seq != targetSeq {
-		return nil, nil
-	}
-	if len(envs) == 1 {
-		return envs[0], nil
-	}
-
-	c.mu.Lock()
-	c.readAheadQueue = c.readAheadQueue[:0]
-	c.readAheadQueue = append(c.readAheadQueue, envs[1:]...)
-	c.readAheadNextSeq = targetSeq + 1
-	if c.readAheadNextSeq == 0 { // overflow guard
-		c.readAheadQueue = c.readAheadQueue[:0]
-	}
-	c.mu.Unlock()
-	return envs[0], nil
-}
-
-func (c *Consumer) readAheadWindow(lag uint64) uint64 {
-	base := c.cfg.OutboxReadAhead
-	// Honor explicit prefetch disable (1 = disabled) even under high lag.
-	if base <= 1 {
-		base = 1
-		return base
-	}
-	// Adaptive window sizing based on lag keeps small windows near head
-	// and expands during catch-up, while avoiding over-prefetch spikes.
-	if lag > 100000 {
-		if base < 1024 {
-			return 1024
-		}
-	}
-	if lag > 30000 {
-		if base < 512 {
-			return 512
-		}
-	}
-	if lag > 8000 {
-		if base < 256 {
-			return 256
-		}
-	}
-	if lag > 2000 {
-		if base < 128 {
-			return 128
-		}
-	}
-	if lag > 500 {
-		if base < 64 {
-			return 64
-		}
-	}
-	return base
+	return env, nil
 }
 
 func (c *Consumer) executeTransition(decision *consumeDecision, start time.Time) (bool, error) {

@@ -241,21 +241,19 @@ curl -s -H 'Content-Type: application/json' \
 When backlog is high (`outboxLag > backpressure-lag-threshold`), ubtconv now:
 
 1. Samples strict validation by `--validation-strict-catchup-sample-rate`.
-2. Uses prefetch for outbox reads via `--outbox-read-batch` (default disabled).
-3. Coalesces duplicate account/storage/code mutations per diff (last-write-wins).
-4. Applies adaptive write shedding for pending state and block-root index writes while lag is high.
-5. Avoids per-block backpressure commits (uses a bounded faster-commit policy).
-6. Skips strict block validation early when geth returns `historical state ... is not available`.
+2. Coalesces duplicate account/storage/code mutations per diff (last-write-wins).
+3. Applies adaptive write shedding for pending state and block-root index writes while lag is high.
+4. Avoids per-block backpressure commits (uses a bounded faster-commit policy).
+5. Skips strict block validation early when geth returns `historical state ... is not available`.
 
 Mainnet full-sync recommendation:
-- Keep `--outbox-read-batch=1` unless profiling proves improvement in your environment.
 - Keep `--validation-strict-catchup-sample-rate=1` by default.
 
 ## Profiling and Bottleneck Analysis
 
 `ubtconv` now exposes per-stage metrics for catch-up analysis:
 
-- Outbox read path: event/range RPC latency and queue-hit counters.
+- Outbox read path: event RPC latency counters.
 - Decode/apply path: diff decode, reorg decode, diff apply latency.
 - Apply internals: account/storage/code phase latency and entry counters.
 - Commit/compaction: trie commit latency, batch write latency, compaction total/RPC latency.
@@ -360,7 +358,9 @@ Action:
 | Flag | Default | Description |
 |---|---|---|
 | `--outbox-rpc-endpoint` | `http://localhost:8545` | geth outbox endpoint (HTTP/WebSocket or IPC path) |
-| `--outbox-read-batch` | `1` | Number of events prefetched per outbox read (1 disables prefetch, max 1000) |
+| `--outbox-source` | `rpc` | Outbox source mode: `rpc` or `wal` |
+| `--outbox-wal-dir` | `` | Shared outbox WAL directory (required when `--outbox-source=wal`) |
+| `--outbox-wal-refresh-interval` | `250ms` | WAL index refresh interval while tailing |
 | `--datadir` | `./ubtconv-data` | ubtconv data directory |
 | `--apply-commit-interval` | `128` | Commit every N applied blocks |
 | `--apply-commit-max-latency` | `10s` | Commit max latency |

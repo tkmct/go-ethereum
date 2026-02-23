@@ -29,6 +29,10 @@ GETH_AUTHRPC_PORT="${GETH_AUTHRPC_PORT:-8551}"
 GETH_AUTHRPC_VHOSTS="${GETH_AUTHRPC_VHOSTS:-*}"
 GETH_IPC_PATH="${GETH_IPC_PATH:-${GETH_DATADIR}/geth.ipc}"
 UBT_OUTBOX_RPC_ENDPOINT="${UBT_OUTBOX_RPC_ENDPOINT:-${GETH_IPC_PATH}}"
+UBT_OUTBOX_SOURCE="${UBT_OUTBOX_SOURCE:-wal}"
+UBT_OUTBOX_WAL_DIR="${UBT_OUTBOX_WAL_DIR:-${GETH_DATADIR}/ubt-outbox-wal}"
+UBT_OUTBOX_WAL_REFRESH_INTERVAL="${UBT_OUTBOX_WAL_REFRESH_INTERVAL:-250ms}"
+GETH_UBT_OUTBOX_WAL_SEGMENT_SIZE="${GETH_UBT_OUTBOX_WAL_SEGMENT_SIZE:-0}"
 
 UBT_HTTP_ADDR="${UBT_HTTP_ADDR:-0.0.0.0}"
 UBT_HTTP_PORT="${UBT_HTTP_PORT:-8560}"
@@ -48,7 +52,6 @@ APPLY_COMMIT_INTERVAL="${APPLY_COMMIT_INTERVAL:-128}"
 APPLY_COMMIT_MAX_LATENCY="${APPLY_COMMIT_MAX_LATENCY:-10s}"
 TRIEDB_STATE_HISTORY="${TRIEDB_STATE_HISTORY:-90000}"
 MAX_RECOVERABLE_REORG_DEPTH="${MAX_RECOVERABLE_REORG_DEPTH:-128}"
-OUTBOX_READ_AHEAD="${OUTBOX_READ_AHEAD:-64}"
 BACKPRESSURE_LAG_THRESHOLD="${BACKPRESSURE_LAG_THRESHOLD:-5000}"
 VALIDATION_STRICT_CATCHUP_SAMPLE_RATE="${VALIDATION_STRICT_CATCHUP_SAMPLE_RATE:-0}"
 VALIDATION_STRICT="${VALIDATION_STRICT:-false}"
@@ -118,6 +121,8 @@ Environment overrides:
   GETH_HTTP_ADDR, GETH_HTTP_PORT, GETH_HTTP_CORSDOMAIN, GETH_HTTP_VHOSTS
   GETH_P2P_PORT, GETH_AUTHRPC_ADDR, GETH_AUTHRPC_PORT, GETH_AUTHRPC_VHOSTS
   GETH_IPC_PATH, UBT_OUTBOX_RPC_ENDPOINT
+  UBT_OUTBOX_SOURCE, UBT_OUTBOX_WAL_DIR, UBT_OUTBOX_WAL_REFRESH_INTERVAL
+  GETH_UBT_OUTBOX_WAL_SEGMENT_SIZE
   GETH_MAX_PEERS, GETH_CACHE_MB
   GETH_CACHE_DATABASE_PERCENT, GETH_CACHE_TRIE_PERCENT
   GETH_CACHE_GC_PERCENT, GETH_CACHE_SNAPSHOT_PERCENT
@@ -125,7 +130,7 @@ Environment overrides:
   LIGHTHOUSE_HTTP_ADDR, LIGHTHOUSE_HTTP_PORT, LIGHTHOUSE_P2P_PORT, LIGHTHOUSE_QUIC_PORT
   CHECKPOINT_SYNC_URL (default: https://mainnet.checkpoint.sigp.io)
   APPLY_COMMIT_INTERVAL, APPLY_COMMIT_MAX_LATENCY
-  OUTBOX_READ_AHEAD, BACKPRESSURE_LAG_THRESHOLD
+  BACKPRESSURE_LAG_THRESHOLD
   VALIDATION_STRICT, VALIDATION_STRICT_CATCHUP_SAMPLE_RATE, BLOCK_ROOT_INDEX_STRIDE_HIGH_LAG
   TRIEDB_STATE_HISTORY, MAX_RECOVERABLE_REORG_DEPTH, OUTBOX_RETENTION_SEQ_WINDOW
   SLOT_INDEX_ENABLED, PENDING_STATE_PERSIST_INTERVAL
@@ -139,6 +144,7 @@ Notes:
   - This script forces geth sync mode to full-sync: --syncmode full.
   - It starts geth + lighthouse beacon node + ubtconv.
   - It enables UBT outbox/debug plumbing in geth and starts ubtconv against it.
+  - By default ubtconv consumes from shared outbox WAL (`UBT_OUTBOX_SOURCE=wal`).
 USAGE
 }
 
@@ -288,6 +294,7 @@ start_geth() {
     --ubt.conversion-enabled
     --ubt.decoupled
     --ubt.outbox-db-path "${GETH_DATADIR}/ubt-outbox"
+    --ubt.outbox-wal-segment-size "${GETH_UBT_OUTBOX_WAL_SEGMENT_SIZE}"
     --ubt.outbox-retention-seq-window "${OUTBOX_RETENTION_SEQ_WINDOW}"
     --ubt.reorg-marker-enabled
     --ubt.outbox-read-rpc-enabled
@@ -295,6 +302,9 @@ start_geth() {
     --ubt.debug-endpoint "http://${UBT_HTTP_ADDR}:${UBT_HTTP_PORT}"
     --ubt.debug-timeout 5s
   )
+  if [[ -n "${UBT_OUTBOX_WAL_DIR}" ]]; then
+    cmd+=(--ubt.outbox-wal-dir "${UBT_OUTBOX_WAL_DIR}")
+  fi
   if [[ -n "${GETH_HTTP_CORSDOMAIN}" ]]; then
     cmd+=(--http.corsdomain "${GETH_HTTP_CORSDOMAIN}")
   fi
@@ -395,7 +405,8 @@ start_ubtconv() {
   local cmd=(
     "${UBTCONV_BIN}"
     --outbox-rpc-endpoint "${UBT_OUTBOX_RPC_ENDPOINT}"
-    --outbox-read-ahead "${OUTBOX_READ_AHEAD}"
+    --outbox-source "${UBT_OUTBOX_SOURCE}"
+    --outbox-wal-refresh-interval "${UBT_OUTBOX_WAL_REFRESH_INTERVAL}"
     --datadir "${UBT_DATADIR}"
     --apply-commit-interval "${APPLY_COMMIT_INTERVAL}"
     --apply-commit-max-latency "${APPLY_COMMIT_MAX_LATENCY}"
@@ -412,6 +423,13 @@ start_ubtconv() {
     --slot-index-enabled="${SLOT_INDEX_ENABLED}"
     --require-archive-replay=true
   )
+  if [[ "${UBT_OUTBOX_SOURCE}" == "wal" ]]; then
+    local wal_dir="${UBT_OUTBOX_WAL_DIR}"
+    if [[ -z "${wal_dir}" ]]; then
+      wal_dir="${GETH_DATADIR}/ubt-outbox-wal"
+    fi
+    cmd+=(--outbox-wal-dir "${wal_dir}")
+  fi
   if [[ -n "${UBTCONV_GOMEMLIMIT}" ]]; then
     cmd=(env "GOMEMLIMIT=${UBTCONV_GOMEMLIMIT}" "${cmd[@]}")
   fi

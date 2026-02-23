@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/ubtemit"
+	"github.com/ethereum/go-ethereum/core/ubtwal"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 )
@@ -75,7 +77,7 @@ func (r *rpcOutboxEvent) toEnvelope() *ubtemit.OutboxEnvelope {
 type OutboxReader struct {
 	endpoint       string
 	client         *rpc.Client
-	mu             sync.Mutex
+	mu             sync.RWMutex
 	closed         bool
 	timeout        time.Duration
 	lastReconnect  time.Time
@@ -83,65 +85,44 @@ type OutboxReader struct {
 	reconnectMin   time.Duration
 	reconnectMax   time.Duration
 	reconnectFails uint32
-	prefetchBatch  uint64
-	prefetchCache  map[uint64]*ubtemit.OutboxEnvelope
+
+	// Source selection. "rpc" is the default and "wal" uses a shared file WAL.
+	source             string
+	walReader          *ubtwal.Reader
+	walRefreshInterval time.Duration
+	lastWALRefresh     time.Time
 }
 
 // NewOutboxReader creates a new outbox reader for the given RPC endpoint.
 func NewOutboxReader(endpoint string) *OutboxReader {
 	return &OutboxReader{
-		endpoint:       endpoint,
-		timeout:        30 * time.Second,
-		reconnectDelay: 250 * time.Millisecond,
-		reconnectMin:   250 * time.Millisecond,
-		reconnectMax:   5 * time.Second,
-		prefetchBatch:  1,
-		prefetchCache:  make(map[uint64]*ubtemit.OutboxEnvelope),
+		endpoint:           endpoint,
+		timeout:            30 * time.Second,
+		reconnectDelay:     250 * time.Millisecond,
+		reconnectMin:       250 * time.Millisecond,
+		reconnectMax:       5 * time.Second,
+		source:             "rpc",
+		walRefreshInterval: 250 * time.Millisecond,
 	}
 }
 
-// SetPrefetchBatch configures how many events ReadEvent should fetch in one RPC call.
-// A value of 1 disables prefetch. The value is clamped to [1, 1000].
-func (r *OutboxReader) SetPrefetchBatch(batch uint64) {
-	if batch == 0 {
-		batch = 1
+// EnableWALSource switches event reads to WAL mode.
+// RPC remains available for validation/replay/compaction calls.
+func (r *OutboxReader) EnableWALSource(dir string, refreshInterval time.Duration) error {
+	reader, err := ubtwal.OpenReader(dir)
+	if err != nil {
+		return err
 	}
-	if batch > 1000 {
-		batch = 1000
+	if refreshInterval <= 0 {
+		refreshInterval = 250 * time.Millisecond
 	}
 	r.mu.Lock()
-	r.prefetchBatch = batch
-	r.prefetchCache = make(map[uint64]*ubtemit.OutboxEnvelope)
+	r.source = "wal"
+	r.walReader = reader
+	r.walRefreshInterval = refreshInterval
+	r.lastWALRefresh = time.Time{}
 	r.mu.Unlock()
-}
-
-func (r *OutboxReader) prefetchConfig() uint64 {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.prefetchBatch == 0 {
-		return 1
-	}
-	return r.prefetchBatch
-}
-
-func (r *OutboxReader) getPrefetched(seq uint64) (*ubtemit.OutboxEnvelope, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	env, ok := r.prefetchCache[seq]
-	if ok {
-		delete(r.prefetchCache, seq)
-	}
-	return env, ok
-}
-
-func (r *OutboxReader) fillPrefetch(envs []*ubtemit.OutboxEnvelope) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	// Reset cache each fill to keep memory bounded and sequence-local.
-	r.prefetchCache = make(map[uint64]*ubtemit.OutboxEnvelope, len(envs))
-	for _, env := range envs {
-		r.prefetchCache[env.Seq] = env
-	}
+	return nil
 }
 
 // connectLocked establishes the RPC connection. Caller must hold r.mu.
@@ -259,56 +240,21 @@ func (r *OutboxReader) acquireClient() (*rpc.Client, error) {
 // ReadEvent reads an outbox event by sequence number.
 // Returns nil if no event exists at the given sequence.
 func (r *OutboxReader) ReadEvent(seq uint64) (*ubtemit.OutboxEnvelope, error) {
-	if env, ok := r.getPrefetched(seq); ok {
-		return env, nil
+	if r.walEnabled() {
+		return r.readEventWAL(seq)
 	}
-
-	batch := r.prefetchConfig()
-	if batch > 1 {
-		to := seq + batch - 1
-		if to < seq { // overflow guard
-			to = ^uint64(0)
-		}
-		envs, err := r.ReadRange(seq, to)
-		if err != nil {
-			return nil, err
-		}
-		if len(envs) == 0 {
-			return nil, nil
-		}
-		// If the first returned seq is not the target, there is a gap at target seq.
-		// Preserve old behavior by reporting target as missing.
-		if envs[0].Seq != seq {
-			return nil, nil
-		}
-		r.fillPrefetch(envs)
-		if env, ok := r.getPrefetched(seq); ok {
-			return env, nil
-		}
-		return nil, nil
-	}
-
-	client, err := r.getClient()
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
-	defer cancel()
-
-	var result *rpcOutboxEvent
-	err = client.CallContext(ctx, &result, "ubt_getEvent", hexutil.Uint64(seq))
-	if err != nil {
-		r.resetConnection(err, "ubt_getEvent")
-		return nil, fmt.Errorf("ubt_getEvent(%d): %w", seq, err)
-	}
-	if result == nil {
-		return nil, nil
-	}
-	return result.toEnvelope(), nil
+	return r.readEventRPC(seq)
 }
 
 // ReadRange reads outbox events in [fromSeq, toSeq].
 func (r *OutboxReader) ReadRange(fromSeq, toSeq uint64) ([]*ubtemit.OutboxEnvelope, error) {
+	if r.walEnabled() {
+		return r.readRangeWAL(fromSeq, toSeq)
+	}
+	return r.readRangeRPC(fromSeq, toSeq)
+}
+
+func (r *OutboxReader) readRangeRPC(fromSeq, toSeq uint64) ([]*ubtemit.OutboxEnvelope, error) {
 	client, err := r.getClient()
 	if err != nil {
 		return nil, err
@@ -331,6 +277,27 @@ func (r *OutboxReader) ReadRange(fromSeq, toSeq uint64) ([]*ubtemit.OutboxEnvelo
 
 // LatestSeq returns the latest available sequence from the outbox.
 func (r *OutboxReader) LatestSeq() (uint64, error) {
+	if r.walEnabled() {
+		if err := r.refreshWAL(true); err != nil {
+			log.Warn("WAL refresh failed for latest seq, falling back to RPC", "err", err)
+			return r.latestSeqRPC()
+		}
+		r.mu.Lock()
+		walReader := r.walReader
+		r.mu.Unlock()
+		if walReader == nil {
+			return r.latestSeqRPC()
+		}
+		seq, ok := walReader.LatestSeq()
+		if !ok {
+			return r.latestSeqRPC()
+		}
+		return seq, nil
+	}
+	return r.latestSeqRPC()
+}
+
+func (r *OutboxReader) latestSeqRPC() (uint64, error) {
 	client, err := r.getClient()
 	if err != nil {
 		return 0, err
@@ -390,6 +357,27 @@ func parseRPCUint64(value any) (uint64, bool) {
 // LowestSeq returns the lowest retained sequence from outbox status.
 // Returns 0 when the field is unavailable.
 func (r *OutboxReader) LowestSeq() (uint64, error) {
+	if r.walEnabled() {
+		if err := r.refreshWAL(true); err != nil {
+			log.Warn("WAL refresh failed for lowest seq, falling back to RPC", "err", err)
+			return r.lowestSeqRPC()
+		}
+		r.mu.Lock()
+		walReader := r.walReader
+		r.mu.Unlock()
+		if walReader == nil {
+			return r.lowestSeqRPC()
+		}
+		seq, ok := walReader.LowestSeq()
+		if !ok {
+			return r.lowestSeqRPC()
+		}
+		return seq, nil
+	}
+	return r.lowestSeqRPC()
+}
+
+func (r *OutboxReader) lowestSeqRPC() (uint64, error) {
 	client, err := r.getClient()
 	if err != nil {
 		return 0, err
@@ -411,6 +399,26 @@ func (r *OutboxReader) LowestSeq() (uint64, error) {
 		return seq, nil
 	}
 	return 0, nil
+}
+
+func (r *OutboxReader) readEventRPC(seq uint64) (*ubtemit.OutboxEnvelope, error) {
+	client, err := r.getClient()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	defer cancel()
+
+	var result *rpcOutboxEvent
+	err = client.CallContext(ctx, &result, "ubt_getEvent", hexutil.Uint64(seq))
+	if err != nil {
+		r.resetConnection(err, "ubt_getEvent")
+		return nil, fmt.Errorf("ubt_getEvent(%d): %w", seq, err)
+	}
+	if result == nil {
+		return nil, nil
+	}
+	return result.toEnvelope(), nil
 }
 
 // ReadAccountRange reads a page of accounts at a specific block using debug_accountRange.
@@ -475,4 +483,112 @@ func (r *OutboxReader) Reconnect(endpoint string) {
 	r.reconnectFails = 0
 	r.reconnectDelay = r.reconnectMin
 	r.lastReconnect = time.Time{} // allow immediate reconnection
+}
+
+func (r *OutboxReader) walEnabled() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.source == "wal" && r.walReader != nil
+}
+
+func (r *OutboxReader) refreshWAL(force bool) error {
+	r.mu.Lock()
+	if r.source != "wal" || r.walReader == nil {
+		r.mu.Unlock()
+		return nil
+	}
+	reader := r.walReader
+	interval := r.walRefreshInterval
+	last := r.lastWALRefresh
+	r.mu.Unlock()
+
+	if !force && time.Since(last) < interval {
+		return nil
+	}
+	if err := reader.Refresh(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	if r.source == "wal" && r.walReader == reader {
+		r.lastWALRefresh = time.Now()
+	}
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *OutboxReader) readEventWAL(seq uint64) (*ubtemit.OutboxEnvelope, error) {
+	if err := r.refreshWAL(false); err != nil {
+		log.Warn("WAL refresh failed for event read, falling back to RPC", "seq", seq, "err", err)
+		return r.readEventRPC(seq)
+	}
+	r.mu.Lock()
+	reader := r.walReader
+	r.mu.Unlock()
+	if reader == nil {
+		return r.readEventRPC(seq)
+	}
+	payload, err := reader.Read(seq)
+	if errors.Is(err, ubtwal.ErrRecordNotFound) {
+		// Force one refresh before giving up to reduce stale-index misses.
+		if err := r.refreshWAL(true); err != nil {
+			return nil, err
+		}
+		payload, err = reader.Read(seq)
+	}
+	if errors.Is(err, ubtwal.ErrRecordNotFound) {
+		// WAL can lag or miss records transiently; verify against RPC before
+		// returning "not found" to the consumer.
+		return r.readEventRPC(seq)
+	}
+	if err != nil {
+		log.Warn("WAL read failed for event, falling back to RPC", "seq", seq, "err", err)
+		return r.readEventRPC(seq)
+	}
+	env, err := ubtemit.DecodeEnvelope(payload)
+	if err != nil {
+		return nil, fmt.Errorf("decode wal envelope seq=%d: %w", seq, err)
+	}
+	return env, nil
+}
+
+func (r *OutboxReader) readRangeWAL(fromSeq, toSeq uint64) ([]*ubtemit.OutboxEnvelope, error) {
+	if err := r.refreshWAL(false); err != nil {
+		log.Warn("WAL refresh failed for range read, falling back to RPC", "from", fromSeq, "to", toSeq, "err", err)
+		return r.readRangeRPC(fromSeq, toSeq)
+	}
+	r.mu.Lock()
+	reader := r.walReader
+	r.mu.Unlock()
+	if reader == nil {
+		return r.readRangeRPC(fromSeq, toSeq)
+	}
+	payloads, err := reader.ReadRange(fromSeq, toSeq)
+	if err != nil {
+		log.Warn("WAL read failed for range, falling back to RPC", "from", fromSeq, "to", toSeq, "err", err)
+		return r.readRangeRPC(fromSeq, toSeq)
+	}
+	envs := make([]*ubtemit.OutboxEnvelope, 0, len(payloads))
+	for i, payload := range payloads {
+		env, err := ubtemit.DecodeEnvelope(payload)
+		if err != nil {
+			seq := fromSeq + uint64(i)
+			return nil, fmt.Errorf("decode wal envelope seq=%d: %w", seq, err)
+		}
+		envs = append(envs, env)
+	}
+	// WAL ReadRange stops at first gap; complete tail via RPC so callers get the
+	// same semantics as RPC source mode when RPC indicates more events exist.
+	if fromSeq <= toSeq && uint64(len(envs)) < (toSeq-fromSeq+1) {
+		nextSeq := fromSeq + uint64(len(envs))
+		latestSeq, err := r.latestSeqRPC()
+		if err != nil || latestSeq < nextSeq {
+			return envs, nil
+		}
+		fallbackEnvs, err := r.readRangeRPC(nextSeq, toSeq)
+		if err != nil {
+			return nil, err
+		}
+		envs = append(envs, fallbackEnvs...)
+	}
+	return envs, nil
 }

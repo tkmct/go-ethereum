@@ -106,6 +106,7 @@ type handlerConfig struct {
 	TxPool         txPool                 // Transaction pool to propagate from
 	Network        uint64                 // Network identifier to advertise
 	Sync           ethconfig.SyncMode     // Whether to snap or full sync
+	ForceFullSync  bool                   // Forbid snap fallback and require full-sync invariants
 	BloomCache     uint64                 // Megabytes to alloc for snap sync bloom
 	EventMux       *event.TypeMux         // Legacy event mux, deprecate for `feed`
 	RequiredBlocks map[uint64]common.Hash // Hard coded map of required block hashes for sync challenges
@@ -162,8 +163,12 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		handlerDoneCh:  make(chan struct{}),
 		handlerStartCh: make(chan struct{}),
 	}
+	var err error
 	// Construct the downloader (long sync)
-	h.downloader = downloader.New(config.Database, config.Sync, h.eventMux, h.chain, h.removePeer, h.enableSyncedFeatures)
+	h.downloader, err = downloader.New(config.Database, config.Sync, config.ForceFullSync, h.eventMux, h.chain, h.removePeer, h.enableSyncedFeatures)
+	if err != nil {
+		return nil, err
+	}
 
 	// If snap sync is requested but snapshots are disabled, fail loudly
 	if h.downloader.ConfigSyncMode() == ethconfig.SnapSync && (config.Chain.Snapshots() == nil && config.Chain.TrieDB().Scheme() == rawdb.HashScheme) {

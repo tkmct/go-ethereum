@@ -26,28 +26,29 @@ import (
 
 // Config holds the ubtconv daemon configuration.
 type Config struct {
-	OutboxRPCEndpoint     string
-	OutboxReadBatch       uint64 // Number of events to prefetch per outbox read (1 = disabled)
-	OutboxReadAhead       uint64 // Consumer-side read-ahead window size (1 = disabled)
-	DataDir               string
-	ApplyCommitInterval   uint64
-	ApplyCommitMaxLatency time.Duration
+	OutboxSource             string // "rpc" (default) or "wal"
+	OutboxRPCEndpoint        string
+	OutboxWALDir             string
+	OutboxWALRefreshInterval time.Duration
+	DataDir                  string
+	ApplyCommitInterval      uint64
+	ApplyCommitMaxLatency    time.Duration
 	// PendingStatePersistInterval debounces pending-seq durability writes in hot path.
 	// 0 disables debounce (persist every transition).
 	PendingStatePersistInterval time.Duration
 	// TreatNoEventAsIdle avoids backoff escalation when the next sequence is not yet emitted.
-	TreatNoEventAsIdle       bool
-	MaxRecoverableReorgDepth uint64
-	TrieDBScheme             string // "path"
-	TrieDBStateHistory       uint64
-	RequireArchiveReplay     bool
-	AnchorSnapshotInterval   uint64 // Create anchor every N commits (0 = disabled)
-	AnchorSnapshotRetention  uint64 // Keep last N anchors (0 = keep all)
-	RecoveryAnchorInterval   uint64 // Create materialized recovery anchor every N commits (0 = disabled)
-	RecoveryAnchorRetention  uint64 // Keep last N materialized recovery anchors (0 = keep all)
-	RecoveryStrict           bool   // Fail startup if root is unavailable and no usable recovery anchor exists
-	RecoveryAllowGenesisFallback bool // Allow fallback to genesis when strict recovery cannot restore a valid anchor
-	ValidationEnabled        bool   // Enable validation checkpoint logging
+	TreatNoEventAsIdle           bool
+	MaxRecoverableReorgDepth     uint64
+	TrieDBScheme                 string // "path"
+	TrieDBStateHistory           uint64
+	RequireArchiveReplay         bool
+	AnchorSnapshotInterval       uint64 // Create anchor every N commits (0 = disabled)
+	AnchorSnapshotRetention      uint64 // Keep last N anchors (0 = keep all)
+	RecoveryAnchorInterval       uint64 // Create materialized recovery anchor every N commits (0 = disabled)
+	RecoveryAnchorRetention      uint64 // Keep last N materialized recovery anchors (0 = keep all)
+	RecoveryStrict               bool   // Fail startup if root is unavailable and no usable recovery anchor exists
+	RecoveryAllowGenesisFallback bool   // Allow fallback to genesis when strict recovery cannot restore a valid anchor
+	ValidationEnabled            bool   // Enable validation checkpoint logging
 	// ValidationSampleRate specifies validation frequency as every Nth block (0 = disabled).
 	// Note: plan §16.2 specifies float64 (random probability), but uint64 was chosen for
 	// deterministic, reproducible behavior — every Nth block is easier to reason about
@@ -95,8 +96,21 @@ type Config struct {
 
 // Validate checks if the configuration is valid.
 func (c *Config) Validate() error {
+	if c.OutboxSource == "" {
+		c.OutboxSource = "rpc"
+	}
+	if c.OutboxSource != "rpc" && c.OutboxSource != "wal" {
+		return fmt.Errorf("outbox-source must be 'rpc' or 'wal', got %q", c.OutboxSource)
+	}
+	// RPC endpoint is still required for validation/recovery/compaction control-plane calls.
 	if c.OutboxRPCEndpoint == "" {
 		return fmt.Errorf("outbox-rpc-endpoint is required")
+	}
+	if c.OutboxSource == "wal" && c.OutboxWALDir == "" {
+		return fmt.Errorf("outbox-wal-dir is required when outbox-source=wal")
+	}
+	if c.OutboxWALRefreshInterval < 0 {
+		return fmt.Errorf("outbox-wal-refresh-interval must be >= 0")
 	}
 	if c.DataDir == "" {
 		return fmt.Errorf("datadir is required")

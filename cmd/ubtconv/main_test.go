@@ -19,6 +19,7 @@ package main
 import (
 	"flag"
 	"testing"
+	"time"
 
 	"github.com/urfave/cli/v2"
 )
@@ -94,5 +95,40 @@ func TestBuildConfigFromCLI_Pprof_Enabled(t *testing.T) {
 	}
 	if cfg.PprofListenAddr != wantAddr {
 		t.Fatalf("unexpected pprof listen addr: got %s want %s", cfg.PprofListenAddr, wantAddr)
+	}
+}
+
+func TestBuildConfigFromCLI_WALSource(t *testing.T) {
+	set := flag.NewFlagSet("ubtconv-test", flag.ContinueOnError)
+	if err := outboxSourceFlag.Apply(set); err != nil {
+		t.Fatalf("apply outbox-source flag: %v", err)
+	}
+	if err := outboxWALDirFlag.Apply(set); err != nil {
+		t.Fatalf("apply outbox-wal-dir flag: %v", err)
+	}
+	if err := outboxWALRefreshIntervalFlag.Apply(set); err != nil {
+		t.Fatalf("apply outbox-wal-refresh-interval flag: %v", err)
+	}
+	if err := set.Set(outboxSourceFlag.Name, "wal"); err != nil {
+		t.Fatalf("set outbox-source=wal: %v", err)
+	}
+	wantDir := "/tmp/ubt-wal-test"
+	if err := set.Set(outboxWALDirFlag.Name, wantDir); err != nil {
+		t.Fatalf("set outbox-wal-dir: %v", err)
+	}
+	if err := set.Set(outboxWALRefreshIntervalFlag.Name, "750ms"); err != nil {
+		t.Fatalf("set outbox-wal-refresh-interval: %v", err)
+	}
+
+	ctx := cli.NewContext(app, set, nil)
+	cfg := buildConfigFromCLI(ctx)
+	if cfg.OutboxSource != "wal" {
+		t.Fatalf("expected OutboxSource=wal, got %q", cfg.OutboxSource)
+	}
+	if cfg.OutboxWALDir != wantDir {
+		t.Fatalf("expected OutboxWALDir=%s, got %s", wantDir, cfg.OutboxWALDir)
+	}
+	if cfg.OutboxWALRefreshInterval != 750*time.Millisecond {
+		t.Fatalf("unexpected OutboxWALRefreshInterval: %v", cfg.OutboxWALRefreshInterval)
 	}
 }

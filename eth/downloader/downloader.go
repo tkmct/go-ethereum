@@ -229,11 +229,15 @@ type BlockChain interface {
 }
 
 // New creates a new downloader to fetch hashes and blocks from remote peers.
-func New(stateDb ethdb.Database, mode ethconfig.SyncMode, mux *event.TypeMux, chain BlockChain, dropPeer peerDropFn, success func()) *Downloader {
+func New(stateDb ethdb.Database, mode ethconfig.SyncMode, forceFull bool, mux *event.TypeMux, chain BlockChain, dropPeer peerDropFn, success func()) (*Downloader, error) {
 	cutoffNumber, cutoffHash := chain.HistoryPruningCutoff()
+	moder, err := newSyncModer(mode, chain, stateDb, forceFull)
+	if err != nil {
+		return nil, err
+	}
 	dl := &Downloader{
 		stateDB:           stateDb,
-		moder:             newSyncModer(mode, chain, stateDb),
+		moder:             moder,
 		mux:               mux,
 		queue:             newQueue(blockCacheMaxItems, blockCacheInitialItems),
 		peers:             newPeerSet(),
@@ -251,7 +255,7 @@ func New(stateDb ethdb.Database, mode ethconfig.SyncMode, mux *event.TypeMux, ch
 	dl.skeleton = newSkeleton(stateDb, dl.peers, dropPeer, newBeaconBackfiller(dl, success), chain)
 
 	go dl.stateFetcher()
-	return dl
+	return dl, nil
 }
 
 // Progress retrieves the synchronisation boundaries, specifically the origin

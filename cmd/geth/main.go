@@ -100,6 +100,8 @@ var (
 		utils.UBTDecoupledFlag,
 		utils.UBTOutboxDBPathFlag,
 		utils.UBTOutboxWriteTimeoutFlag,
+		utils.UBTOutboxWALDirFlag,
+		utils.UBTOutboxWALSegmentSizeFlag,
 		utils.UBTReorgMarkerEnabledFlag,
 		utils.UBTOutboxReadRPCEnabledFlag,
 		utils.UBTOutboxRetentionWindowFlag,

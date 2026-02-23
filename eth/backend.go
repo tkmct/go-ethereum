@@ -192,6 +192,9 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	if networkID == 0 {
 		networkID = chainConfig.ChainID.Uint64()
 	}
+	if config.UBTConversionEnabled && config.SyncMode != ethconfig.FullSync {
+		return nil, fmt.Errorf("ubt conversion requires full sync mode, got %v", config.SyncMode)
+	}
 
 	// Assemble the Ethereum object.
 	eth := &Ethereum{
@@ -291,14 +294,21 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		if outboxPath == "" {
 			outboxPath = stack.ResolvePath("ubt-outbox")
 		}
-		outboxStore, err := ubtemit.NewOutboxStore(outboxPath, config.UBTOutboxWriteTimeout, config.UBTOutboxRetentionWindow, 0)
+		outboxStore, err := ubtemit.NewOutboxStoreWithWAL(
+			outboxPath,
+			config.UBTOutboxWriteTimeout,
+			config.UBTOutboxRetentionWindow,
+			0,
+			config.UBTOutboxWALDir,
+			config.UBTOutboxWALSegmentSize,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open UBT outbox store: %w", err)
 		}
 		eth.outboxStore = outboxStore
 		eth.emitterService = ubtemit.NewService(outboxStore)
 		eth.blockchain.SetUBTEmitter(eth.emitterService, config.UBTReorgMarkerEnabled)
-		log.Info("UBT conversion emitter enabled", "outbox", outboxPath, "retention", config.UBTOutboxRetentionWindow)
+		log.Info("UBT conversion emitter enabled", "outbox", outboxPath, "wal", config.UBTOutboxWALDir, "retention", config.UBTOutboxRetentionWindow)
 	}
 
 	// Initialize filtermaps log index.
@@ -356,6 +366,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		TxPool:         eth.txPool,
 		Network:        networkID,
 		Sync:           config.SyncMode,
+		ForceFullSync:  config.UBTConversionEnabled,
 		BloomCache:     uint64(cacheLimit),
 		EventMux:       eth.eventMux,
 		RequiredBlocks: config.RequiredBlocks,

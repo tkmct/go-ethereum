@@ -356,13 +356,6 @@ func (r *Runner) logProcessingSnapshot() {
 	processedSeq := r.consumer.processedSeq
 	outboxLag := r.consumer.outboxLag
 	uncommittedBlocks := r.consumer.uncommittedBlocks
-	readAheadQueueLen := len(r.consumer.readAheadQueue)
-	var readAheadPayloadBytes uint64
-	for _, env := range r.consumer.readAheadQueue {
-		if env != nil {
-			readAheadPayloadBytes += uint64(len(env.Payload))
-		}
-	}
 	pendingBlockRoots := len(r.consumer.pendingBlockRoots)
 	pendingStrictValidations := len(r.consumer.pendingStrictValidations)
 	lastDiffAccounts := 0
@@ -387,8 +380,6 @@ func (r *Runner) logProcessingSnapshot() {
 		"processedSeq", processedSeq,
 		"outboxLag", outboxLag,
 		"uncommittedBlocks", uncommittedBlocks,
-		"readAheadQueueLen", readAheadQueueLen,
-		"readAheadPayloadBytes", readAheadPayloadBytes,
 		"pendingBlockRoots", pendingBlockRoots,
 		"pendingStrictValidations", pendingStrictValidations,
 		"lastDiffAccounts", lastDiffAccounts,

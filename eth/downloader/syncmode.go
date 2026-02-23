@@ -17,6 +17,7 @@
 package downloader
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -33,9 +34,16 @@ type syncModer struct {
 	chain BlockChain
 	disk  ethdb.KeyValueReader
 	lock  sync.Mutex
+
+	forceFull                 bool
+	warnedPivotSnapFallback   bool
+	warnedStateSnapFallback   bool
 }
 
-func newSyncModer(mode ethconfig.SyncMode, chain BlockChain, disk ethdb.KeyValueReader) *syncModer {
+func newSyncModer(mode ethconfig.SyncMode, chain BlockChain, disk ethdb.KeyValueReader, forceFull bool) (*syncModer, error) {
+	if forceFull && mode != ethconfig.FullSync {
+		return nil, fmt.Errorf("forced full-sync requires --syncmode full, got %v", mode)
+	}
 	if mode == ethconfig.FullSync {
 		// The database seems empty as the current block is the genesis. Yet the snap
 		// block is ahead, so snap sync was enabled for this node at a certain point.
@@ -47,9 +55,15 @@ func newSyncModer(mode ethconfig.SyncMode, chain BlockChain, disk ethdb.KeyValue
 		// In these cases however it's safe to reenable snap sync.
 		fullBlock, snapBlock := chain.CurrentBlock(), chain.CurrentSnapBlock()
 		if fullBlock.Number.Uint64() == 0 && snapBlock.Number.Uint64() > 0 {
+			if forceFull {
+				return nil, fmt.Errorf("forced full-sync cannot continue on an incomplete snap-sync database (head=%d snap=%d)", fullBlock.Number.Uint64(), snapBlock.Number.Uint64())
+			}
 			mode = ethconfig.SnapSync
 			log.Warn("Switching from full-sync to snap-sync", "reason", "snap-sync incomplete")
 		} else if !chain.HasState(fullBlock.Root) {
+			if forceFull {
+				return nil, fmt.Errorf("forced full-sync cannot continue because head state is missing (head=%d hash=%s)", fullBlock.Number.Uint64(), fullBlock.Hash())
+			}
 			mode = ethconfig.SnapSync
 			log.Warn("Switching from full-sync to snap-sync", "reason", "head state missing")
 		} else {
@@ -57,6 +71,9 @@ func newSyncModer(mode ethconfig.SyncMode, chain BlockChain, disk ethdb.KeyValue
 			log.Info("Enabled full-sync", "head", fullBlock.Number, "hash", fullBlock.Hash())
 		}
 	} else {
+		if forceFull {
+			return nil, fmt.Errorf("forced full-sync requires --syncmode full, got %v", mode)
+		}
 		head := chain.CurrentBlock()
 		if head.Number.Uint64() > 0 && chain.HasState(head.Root) {
 			mode = ethconfig.FullSync
@@ -67,10 +84,11 @@ func newSyncModer(mode ethconfig.SyncMode, chain BlockChain, disk ethdb.KeyValue
 		}
 	}
 	return &syncModer{
-		mode:  mode,
-		chain: chain,
-		disk:  disk,
-	}
+		mode:      mode,
+		chain:     chain,
+		disk:      disk,
+		forceFull: forceFull,
+	}, nil
 }
 
 // get retrieves the current sync mode, either explicitly set, or derived
@@ -92,17 +110,33 @@ func (m *syncModer) get(report bool) ethconfig.SyncMode {
 	head := m.chain.CurrentBlock()
 	if pivot := rawdb.ReadLastPivotNumber(m.disk); pivot != nil {
 		if head.Number.Uint64() < *pivot {
+			if m.forceFull {
+				if !m.warnedPivotSnapFallback {
+					log.Warn("Forced full-sync: refusing snap-sync fallback below pivot", "head", head.Number, "pivot", pivot)
+					m.warnedPivotSnapFallback = true
+				}
+				return ethconfig.FullSync
+			}
 			logger("Reenabled snap-sync as chain is lagging behind the pivot", "head", head.Number, "pivot", pivot)
 			return ethconfig.SnapSync
 		}
+		m.warnedPivotSnapFallback = false
 	}
 	// We are in a full sync, but the associated head state is missing. To complete
 	// the head state, forcefully rerun the snap sync. Note it doesn't mean the
 	// persistent state is corrupted, just mismatch with the head block.
 	if !m.chain.HasState(head.Root) {
+		if m.forceFull {
+			if !m.warnedStateSnapFallback {
+				log.Warn("Forced full-sync: refusing snap-sync fallback for missing head state", "head", head.Number, "hash", head.Hash())
+				m.warnedStateSnapFallback = true
+			}
+			return ethconfig.FullSync
+		}
 		logger("Reenabled snap-sync as chain is stateless")
 		return ethconfig.SnapSync
 	}
+	m.warnedStateSnapFallback = false
 	// Nope, we're really full syncing
 	return ethconfig.FullSync
 }

@@ -38,15 +38,19 @@ var (
 		Usage: "Geth RPC endpoint for outbox consumption",
 		Value: "http://localhost:8545",
 	}
-	outboxReadBatchFlag = &cli.Uint64Flag{
-		Name:  "outbox-read-batch",
-		Usage: "Number of outbox events to prefetch per read (1 = disable prefetch, max 1000)",
-		Value: 1,
+	outboxSourceFlag = &cli.StringFlag{
+		Name:  "outbox-source",
+		Usage: "Outbox source mode: rpc or wal",
+		Value: "rpc",
 	}
-	outboxReadAheadFlag = &cli.Uint64Flag{
-		Name:  "outbox-read-ahead",
-		Usage: "Consumer-side read-ahead window size (1 = disabled)",
-		Value: 64,
+	outboxWALDirFlag = &cli.StringFlag{
+		Name:  "outbox-wal-dir",
+		Usage: "Path to shared UBT outbox WAL directory (required when --outbox-source=wal)",
+	}
+	outboxWALRefreshIntervalFlag = &cli.DurationFlag{
+		Name:  "outbox-wal-refresh-interval",
+		Usage: "WAL index refresh interval while tailing (0 uses default)",
+		Value: 250 * time.Millisecond,
 	}
 	dataDirectoryFlag = &cli.StringFlag{
 		Name:  "datadir",
@@ -239,8 +243,9 @@ func init() {
 	app.Action = runDaemon
 	app.Flags = []cli.Flag{
 		outboxRPCEndpointFlag,
-		outboxReadBatchFlag,
-		outboxReadAheadFlag,
+		outboxSourceFlag,
+		outboxWALDirFlag,
+		outboxWALRefreshIntervalFlag,
 		dataDirectoryFlag,
 		applyCommitIntervalFlag,
 		applyCommitMaxLatencyFlag,
@@ -314,7 +319,11 @@ func runDaemon(ctx *cli.Context) error {
 		return fmt.Errorf("failed to start: %w", err)
 	}
 
-	log.Info("UBT conversion daemon started", "endpoint", cfg.OutboxRPCEndpoint, "datadir", cfg.DataDir)
+	log.Info("UBT conversion daemon started",
+		"outboxSource", cfg.OutboxSource,
+		"endpoint", cfg.OutboxRPCEndpoint,
+		"walDir", cfg.OutboxWALDir,
+		"datadir", cfg.DataDir)
 
 	// Wait for signal
 	sig := <-sigCh
@@ -325,9 +334,10 @@ func runDaemon(ctx *cli.Context) error {
 
 func buildConfigFromCLI(ctx *cli.Context) *Config {
 	return &Config{
+		OutboxSource:                      ctx.String(outboxSourceFlag.Name),
 		OutboxRPCEndpoint:                 ctx.String(outboxRPCEndpointFlag.Name),
-		OutboxReadBatch:                   ctx.Uint64(outboxReadBatchFlag.Name),
-		OutboxReadAhead:                   ctx.Uint64(outboxReadAheadFlag.Name),
+		OutboxWALDir:                      ctx.String(outboxWALDirFlag.Name),
+		OutboxWALRefreshInterval:          ctx.Duration(outboxWALRefreshIntervalFlag.Name),
 		DataDir:                           ctx.String(dataDirectoryFlag.Name),
 		ApplyCommitInterval:               ctx.Uint64(applyCommitIntervalFlag.Name),
 		ApplyCommitMaxLatency:             ctx.Duration(applyCommitMaxLatencyFlag.Name),

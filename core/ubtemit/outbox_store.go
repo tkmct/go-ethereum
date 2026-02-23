@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/ubtwal"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/ethdb/leveldb"
 	"github.com/ethereum/go-ethereum/log"
@@ -34,6 +35,7 @@ var ErrEventNotFound = errors.New("outbox event not found")
 // OutboxStore manages the dedicated outbox database for UBT conversion events.
 type OutboxStore struct {
 	db           ethdb.Database // Dedicated outbox database (NOT chainDB)
+	walWriter    *ubtwal.Writer
 	mu           sync.Mutex
 	nextSeq      uint64 // Next sequence number to assign
 	lowestSeq    uint64 // Lowest non-deleted sequence for incremental compaction
@@ -49,6 +51,11 @@ type OutboxStore struct {
 
 // NewOutboxStore opens or creates the dedicated outbox database.
 func NewOutboxStore(path string, writeTimeout time.Duration, retentionWindow uint64, diskBudgetBytes uint64) (*OutboxStore, error) {
+	return NewOutboxStoreWithWAL(path, writeTimeout, retentionWindow, diskBudgetBytes, "", 0)
+}
+
+// NewOutboxStoreWithWAL opens or creates the dedicated outbox database and optional WAL mirror.
+func NewOutboxStoreWithWAL(path string, writeTimeout time.Duration, retentionWindow uint64, diskBudgetBytes uint64, walDir string, walSegmentSize uint64) (*OutboxStore, error) {
 	// Open a LevelDB at the given path with reasonable defaults
 	// cache: 256 MB, handles: 256, namespace: "ubtoutbox", readonly: false
 	kvdb, err := leveldb.New(path, 256, 256, "ubtoutbox", false)
@@ -64,10 +71,26 @@ func NewOutboxStore(path string, writeTimeout time.Duration, retentionWindow uin
 	lowestSeq := rawdb.ReadUBTOutboxLowestSeq(db)
 	diskUsage := rawdb.ReadUBTOutboxDiskUsage(db)
 
-	log.Info("Opened UBT outbox store", "path", path, "nextSeq", nextSeq, "lowestSeq", lowestSeq, "diskUsage", diskUsage)
+	var walWriter *ubtwal.Writer
+	if walDir != "" {
+		walWriter, err = ubtwal.OpenWriter(walDir, walSegmentSize)
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to open outbox wal at %s: %w", walDir, err)
+		}
+		// Best-effort WAL compaction alignment on startup.
+		if lowestSeq > 0 {
+			if _, err := walWriter.PruneBelow(lowestSeq); err != nil {
+				log.Warn("UBT outbox WAL prune on startup failed", "lowestSeq", lowestSeq, "err", err)
+			}
+		}
+	}
+
+	log.Info("Opened UBT outbox store", "path", path, "nextSeq", nextSeq, "lowestSeq", lowestSeq, "diskUsage", diskUsage, "walDir", walDir)
 
 	return &OutboxStore{
 		db:                  db,
+		walWriter:           walWriter,
 		nextSeq:             nextSeq,
 		lowestSeq:           lowestSeq,
 		cumulativeDiskUsage: diskUsage,
@@ -102,6 +125,12 @@ func (s *OutboxStore) Append(env *OutboxEnvelope) (uint64, error) {
 	// Atomically write event + sequence counter to prevent desynchronization on crash
 	if err := rawdb.WriteUBTOutboxEventAtomic(s.db, seq, data, s.nextSeq+1); err != nil {
 		return 0, err
+	}
+	if s.walWriter != nil {
+		if err := s.walWriter.Append(seq, data); err != nil {
+			// Mirror failure should not block canonical import; DB write already succeeded.
+			log.Error("UBT outbox WAL mirror append failed", "seq", seq, "err", err)
+		}
 	}
 
 	// Only update in-memory counter after successful atomic write
@@ -164,6 +193,7 @@ func (s *OutboxStore) compactLocked() {
 		rawdb.WriteUBTOutboxLowestSeq(s.db, s.lowestSeq)
 		outboxCompactedTotal.Inc(int64(count))
 		log.Debug("UBT outbox auto-compact", "pruned", count, "oldestKept", oldestToKeep)
+		s.pruneWALLocked(s.lowestSeq)
 	}
 }
 
@@ -202,6 +232,7 @@ func (s *OutboxStore) Compact() (int, error) {
 		rawdb.WriteUBTOutboxLowestSeq(s.db, s.lowestSeq)
 		outboxCompactedTotal.Inc(int64(count))
 		log.Info("UBT outbox compacted", "pruned", count, "oldestKept", oldestToKeep)
+		s.pruneWALLocked(s.lowestSeq)
 	}
 	return count, nil
 }
@@ -305,8 +336,23 @@ func (s *OutboxStore) CompactBelow(safeSeq uint64) (int, error) {
 		rawdb.WriteUBTOutboxLowestSeq(s.db, s.lowestSeq)
 		outboxCompactedTotal.Inc(int64(count))
 		log.Info("UBT outbox compacted below safe seq", "safeSeq", safeSeq, "pruned", count)
+		s.pruneWALLocked(s.lowestSeq)
 	}
 	return count, nil
+}
+
+func (s *OutboxStore) pruneWALLocked(floorSeq uint64) {
+	if s.walWriter == nil || floorSeq == 0 {
+		return
+	}
+	pruned, err := s.walWriter.PruneBelow(floorSeq)
+	if err != nil {
+		log.Warn("UBT outbox WAL prune failed", "floorSeq", floorSeq, "err", err)
+		return
+	}
+	if pruned > 0 {
+		log.Debug("UBT outbox WAL pruned", "floorSeq", floorSeq, "segments", pruned)
+	}
 }
 
 // PersistFailureCheckpoint writes the last failure info to the outbox DB for restart diagnostics.
@@ -330,5 +376,11 @@ func (s *OutboxStore) ClearFailureCheckpoint() {
 
 // Close closes the outbox database.
 func (s *OutboxStore) Close() error {
+	if s.walWriter != nil {
+		if err := s.walWriter.Close(); err != nil {
+			_ = s.db.Close()
+			return err
+		}
+	}
 	return s.db.Close()
 }

@@ -81,6 +81,7 @@ var Defaults = Config{
 	UBTOutboxReadRPCEnabled:  true,
 	UBTOutboxWriteTimeout:    5 * time.Second,
 	UBTOutboxRetentionWindow: 100000,
+	UBTOutboxWALSegmentSize:  0, // 0 = use writer default
 }
 
 //go:generate go run github.com/fjl/gencodec -type Config -formats toml -out gen_config.go
@@ -134,6 +135,8 @@ type Config struct {
 	UBTDecoupledMode         bool          // Use decoupled outbox+daemon architecture
 	UBTOutboxDBPath          string        // Path for dedicated outbox DB (default: <datadir>/ubt-outbox)
 	UBTOutboxWriteTimeout    time.Duration // Outbox write timeout
+	UBTOutboxWALDir          string        // Path for optional outbox WAL mirror (empty = disabled)
+	UBTOutboxWALSegmentSize  uint64        // Segment size for WAL mirror in bytes (0 = default)
 	UBTReorgMarkerEnabled    bool          // Emit reorg markers (default: true)
 	UBTOutboxReadRPCEnabled  bool          // Enable outbox-read RPC (default: true)
 	UBTOutboxRetentionWindow uint64        // Keep last N sequences (0 = unlimited)

@@ -17,66 +17,68 @@ import (
 // MarshalTOML marshals as TOML.
 func (c Config) MarshalTOML() (interface{}, error) {
 	type Config struct {
-		Genesis                 *core.Genesis `toml:",omitempty"`
-		NetworkId               uint64
-		SyncMode                SyncMode
-		HistoryMode             history.HistoryMode
-		EthDiscoveryURLs        []string
-		SnapDiscoveryURLs       []string
-		NoPruning               bool
-		NoPrefetch              bool
-		TxLookupLimit           uint64 `toml:",omitempty"`
-		TransactionHistory      uint64 `toml:",omitempty"`
-		LogHistory              uint64 `toml:",omitempty"`
-		LogNoHistory            bool   `toml:",omitempty"`
-		LogExportCheckpoints    string
-		StateHistory            uint64                 `toml:",omitempty"`
-		TrienodeHistory         int64                  `toml:",omitempty"`
-		NodeFullValueCheckpoint uint32                 `toml:",omitempty"`
-		StateScheme             string                 `toml:",omitempty"`
-		RequiredBlocks          map[uint64]common.Hash `toml:"-"`
-		SlowBlockThreshold      time.Duration          `toml:",omitempty"`
-		SkipBcVersionCheck      bool                   `toml:"-"`
-		DatabaseHandles         int                    `toml:"-"`
-		DatabaseCache           int
-		DatabaseFreezer         string
-		DatabaseEra             string
-		TrieCleanCache          int
-		TrieDirtyCache          int
-		TrieTimeout             time.Duration
-		SnapshotCache           int
-		Preimages               bool
-		FilterLogCacheSize      int
-		LogQueryLimit           int
-		Miner                   miner.Config
-		TxPool                  legacypool.Config
-		BlobPool                blobpool.Config
-		GPO                     gasprice.Config
-		EnablePreimageRecording bool
-		EnableWitnessStats      bool
-		StatelessSelfValidation bool
-		EnableStateSizeTracking bool
-		VMTrace                 string
-		VMTraceJsonConfig       string
-		RPCGasCap               uint64
-		RPCEVMTimeout           time.Duration
-		RPCTxFeeCap             float64
-		OverrideOsaka           *uint64       `toml:",omitempty"`
-		OverrideBPO1            *uint64       `toml:",omitempty"`
-		OverrideBPO2            *uint64       `toml:",omitempty"`
-		OverrideVerkle          *uint64       `toml:",omitempty"`
-		TxSyncDefaultTimeout       time.Duration `toml:",omitempty"`
-		TxSyncMaxTimeout           time.Duration `toml:",omitempty"`
-		RangeLimit                 uint64        `toml:",omitempty"`
-		UBTConversionEnabled       bool
-		UBTDecoupledMode           bool
-		UBTOutboxDBPath            string
-		UBTOutboxWriteTimeout      time.Duration
-		UBTReorgMarkerEnabled      bool
-		UBTOutboxReadRPCEnabled    bool
-		UBTOutboxRetentionWindow   uint64
-		UBTDebugEndpoint           string
-		UBTDebugTimeout            time.Duration
+		Genesis                  *core.Genesis `toml:",omitempty"`
+		NetworkId                uint64
+		SyncMode                 SyncMode
+		HistoryMode              history.HistoryMode
+		EthDiscoveryURLs         []string
+		SnapDiscoveryURLs        []string
+		NoPruning                bool
+		NoPrefetch               bool
+		TxLookupLimit            uint64 `toml:",omitempty"`
+		TransactionHistory       uint64 `toml:",omitempty"`
+		LogHistory               uint64 `toml:",omitempty"`
+		LogNoHistory             bool   `toml:",omitempty"`
+		LogExportCheckpoints     string
+		StateHistory             uint64                 `toml:",omitempty"`
+		TrienodeHistory          int64                  `toml:",omitempty"`
+		NodeFullValueCheckpoint  uint32                 `toml:",omitempty"`
+		StateScheme              string                 `toml:",omitempty"`
+		RequiredBlocks           map[uint64]common.Hash `toml:"-"`
+		SlowBlockThreshold       time.Duration          `toml:",omitempty"`
+		SkipBcVersionCheck       bool                   `toml:"-"`
+		DatabaseHandles          int                    `toml:"-"`
+		DatabaseCache            int
+		DatabaseFreezer          string
+		DatabaseEra              string
+		TrieCleanCache           int
+		TrieDirtyCache           int
+		TrieTimeout              time.Duration
+		SnapshotCache            int
+		Preimages                bool
+		FilterLogCacheSize       int
+		LogQueryLimit            int
+		Miner                    miner.Config
+		TxPool                   legacypool.Config
+		BlobPool                 blobpool.Config
+		GPO                      gasprice.Config
+		EnablePreimageRecording  bool
+		EnableWitnessStats       bool
+		StatelessSelfValidation  bool
+		EnableStateSizeTracking  bool
+		VMTrace                  string
+		VMTraceJsonConfig        string
+		RPCGasCap                uint64
+		RPCEVMTimeout            time.Duration
+		RPCTxFeeCap              float64
+		OverrideOsaka            *uint64       `toml:",omitempty"`
+		OverrideBPO1             *uint64       `toml:",omitempty"`
+		OverrideBPO2             *uint64       `toml:",omitempty"`
+		OverrideVerkle           *uint64       `toml:",omitempty"`
+		TxSyncDefaultTimeout     time.Duration `toml:",omitempty"`
+		TxSyncMaxTimeout         time.Duration `toml:",omitempty"`
+		RangeLimit               uint64        `toml:",omitempty"`
+		UBTConversionEnabled     bool
+		UBTDecoupledMode         bool
+		UBTOutboxDBPath          string
+		UBTOutboxWriteTimeout    time.Duration
+		UBTOutboxWALDir          string
+		UBTOutboxWALSegmentSize  uint64
+		UBTReorgMarkerEnabled    bool
+		UBTOutboxReadRPCEnabled  bool
+		UBTOutboxRetentionWindow uint64
+		UBTDebugEndpoint         string
+		UBTDebugTimeout          time.Duration
 	}
 	var enc Config
 	enc.Genesis = c.Genesis
@@ -134,6 +136,8 @@ func (c Config) MarshalTOML() (interface{}, error) {
 	enc.UBTDecoupledMode = c.UBTDecoupledMode
 	enc.UBTOutboxDBPath = c.UBTOutboxDBPath
 	enc.UBTOutboxWriteTimeout = c.UBTOutboxWriteTimeout
+	enc.UBTOutboxWALDir = c.UBTOutboxWALDir
+	enc.UBTOutboxWALSegmentSize = c.UBTOutboxWALSegmentSize
 	enc.UBTReorgMarkerEnabled = c.UBTReorgMarkerEnabled
 	enc.UBTOutboxReadRPCEnabled = c.UBTOutboxReadRPCEnabled
 	enc.UBTOutboxRetentionWindow = c.UBTOutboxRetentionWindow
@@ -145,66 +149,68 @@ func (c Config) MarshalTOML() (interface{}, error) {
 // UnmarshalTOML unmarshals from TOML.
 func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	type Config struct {
-		Genesis                 *core.Genesis `toml:",omitempty"`
-		NetworkId               *uint64
-		SyncMode                *SyncMode
-		HistoryMode             *history.HistoryMode
-		EthDiscoveryURLs        []string
-		SnapDiscoveryURLs       []string
-		NoPruning               *bool
-		NoPrefetch              *bool
-		TxLookupLimit           *uint64 `toml:",omitempty"`
-		TransactionHistory      *uint64 `toml:",omitempty"`
-		LogHistory              *uint64 `toml:",omitempty"`
-		LogNoHistory            *bool   `toml:",omitempty"`
-		LogExportCheckpoints    *string
-		StateHistory            *uint64                `toml:",omitempty"`
-		TrienodeHistory         *int64                 `toml:",omitempty"`
-		NodeFullValueCheckpoint *uint32                `toml:",omitempty"`
-		StateScheme             *string                `toml:",omitempty"`
-		RequiredBlocks          map[uint64]common.Hash `toml:"-"`
-		SlowBlockThreshold      *time.Duration         `toml:",omitempty"`
-		SkipBcVersionCheck      *bool                  `toml:"-"`
-		DatabaseHandles         *int                   `toml:"-"`
-		DatabaseCache           *int
-		DatabaseFreezer         *string
-		DatabaseEra             *string
-		TrieCleanCache          *int
-		TrieDirtyCache          *int
-		TrieTimeout             *time.Duration
-		SnapshotCache           *int
-		Preimages               *bool
-		FilterLogCacheSize      *int
-		LogQueryLimit           *int
-		Miner                   *miner.Config
-		TxPool                  *legacypool.Config
-		BlobPool                *blobpool.Config
-		GPO                     *gasprice.Config
-		EnablePreimageRecording *bool
-		EnableWitnessStats      *bool
-		StatelessSelfValidation *bool
-		EnableStateSizeTracking *bool
-		VMTrace                 *string
-		VMTraceJsonConfig       *string
-		RPCGasCap               *uint64
-		RPCEVMTimeout           *time.Duration
-		RPCTxFeeCap             *float64
-		OverrideOsaka           *uint64        `toml:",omitempty"`
-		OverrideBPO1            *uint64        `toml:",omitempty"`
-		OverrideBPO2            *uint64        `toml:",omitempty"`
-		OverrideVerkle          *uint64        `toml:",omitempty"`
-		TxSyncDefaultTimeout       *time.Duration `toml:",omitempty"`
-		TxSyncMaxTimeout           *time.Duration `toml:",omitempty"`
-		RangeLimit                 *uint64        `toml:",omitempty"`
-		UBTConversionEnabled       *bool
-		UBTDecoupledMode           *bool
-		UBTOutboxDBPath            *string
-		UBTOutboxWriteTimeout      *time.Duration
-		UBTReorgMarkerEnabled      *bool
-		UBTOutboxReadRPCEnabled    *bool
-		UBTOutboxRetentionWindow   *uint64
-		UBTDebugEndpoint           *string
-		UBTDebugTimeout            *time.Duration
+		Genesis                  *core.Genesis `toml:",omitempty"`
+		NetworkId                *uint64
+		SyncMode                 *SyncMode
+		HistoryMode              *history.HistoryMode
+		EthDiscoveryURLs         []string
+		SnapDiscoveryURLs        []string
+		NoPruning                *bool
+		NoPrefetch               *bool
+		TxLookupLimit            *uint64 `toml:",omitempty"`
+		TransactionHistory       *uint64 `toml:",omitempty"`
+		LogHistory               *uint64 `toml:",omitempty"`
+		LogNoHistory             *bool   `toml:",omitempty"`
+		LogExportCheckpoints     *string
+		StateHistory             *uint64                `toml:",omitempty"`
+		TrienodeHistory          *int64                 `toml:",omitempty"`
+		NodeFullValueCheckpoint  *uint32                `toml:",omitempty"`
+		StateScheme              *string                `toml:",omitempty"`
+		RequiredBlocks           map[uint64]common.Hash `toml:"-"`
+		SlowBlockThreshold       *time.Duration         `toml:",omitempty"`
+		SkipBcVersionCheck       *bool                  `toml:"-"`
+		DatabaseHandles          *int                   `toml:"-"`
+		DatabaseCache            *int
+		DatabaseFreezer          *string
+		DatabaseEra              *string
+		TrieCleanCache           *int
+		TrieDirtyCache           *int
+		TrieTimeout              *time.Duration
+		SnapshotCache            *int
+		Preimages                *bool
+		FilterLogCacheSize       *int
+		LogQueryLimit            *int
+		Miner                    *miner.Config
+		TxPool                   *legacypool.Config
+		BlobPool                 *blobpool.Config
+		GPO                      *gasprice.Config
+		EnablePreimageRecording  *bool
+		EnableWitnessStats       *bool
+		StatelessSelfValidation  *bool
+		EnableStateSizeTracking  *bool
+		VMTrace                  *string
+		VMTraceJsonConfig        *string
+		RPCGasCap                *uint64
+		RPCEVMTimeout            *time.Duration
+		RPCTxFeeCap              *float64
+		OverrideOsaka            *uint64        `toml:",omitempty"`
+		OverrideBPO1             *uint64        `toml:",omitempty"`
+		OverrideBPO2             *uint64        `toml:",omitempty"`
+		OverrideVerkle           *uint64        `toml:",omitempty"`
+		TxSyncDefaultTimeout     *time.Duration `toml:",omitempty"`
+		TxSyncMaxTimeout         *time.Duration `toml:",omitempty"`
+		RangeLimit               *uint64        `toml:",omitempty"`
+		UBTConversionEnabled     *bool
+		UBTDecoupledMode         *bool
+		UBTOutboxDBPath          *string
+		UBTOutboxWriteTimeout    *time.Duration
+		UBTOutboxWALDir          *string
+		UBTOutboxWALSegmentSize  *uint64
+		UBTReorgMarkerEnabled    *bool
+		UBTOutboxReadRPCEnabled  *bool
+		UBTOutboxRetentionWindow *uint64
+		UBTDebugEndpoint         *string
+		UBTDebugTimeout          *time.Duration
 	}
 	var dec Config
 	if err := unmarshal(&dec); err != nil {
@@ -374,6 +380,12 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	}
 	if dec.UBTOutboxWriteTimeout != nil {
 		c.UBTOutboxWriteTimeout = *dec.UBTOutboxWriteTimeout
+	}
+	if dec.UBTOutboxWALDir != nil {
+		c.UBTOutboxWALDir = *dec.UBTOutboxWALDir
+	}
+	if dec.UBTOutboxWALSegmentSize != nil {
+		c.UBTOutboxWALSegmentSize = *dec.UBTOutboxWALSegmentSize
 	}
 	if dec.UBTReorgMarkerEnabled != nil {
 		c.UBTReorgMarkerEnabled = *dec.UBTReorgMarkerEnabled

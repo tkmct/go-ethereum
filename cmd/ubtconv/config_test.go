@@ -153,6 +153,19 @@ func TestConfigValidate_ValidConfigs(t *testing.T) {
 				TrieDBScheme:          "path",
 			},
 		},
+		{
+			name: "wal source",
+			config: &Config{
+				OutboxSource:             "wal",
+				OutboxRPCEndpoint:        "http://localhost:8545",
+				OutboxWALDir:             "/tmp/ubt-wal",
+				OutboxWALRefreshInterval: 500 * time.Millisecond,
+				DataDir:                  "/data/ubtconv",
+				ApplyCommitInterval:      50,
+				ApplyCommitMaxLatency:    10 * time.Minute,
+				TrieDBScheme:             "path",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -162,6 +175,42 @@ func TestConfigValidate_ValidConfigs(t *testing.T) {
 				t.Fatalf("expected valid config, got error: %v", err)
 			}
 		})
+	}
+}
+
+func TestConfigValidate_InvalidOutboxSource(t *testing.T) {
+	cfg := &Config{
+		OutboxSource:          "invalid",
+		OutboxRPCEndpoint:     "http://localhost:8545",
+		DataDir:               "/tmp/test",
+		ApplyCommitInterval:   10,
+		ApplyCommitMaxLatency: time.Minute,
+		TrieDBScheme:          "path",
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error for invalid outbox source")
+	}
+	if !strings.Contains(err.Error(), "outbox-source must be 'rpc' or 'wal'") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestConfigValidate_WALSourceRequiresWALDir(t *testing.T) {
+	cfg := &Config{
+		OutboxSource:          "wal",
+		OutboxRPCEndpoint:     "http://localhost:8545",
+		DataDir:               "/tmp/test",
+		ApplyCommitInterval:   10,
+		ApplyCommitMaxLatency: time.Minute,
+		TrieDBScheme:          "path",
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error for wal source without wal dir")
+	}
+	if !strings.Contains(err.Error(), "outbox-wal-dir is required when outbox-source=wal") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

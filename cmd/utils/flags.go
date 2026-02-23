@@ -357,6 +357,17 @@ var (
 		Value:    5 * time.Second,
 		Category: flags.StateCategory,
 	}
+	UBTOutboxWALDirFlag = &cli.StringFlag{
+		Name:     "ubt.outbox-wal-dir",
+		Usage:    "Path for optional UBT outbox WAL mirror (empty = disabled)",
+		Category: flags.StateCategory,
+	}
+	UBTOutboxWALSegmentSizeFlag = &cli.Uint64Flag{
+		Name:     "ubt.outbox-wal-segment-size",
+		Usage:    "Segment size for UBT outbox WAL mirror in bytes (0 = default)",
+		Value:    0,
+		Category: flags.StateCategory,
+	}
 	UBTReorgMarkerEnabledFlag = &cli.BoolFlag{
 		Name:     "ubt.reorg-marker-enabled",
 		Usage:    "Enable UBT reorg marker emission",
@@ -1830,6 +1841,12 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	if ctx.IsSet(UBTOutboxWriteTimeoutFlag.Name) {
 		cfg.UBTOutboxWriteTimeout = ctx.Duration(UBTOutboxWriteTimeoutFlag.Name)
 	}
+	if ctx.IsSet(UBTOutboxWALDirFlag.Name) {
+		cfg.UBTOutboxWALDir = ctx.String(UBTOutboxWALDirFlag.Name)
+	}
+	if ctx.IsSet(UBTOutboxWALSegmentSizeFlag.Name) {
+		cfg.UBTOutboxWALSegmentSize = ctx.Uint64(UBTOutboxWALSegmentSizeFlag.Name)
+	}
 	if ctx.IsSet(UBTReorgMarkerEnabledFlag.Name) {
 		cfg.UBTReorgMarkerEnabled = ctx.Bool(UBTReorgMarkerEnabledFlag.Name)
 	}
@@ -1847,6 +1864,9 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	}
 	if ctx.IsSet(UBTDebugRPCProxyEnabledFlag.Name) {
 		cfg.UBTDebugRPCProxyEnabled = ctx.Bool(UBTDebugRPCProxyEnabledFlag.Name)
+	}
+	if cfg.UBTConversionEnabled && cfg.SyncMode != ethconfig.FullSync {
+		Fatalf("--%s requires --%s=full (current: %s)", UBTConversionEnabledFlag.Name, SyncModeFlag.Name, cfg.SyncMode)
 	}
 	if ctx.IsSet(CacheFlag.Name) || ctx.IsSet(CacheTrieFlag.Name) {
 		cfg.TrieCleanCache = ctx.Int(CacheFlag.Name) * ctx.Int(CacheTrieFlag.Name) / 100
