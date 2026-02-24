@@ -22,7 +22,6 @@ import (
 	"math/big"
 	"net"
 	"net/http"
-	"sort"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -51,6 +50,11 @@ func NewQueryAPI(consumer *Consumer) *QueryAPI {
 type queryStateRef struct {
 	blockNumber uint64
 	root        common.Hash
+}
+
+type witnessBlockRef struct {
+	blockNumber uint64
+	blockHash   common.Hash
 }
 
 func (api *QueryAPI) historyWindow() uint64 {
@@ -138,6 +142,71 @@ func (api *QueryAPI) resolveBlockSelector(blockNrOrHash *rpc.BlockNumberOrHash) 
 		return api.resolveBlockByHash(hash, blockNrOrHash.RequireCanonical, latest)
 	}
 	return queryStateRef{}, fmt.Errorf("invalid block selector")
+}
+
+func (api *QueryAPI) ensureBlockRetained(blockNumber, latest uint64) error {
+	if blockNumber > latest {
+		return fmt.Errorf("state not yet available: requested block %d is ahead of daemon applied head %d", blockNumber, latest)
+	}
+	if blockNumber == latest {
+		return nil
+	}
+	window := api.historyWindow()
+	if window == 0 || latest-blockNumber > window {
+		return fmt.Errorf("state not available: block %d is outside retained UBT state history window", blockNumber)
+	}
+	return nil
+}
+
+func (api *QueryAPI) resolveWitnessBlockSelector(blockNrOrHash *rpc.BlockNumberOrHash) (witnessBlockRef, error) {
+	latest := api.latestStateRef().blockNumber
+	resolveByNumber := func(blockNumber uint64) (witnessBlockRef, error) {
+		if err := api.ensureBlockRetained(blockNumber, latest); err != nil {
+			return witnessBlockRef{}, err
+		}
+		var hash common.Hash
+		if api.consumer.db != nil {
+			hash = rawdb.ReadUBTCanonicalBlockHash(api.consumer.db, blockNumber)
+		}
+		return witnessBlockRef{blockNumber: blockNumber, blockHash: hash}, nil
+	}
+
+	if blockNrOrHash == nil {
+		return resolveByNumber(latest)
+	}
+	if bn, ok := blockNrOrHash.Number(); ok {
+		switch bn {
+		case rpc.LatestBlockNumber:
+			return resolveByNumber(latest)
+		case rpc.PendingBlockNumber, rpc.SafeBlockNumber, rpc.FinalizedBlockNumber:
+			return witnessBlockRef{}, fmt.Errorf("unsupported block selector tag for UBT debug RPC: %s", bn.String())
+		}
+		if bn < 0 {
+			return witnessBlockRef{}, fmt.Errorf("unsupported block selector tag for UBT debug RPC: %s", bn.String())
+		}
+		return resolveByNumber(uint64(bn))
+	}
+	if hash, ok := blockNrOrHash.Hash(); ok {
+		if api.consumer.db == nil {
+			return witnessBlockRef{}, fmt.Errorf("state not available: hash selector requires canonical UBT index")
+		}
+		blockNumber, found := rawdb.ReadUBTCanonicalBlockNumber(api.consumer.db, hash)
+		if !found {
+			return witnessBlockRef{}, fmt.Errorf("state not available: unknown canonical block hash %s", hash)
+		}
+		canonicalHash := rawdb.ReadUBTCanonicalBlockHash(api.consumer.db, blockNumber)
+		if canonicalHash != hash {
+			if blockNrOrHash.RequireCanonical {
+				return witnessBlockRef{}, fmt.Errorf("state not available: non-canonical block hash %s", hash)
+			}
+			return witnessBlockRef{}, fmt.Errorf("state not available: block hash %s is not indexed", hash)
+		}
+		if err := api.ensureBlockRetained(blockNumber, latest); err != nil {
+			return witnessBlockRef{}, err
+		}
+		return witnessBlockRef{blockNumber: blockNumber, blockHash: hash}, nil
+	}
+	return witnessBlockRef{}, fmt.Errorf("invalid block selector")
 }
 
 func (api *QueryAPI) trieForQuery(root common.Hash) (*bintrie.BinaryTrie, error) {
@@ -596,8 +665,7 @@ func (api *QueryAPI) CallUBT(ctx context.Context, args map[string]any, blockNrOr
 	return result.ReturnData, nil
 }
 
-// ExecutionWitnessUBT returns a deterministic, execution-class witness snapshot for a selected block.
-// Current implementation is root-bound and intentionally partial until full tx re-execution wiring is completed.
+// ExecutionWitnessUBT returns a complete proof-pack execution witness for a selected block.
 func (api *QueryAPI) ExecutionWitnessUBT(ctx context.Context, blockNrOrHash *rpc.BlockNumberOrHash) (map[string]any, error) {
 	api.consumer.mu.Lock()
 	if api.consumer.applier == nil {
@@ -608,43 +676,130 @@ func (api *QueryAPI) ExecutionWitnessUBT(ctx context.Context, blockNrOrHash *rpc
 		api.consumer.mu.Unlock()
 		return nil, fmt.Errorf("ubt_executionWitnessUBT: execution-class RPC disabled (set --execution-class-rpc-enabled)")
 	}
-	stateRef, err := api.resolveBlockSelector(blockNrOrHash)
+	blockRef, err := api.resolveWitnessBlockSelector(blockNrOrHash)
 	if err != nil {
 		api.consumer.mu.Unlock()
 		return nil, err
 	}
-	blockHash := common.Hash{}
-	if api.consumer.db != nil {
-		blockHash = rawdb.ReadUBTCanonicalBlockHash(api.consumer.db, stateRef.blockNumber)
+	if api.consumer.db == nil {
+		api.consumer.mu.Unlock()
+		return nil, fmt.Errorf("ubt_executionWitnessUBT: witness index unavailable")
+	}
+	meta := rawdb.ReadUBTExecutionWitnessMeta(api.consumer.db, blockRef.blockNumber)
+	if meta == nil {
+		api.consumer.mu.Unlock()
+		queryWitnessMissTotal.Inc(1)
+		return nil, fmt.Errorf("ubt_executionWitnessUBT: witness_not_ready for block %d", blockRef.blockNumber)
+	}
+	if meta.BlockNumber != blockRef.blockNumber {
+		api.consumer.mu.Unlock()
+		queryWitnessMissTotal.Inc(1)
+		return nil, fmt.Errorf("ubt_executionWitnessUBT: witness metadata mismatch for block %d", blockRef.blockNumber)
+	}
+	canonicalHash := rawdb.ReadUBTCanonicalBlockHash(api.consumer.db, blockRef.blockNumber)
+	if canonicalHash != (common.Hash{}) && canonicalHash != meta.BlockHash {
+		api.consumer.mu.Unlock()
+		queryWitnessMissTotal.Inc(1)
+		return nil, fmt.Errorf("ubt_executionWitnessUBT: witness canonical mismatch at block %d", blockRef.blockNumber)
+	}
+	if blockRef.blockHash != (common.Hash{}) && meta.BlockHash != blockRef.blockHash {
+		api.consumer.mu.Unlock()
+		queryWitnessMissTotal.Inc(1)
+		return nil, fmt.Errorf("ubt_executionWitnessUBT: witness hash mismatch for block %d", blockRef.blockNumber)
+	}
+	blob := rawdb.ReadUBTExecutionWitnessBlob(api.consumer.db, meta.BlockHash)
+	api.consumer.mu.Unlock()
+	if len(blob) == 0 {
+		queryWitnessMissTotal.Inc(1)
+		return nil, fmt.Errorf("ubt_executionWitnessUBT: witness_not_ready for block %d", blockRef.blockNumber)
 	}
 
-	accountsTouched := make([]string, 0)
-	storageTouched := make([]string, 0)
-	codeTouched := make([]string, 0)
-	if api.consumer.lastDiff != nil && api.consumer.lastDiff.Root == stateRef.root && stateRef.blockNumber == api.consumer.state.AppliedBlock {
-		for _, acct := range api.consumer.lastDiff.Accounts {
-			accountsTouched = append(accountsTouched, acct.Address.Hex())
-		}
-		for _, slot := range api.consumer.lastDiff.Storage {
-			storageTouched = append(storageTouched, fmt.Sprintf("%s:%s", slot.Address.Hex(), slot.SlotKeyRaw.Hex()))
-		}
-		for _, code := range api.consumer.lastDiff.Codes {
-			codeTouched = append(codeTouched, code.Address.Hex())
-		}
+	pack, err := decodeExecutionWitnessPack(blob)
+	if err != nil {
+		queryWitnessMissTotal.Inc(1)
+		return nil, fmt.Errorf("ubt_executionWitnessUBT: decode witness for block %d: %w", blockRef.blockNumber, err)
 	}
-	api.consumer.mu.Unlock()
-	sort.Strings(accountsTouched)
-	sort.Strings(storageTouched)
-	sort.Strings(codeTouched)
+	if pack.Version != executionWitnessFormatV1 {
+		queryWitnessMissTotal.Inc(1)
+		return nil, fmt.Errorf("ubt_executionWitnessUBT: unsupported witness version %d", pack.Version)
+	}
+	if pack.BlockNumber != meta.BlockNumber || pack.BlockHash != meta.BlockHash || pack.StateRoot != meta.StateRoot {
+		queryWitnessMissTotal.Inc(1)
+		return nil, fmt.Errorf("ubt_executionWitnessUBT: witness integrity mismatch for block %d", blockRef.blockNumber)
+	}
+
+	accountsTouched := make([]string, 0, len(pack.AccountsTouched))
+	for _, addr := range pack.AccountsTouched {
+		accountsTouched = append(accountsTouched, addr.Hex())
+	}
+	storageTouched := make([]string, 0, len(pack.StorageTouched))
+	for _, slot := range pack.StorageTouched {
+		storageTouched = append(storageTouched, fmt.Sprintf("%s:%s", slot.Address.Hex(), slot.Slot.Hex()))
+	}
+	codeTouched := make([]string, 0, len(pack.CodeTouched))
+	for _, addr := range pack.CodeTouched {
+		codeTouched = append(codeTouched, addr.Hex())
+	}
+
+	accounts := make([]map[string]any, 0, len(pack.Accounts))
+	for _, acct := range pack.Accounts {
+		balance := acct.Balance
+		if balance == nil {
+			balance = new(big.Int)
+		}
+		accounts = append(accounts, map[string]any{
+			"address":    acct.Address,
+			"key":        acct.Key,
+			"nonce":      hexutil.Uint64(acct.Nonce),
+			"balance":    (*hexutil.Big)(balance),
+			"codeHash":   acct.CodeHash,
+			"alive":      acct.Alive,
+			"proofNodes": proofNodesToHexMap(acct.Proof),
+		})
+	}
+
+	storage := make([]map[string]any, 0, len(pack.Storage))
+	for _, slot := range pack.Storage {
+		storage = append(storage, map[string]any{
+			"address":    slot.Address,
+			"slot":       slot.Slot,
+			"key":        slot.Key,
+			"value":      slot.Value,
+			"proofNodes": proofNodesToHexMap(slot.Proof),
+		})
+	}
+
+	codes := make([]map[string]any, 0, len(pack.Codes))
+	for _, code := range pack.Codes {
+		codes = append(codes, map[string]any{
+			"address":  code.Address,
+			"codeHash": code.CodeHash,
+			"code":     hexutil.Bytes(code.Code),
+		})
+	}
+	queryWitnessHitTotal.Inc(1)
 
 	return map[string]any{
-		"blockNumber":     hexutil.Uint64(stateRef.blockNumber),
-		"blockHash":       blockHash,
-		"stateRoot":       stateRef.root,
+		"version":         "v1",
+		"status":          "complete",
+		"witnessType":     "proof_pack",
+		"blockNumber":     hexutil.Uint64(pack.BlockNumber),
+		"blockHash":       pack.BlockHash,
+		"parentHash":      pack.ParentHash,
+		"parentStateRoot": pack.ParentStateRoot,
+		"stateRoot":       pack.StateRoot,
 		"accountsTouched": accountsTouched,
 		"storageTouched":  storageTouched,
 		"codeTouched":     codeTouched,
-		"status":          "partial",
+		"accounts":        accounts,
+		"storage":         storage,
+		"codes":           codes,
+		"meta": map[string]any{
+			"accounts": hexutil.Uint64(uint64(len(pack.Accounts))),
+			"storage":  hexutil.Uint64(uint64(len(pack.Storage))),
+			"codes":    hexutil.Uint64(uint64(len(pack.Codes))),
+			"blobSize": hexutil.Uint64(uint64(meta.BlobSize)),
+		},
 	}, nil
 }
 

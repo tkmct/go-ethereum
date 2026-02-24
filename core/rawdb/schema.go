@@ -171,10 +171,10 @@ var (
 	// UBT outbox keys
 	ubtOutboxEventPrefix       = []byte("ubt-evt-")       // ubt-evt- + seq (8 bytes big-endian) -> RLP-encoded OutboxEnvelope
 	ubtOutboxSeqCounterKey     = []byte("ubt-seq")        // Current sequence counter
-	ubtOutboxLowestSeqKey      = []byte("ubt-lowseq")    // Lowest non-deleted sequence number
-	ubtOutboxDiskUsageKey      = []byte("ubt-diskusage") // Cumulative disk usage bytes
-	ubtOutboxConsumerStateKey  = []byte("ubt-consumer")  // Consumer checkpoint state
-	ubtOutboxFailureCkptKey    = []byte("ubt-failckpt")  // Last emitter failure checkpoint (block + reason)
+	ubtOutboxLowestSeqKey      = []byte("ubt-lowseq")     // Lowest non-deleted sequence number
+	ubtOutboxDiskUsageKey      = []byte("ubt-diskusage")  // Cumulative disk usage bytes
+	ubtOutboxConsumerStateKey  = []byte("ubt-consumer")   // Consumer checkpoint state
+	ubtOutboxFailureCkptKey    = []byte("ubt-failckpt")   // Last emitter failure checkpoint (block + reason)
 	ubtBlockRootPrefix         = []byte("ubt-blk-root-")  // ubt-blk-root- + block number (8 bytes big-endian) -> UBT root hash
 	ubtBlockHashPrefix         = []byte("ubt-blk-hash-")  // ubt-blk-hash- + block number (8 bytes big-endian) -> canonical block hash
 	ubtBlockParentHashPrefix   = []byte("ubt-blk-phash-") // ubt-blk-phash- + block number (8 bytes big-endian) -> canonical parent hash
@@ -182,9 +182,11 @@ var (
 	ubtAnchorSnapshotPrefix    = []byte("ubt-anchor-")    // ubt-anchor- + index (8 bytes big-endian) -> RLP-encoded UBTAnchorSnapshot
 	ubtAnchorSnapshotCountKey  = []byte("ubt-anchor-cnt") // Total count of anchor snapshots
 	// Materialized recovery anchors (MRA)
-	ubtRecoveryAnchorPrefix       = []byte("ubt-rec-anchor-")       // ubt-rec-anchor- + index (8 bytes big-endian) -> RLP-encoded UBTRecoveryAnchorManifest
-	ubtRecoveryAnchorCountKey     = []byte("ubt-rec-anchor-cnt")    // Total number of recovery anchors ever created
+	ubtRecoveryAnchorPrefix         = []byte("ubt-rec-anchor-")      // ubt-rec-anchor- + index (8 bytes big-endian) -> RLP-encoded UBTRecoveryAnchorManifest
+	ubtRecoveryAnchorCountKey       = []byte("ubt-rec-anchor-cnt")   // Total number of recovery anchors ever created
 	ubtRecoveryAnchorLatestReadyKey = []byte("ubt-rec-anchor-ready") // Latest ready recovery anchor index (8 bytes big-endian)
+	ubtExecutionWitnessMetaPrefix   = []byte("ubt-wit-meta-")        // ubt-wit-meta- + block number (8 bytes big-endian) -> RLP-encoded UBTExecutionWitnessMeta
+	ubtExecutionWitnessBlobPrefix   = []byte("ubt-wit-blob-")        // ubt-wit-blob- + block hash (32 bytes) -> RLP-encoded execution witness payload
 )
 
 // LegacyTxLookupEntry is the legacy TxLookupEntry definition with some unnecessary
@@ -538,5 +540,23 @@ func ubtRecoveryAnchorKey(index uint64) []byte {
 	key := make([]byte, len(ubtRecoveryAnchorPrefix)+8)
 	copy(key, ubtRecoveryAnchorPrefix)
 	binary.BigEndian.PutUint64(key[len(ubtRecoveryAnchorPrefix):], index)
+	return key
+}
+
+// ubtExecutionWitnessMetaKey creates the key for execution witness metadata by block number.
+// ubtExecutionWitnessMetaKey = ubtExecutionWitnessMetaPrefix + block number (8 bytes big-endian)
+func ubtExecutionWitnessMetaKey(blockNumber uint64) []byte {
+	key := make([]byte, len(ubtExecutionWitnessMetaPrefix)+8)
+	copy(key, ubtExecutionWitnessMetaPrefix)
+	binary.BigEndian.PutUint64(key[len(ubtExecutionWitnessMetaPrefix):], blockNumber)
+	return key
+}
+
+// ubtExecutionWitnessBlobKey creates the key for execution witness payload by block hash.
+// ubtExecutionWitnessBlobKey = ubtExecutionWitnessBlobPrefix + block hash
+func ubtExecutionWitnessBlobKey(blockHash common.Hash) []byte {
+	key := make([]byte, len(ubtExecutionWitnessBlobPrefix)+common.HashLength)
+	copy(key, ubtExecutionWitnessBlobPrefix)
+	copy(key[len(ubtExecutionWitnessBlobPrefix):], blockHash.Bytes())
 	return key
 }

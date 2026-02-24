@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/rpc"
 )
@@ -317,7 +318,7 @@ func TestCallUBT_BlockSelectorVariants(t *testing.T) {
 	})
 }
 
-// TestExecutionWitnessUBT_Basic verifies ExecutionWitnessUBT returns deterministic partial witness.
+// TestExecutionWitnessUBT_Basic verifies ExecutionWitnessUBT returns complete witness and proofs are verifiable.
 func TestExecutionWitnessUBT_Basic(t *testing.T) {
 	applier := newTestApplier(t)
 	defer applier.Close()
@@ -331,8 +332,22 @@ func TestExecutionWitnessUBT_Basic(t *testing.T) {
 	if err := applier.CommitAt(1); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
+	root := applier.Root()
 	db := rawdb.NewMemoryDatabase()
-	rawdb.WriteUBTBlockRoot(db, 1, applier.Root())
+	hash1 := common.HexToHash("0x1111")
+	rawdb.WriteUBTBlockRoot(db, 1, root)
+	rawdb.WriteUBTCanonicalBlock(db, 1, hash1, common.Hash{})
+
+	pack, err := buildExecutionWitnessPack(applier, diff, 1, hash1, common.Hash{}, common.Hash{}, root)
+	if err != nil {
+		t.Fatalf("buildExecutionWitnessPack: %v", err)
+	}
+	blob, err := encodeExecutionWitnessPack(pack)
+	if err != nil {
+		t.Fatalf("encodeExecutionWitnessPack: %v", err)
+	}
+	rawdb.WriteUBTExecutionWitnessMeta(db, 1, witnessMetaFromPack(pack, len(blob)))
+	rawdb.WriteUBTExecutionWitnessBlob(db, hash1, blob)
 
 	consumer := &Consumer{
 		cfg: &Config{
@@ -342,9 +357,9 @@ func TestExecutionWitnessUBT_Basic(t *testing.T) {
 		applier: applier,
 		db:      db,
 		state: ConsumerState{
-			AppliedSeq:   2,
-			AppliedBlock: 2,
-			AppliedRoot:  applier.Root(),
+			AppliedSeq:   1,
+			AppliedBlock: 1,
+			AppliedRoot:  root,
 		},
 	}
 	api := NewQueryAPI(consumer)
@@ -355,11 +370,74 @@ func TestExecutionWitnessUBT_Basic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExecutionWitnessUBT should succeed: %v", err)
 	}
-	if status, ok := result["status"].(string); !ok || status == "" {
-		t.Fatalf("expected witness status field, got: %#v", result)
+	if status, ok := result["status"].(string); !ok || status != "complete" {
+		t.Fatalf("expected status=complete, got: %#v", result["status"])
 	}
-	if root, ok := result["stateRoot"].(common.Hash); !ok || root == (common.Hash{}) {
+	if witnessType, ok := result["witnessType"].(string); !ok || witnessType != "proof_pack" {
+		t.Fatalf("expected witnessType=proof_pack, got: %#v", result["witnessType"])
+	}
+	stateRoot, ok := result["stateRoot"].(common.Hash)
+	if !ok || stateRoot == (common.Hash{}) {
 		t.Fatalf("expected non-zero stateRoot, got: %#v", result["stateRoot"])
+	}
+
+	accounts, ok := result["accounts"].([]map[string]any)
+	if !ok || len(accounts) == 0 {
+		t.Fatalf("expected non-empty accounts witness entries, got: %#v", result["accounts"])
+	}
+	key, ok := accounts[0]["key"].(common.Hash)
+	if !ok {
+		t.Fatalf("expected account key in witness entry, got: %#v", accounts[0]["key"])
+	}
+	proofNodes, ok := accounts[0]["proofNodes"].(map[common.Hash]hexutil.Bytes)
+	if !ok {
+		t.Fatalf("expected account proofNodes, got: %#v", accounts[0]["proofNodes"])
+	}
+	verifyResult, err := api.VerifyProof(ctx, stateRoot, key, proofNodes)
+	if err != nil {
+		t.Fatalf("VerifyProof should succeed: %v", err)
+	}
+	if !verifyResult.Valid || !verifyResult.Present {
+		t.Fatalf("expected valid+present proof result, got: %#v", verifyResult)
+	}
+}
+
+func TestExecutionWitnessUBT_MissingWitness(t *testing.T) {
+	applier := newTestApplier(t)
+	defer applier.Close()
+
+	addr := common.HexToAddress("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	diff := makeDiff(addr, 1, big.NewInt(1))
+	if _, err := applier.ApplyDiff(diff); err != nil {
+		t.Fatalf("ApplyDiff: %v", err)
+	}
+	if err := applier.CommitAt(1); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	db := rawdb.NewMemoryDatabase()
+	hash1 := common.HexToHash("0x1111")
+	rawdb.WriteUBTBlockRoot(db, 1, applier.Root())
+	rawdb.WriteUBTCanonicalBlock(db, 1, hash1, common.Hash{})
+
+	consumer := &Consumer{
+		cfg:     &Config{ExecutionClassRPCEnabled: true, TrieDBStateHistory: 128},
+		applier: applier,
+		db:      db,
+		state: ConsumerState{
+			AppliedSeq:   1,
+			AppliedBlock: 1,
+			AppliedRoot:  applier.Root(),
+		},
+	}
+	api := NewQueryAPI(consumer)
+	block1 := rpc.BlockNumberOrHashWithNumber(1)
+	_, err := api.ExecutionWitnessUBT(context.Background(), &block1)
+	if err == nil {
+		t.Fatal("expected witness_not_ready error")
+	}
+	if !strings.Contains(err.Error(), "witness_not_ready") {
+		t.Fatalf("expected witness_not_ready error, got: %v", err)
 	}
 }
 

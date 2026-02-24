@@ -784,6 +784,65 @@ func TestUBTRecoveryAnchorManifest_Delete(t *testing.T) {
 	}
 }
 
+func TestUBTExecutionWitnessMetaAndBlob(t *testing.T) {
+	db := memorydb.New()
+
+	blockNumber := uint64(77)
+	blockHash := common.HexToHash("0x7777")
+	meta := &UBTExecutionWitnessMeta{
+		FormatVersion:   1,
+		BlockNumber:     blockNumber,
+		BlockHash:       blockHash,
+		ParentHash:      common.HexToHash("0x6666"),
+		ParentStateRoot: common.HexToHash("0x1111"),
+		StateRoot:       common.HexToHash("0x2222"),
+		AccountsCount:   3,
+		StorageCount:    4,
+		CodeCount:       5,
+		BlobSize:        16,
+	}
+	blob := []byte("witness-payload")
+
+	WriteUBTExecutionWitnessMeta(db, blockNumber, meta)
+	WriteUBTExecutionWitnessBlob(db, blockHash, blob)
+
+	gotMeta := ReadUBTExecutionWitnessMeta(db, blockNumber)
+	if gotMeta == nil {
+		t.Fatal("expected witness meta, got nil")
+	}
+	if gotMeta.BlockHash != blockHash {
+		t.Fatalf("expected block hash %v, got %v", blockHash, gotMeta.BlockHash)
+	}
+	if gotMeta.StateRoot != meta.StateRoot {
+		t.Fatalf("expected state root %v, got %v", meta.StateRoot, gotMeta.StateRoot)
+	}
+
+	gotBlob := ReadUBTExecutionWitnessBlob(db, blockHash)
+	if !bytes.Equal(gotBlob, blob) {
+		t.Fatalf("expected blob %x, got %x", blob, gotBlob)
+	}
+
+	DeleteUBTExecutionWitness(db, blockNumber)
+
+	if got := ReadUBTExecutionWitnessMeta(db, blockNumber); got != nil {
+		t.Fatalf("expected nil witness meta after delete, got %v", got)
+	}
+	if got := ReadUBTExecutionWitnessBlob(db, blockHash); got != nil {
+		t.Fatalf("expected nil witness blob after delete, got %x", got)
+	}
+}
+
+func TestUBTExecutionWitnessMeta_DecodeFailure(t *testing.T) {
+	db := memorydb.New()
+	blockNumber := uint64(88)
+	if err := db.Put(ubtExecutionWitnessMetaKey(blockNumber), []byte{0xff, 0x00}); err != nil {
+		t.Fatalf("put corrupted meta: %v", err)
+	}
+	if got := ReadUBTExecutionWitnessMeta(db, blockNumber); got != nil {
+		t.Fatalf("expected nil on decode failure, got %v", got)
+	}
+}
+
 func TestUBTCanonicalBlockMetadata(t *testing.T) {
 	db := memorydb.New()
 

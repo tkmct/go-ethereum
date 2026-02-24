@@ -154,6 +154,8 @@ type Consumer struct {
 
 	// Last diff for strict validation (retained between ConsumeNext and commit)
 	lastDiff *ubtemit.QueuedDiffV1
+	// Per-block complete execution witness payloads pending commit.
+	pendingWitnesses map[uint64]*executionWitnessPackV1
 
 	// Debounced durability for pending state.
 	stateDirty         bool
@@ -210,6 +212,7 @@ func NewConsumer(cfg *Config) (*Consumer, error) {
 		lastCommitTime:           time.Now(),
 		lastStatePersistAt:       time.Now(),
 		pendingStrictValidations: make(map[uint64]*ubtemit.QueuedDiffV1),
+		pendingWitnesses:         make(map[uint64]*executionWitnessPackV1),
 		recoveryMode:             "normal",
 	}
 
@@ -612,6 +615,7 @@ func (c *Consumer) handleImplicitReorg(decision *consumeDecision) (bool, error) 
 		c.pendingParentHash = rawdb.ReadUBTCanonicalParentHash(c.db, c.state.AppliedBlock)
 		c.uncommittedBlocks = 0
 		c.pendingBlockRoots = c.pendingBlockRoots[:0]
+		clear(c.pendingWitnesses)
 	}
 	consumerReorgTotal.Inc(1)
 	// Re-read the event will happen on the next ConsumeNext cycle.
@@ -629,7 +633,14 @@ func (c *Consumer) executeDiffTransition(decision *consumeDecision, start time.T
 	// Crash-consistency: persist pendingSeq AFTER decode validation but BEFORE apply (plan §12).
 	c.markPendingSeq(decision.targetSeq)
 	shouldValidateStrict, strictAsync := c.strictValidationPolicy(decision)
-	needIntermediateRoot := c.shouldWriteBlockRootIndex(decision.env.BlockNumber) || (strictAsync && shouldValidateStrict)
+	captureExecutionWitness := c.cfg != nil && c.cfg.ExecutionClassRPCEnabled
+	needIntermediateRoot := c.shouldWriteBlockRootIndex(decision.env.BlockNumber) || (strictAsync && shouldValidateStrict) || captureExecutionWitness
+	parentStateRoot := c.pendingRoot
+	if captureExecutionWitness && !c.pendingRootKnown {
+		parentStateRoot = c.applier.Trie().Hash()
+		c.pendingRoot = parentStateRoot
+		c.pendingRootKnown = true
+	}
 	applyStart := time.Now()
 	var root common.Hash
 	if needIntermediateRoot {
@@ -669,6 +680,25 @@ func (c *Consumer) executeDiffTransition(decision *consumeDecision, start time.T
 		// overhead, so pendingRoot is stale for pendingBlock and must not be used
 		// for commit-time mismatch warning.
 		c.pendingRootKnown = false
+	}
+	if captureExecutionWitness {
+		witnessStart := time.Now()
+		pack, err := buildExecutionWitnessPack(
+			c.applier,
+			diff,
+			decision.env.BlockNumber,
+			decision.env.BlockHash,
+			decision.env.ParentHash,
+			parentStateRoot,
+			root,
+		)
+		if err != nil {
+			consumerWitnessBuildFailures.Inc(1)
+			return fmt.Errorf("build execution witness at seq %d: %w", decision.targetSeq, err)
+		}
+		consumerWitnessBuildTotal.Inc(1)
+		consumerWitnessBuildLatency.UpdateSince(witnessStart)
+		c.pendingWitnesses[decision.env.BlockNumber] = pack
 	}
 	consumerAppliedTotal.Inc(1)
 	consumerAppliedLatency.UpdateSince(start)
@@ -795,22 +825,59 @@ func (c *Consumer) commit() error {
 	// Batch state + root index writes to reduce write amplification.
 	batch := c.db.NewBatch()
 	rawdb.WriteUBTConsumerState(batch, c.consumerStateSnapshot())
+	requireWitnessWrites := c.cfg != nil && c.cfg.ExecutionClassRPCEnabled && len(c.pendingWitnesses) > 0
+
+	writeWitness := func(block uint64) error {
+		if !requireWitnessWrites {
+			return nil
+		}
+		pack, ok := c.pendingWitnesses[block]
+		if !ok {
+			return fmt.Errorf("missing execution witness for block %d", block)
+		}
+		blob, err := encodeExecutionWitnessPack(pack)
+		if err != nil {
+			return fmt.Errorf("encode execution witness for block %d: %w", block, err)
+		}
+		consumerWitnessBlobBytesTotal.Inc(int64(len(blob)))
+		meta := witnessMetaFromPack(pack, len(blob))
+		rawdb.WriteUBTExecutionWitnessMeta(batch, block, meta)
+		rawdb.WriteUBTExecutionWitnessBlob(batch, meta.BlockHash, blob)
+		return nil
+	}
 
 	wroteFinalRoot := false
+	wroteFinalCanonical := false
+	wroteFinalWitness := false
 	for _, pbr := range c.pendingBlockRoots {
-		if !c.shouldWriteBlockRootIndex(pbr.block) {
-			continue
-		}
-		rawdb.WriteUBTBlockRoot(batch, pbr.block, pbr.root)
 		rawdb.WriteUBTCanonicalBlock(batch, pbr.block, pbr.blockHash, pbr.parentHash)
+		if c.shouldWriteBlockRootIndex(pbr.block) {
+			rawdb.WriteUBTBlockRoot(batch, pbr.block, pbr.root)
+			if pbr.block == c.state.AppliedBlock {
+				wroteFinalRoot = pbr.root == c.state.AppliedRoot
+			}
+		}
 		if pbr.block == c.state.AppliedBlock {
-			wroteFinalRoot = pbr.root == c.state.AppliedRoot
+			wroteFinalCanonical = pbr.blockHash == c.pendingBlockHash
+		}
+		if err := writeWitness(pbr.block); err != nil {
+			return err
+		}
+		if pbr.block == c.state.AppliedBlock {
+			wroteFinalWitness = true
 		}
 	}
 	// Always write final committed block root/index.
 	if !wroteFinalRoot {
 		rawdb.WriteUBTBlockRoot(batch, c.state.AppliedBlock, c.state.AppliedRoot)
+	}
+	if !wroteFinalCanonical {
 		rawdb.WriteUBTCanonicalBlock(batch, c.state.AppliedBlock, c.pendingBlockHash, c.pendingParentHash)
+	}
+	if requireWitnessWrites && !wroteFinalWitness {
+		if err := writeWitness(c.state.AppliedBlock); err != nil {
+			return err
+		}
 	}
 	batchWriteStart := time.Now()
 	if err := batch.Write(); err != nil {
@@ -837,6 +904,7 @@ func (c *Consumer) commit() error {
 		}
 	}
 	c.pendingBlockRoots = c.pendingBlockRoots[:0]
+	clear(c.pendingWitnesses)
 
 	c.uncommittedBlocks = 0
 	c.lastCommitTime = time.Now()
@@ -1011,6 +1079,7 @@ func (c *Consumer) handleReorg(marker *ubtemit.ReorgMarkerV1) error {
 	if len(c.pendingStrictValidations) > 0 {
 		c.pendingStrictValidations = make(map[uint64]*ubtemit.QueuedDiffV1)
 	}
+	clear(c.pendingWitnesses)
 
 	// Look up the UBT root at the common ancestor block
 	ancestorRoot := rawdb.ReadUBTBlockRoot(c.db, ancestorBlock)
@@ -1030,6 +1099,8 @@ func (c *Consumer) handleReorg(marker *ubtemit.ReorgMarkerV1) error {
 			c.pendingBlockHash = rawdb.ReadUBTCanonicalBlockHash(c.db, c.state.AppliedBlock)
 			c.pendingParentHash = rawdb.ReadUBTCanonicalParentHash(c.db, c.state.AppliedBlock)
 			c.uncommittedBlocks = 0
+			c.pendingBlockRoots = c.pendingBlockRoots[:0]
+			clear(c.pendingWitnesses)
 			log.Info("UBT reverted to last committed root", "root", c.state.AppliedRoot)
 			return nil
 		}
@@ -1099,6 +1170,7 @@ func (c *Consumer) handleReorg(marker *ubtemit.ReorgMarkerV1) error {
 	for block := ancestorBlock + 1; block <= c.state.AppliedBlock; block++ {
 		rawdb.DeleteUBTBlockRoot(c.db, block)
 		rawdb.DeleteUBTCanonicalBlock(c.db, block)
+		rawdb.DeleteUBTExecutionWitness(c.db, block)
 	}
 
 	// Commit immediately after reorg to persist the clean state
@@ -1129,6 +1201,7 @@ func (c *Consumer) restoreToGenesis(targetBlock uint64, reason string) error {
 	c.pendingParentHash = common.Hash{}
 	c.uncommittedBlocks = 0
 	c.pendingBlockRoots = c.pendingBlockRoots[:0]
+	clear(c.pendingWitnesses)
 	if c.pendingStrictValidations != nil {
 		for block := range c.pendingStrictValidations {
 			delete(c.pendingStrictValidations, block)

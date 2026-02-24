@@ -60,6 +60,20 @@ type UBTFailureCheckpoint struct {
 	Reason      string
 }
 
+// UBTExecutionWitnessMeta stores metadata for execution witness payloads.
+type UBTExecutionWitnessMeta struct {
+	FormatVersion   uint16
+	BlockNumber     uint64
+	BlockHash       common.Hash
+	ParentHash      common.Hash
+	ParentStateRoot common.Hash
+	StateRoot       common.Hash
+	AccountsCount   uint32
+	StorageCount    uint32
+	CodeCount       uint32
+	BlobSize        uint32
+}
+
 // WriteUBTOutboxEvent writes an outbox event at the given sequence number.
 // NOTE: This function uses log.Crit on failure, making it unsuitable for
 // production hot paths. For production outbox writes from the emitter,
@@ -242,6 +256,82 @@ func ReadUBTConsumerState(db ethdb.KeyValueReader) *UBTConsumerState {
 		return nil
 	}
 	return &state
+}
+
+// WriteUBTExecutionWitnessMeta writes execution witness metadata for a block.
+func WriteUBTExecutionWitnessMeta(db ethdb.KeyValueWriter, blockNumber uint64, meta *UBTExecutionWitnessMeta) {
+	if meta == nil {
+		log.Crit("Failed to write UBT execution witness meta: nil metadata", "block", blockNumber)
+	}
+	data, err := rlp.EncodeToBytes(meta)
+	if err != nil {
+		log.Crit("Failed to RLP encode UBT execution witness meta", "block", blockNumber, "err", err)
+	}
+	if err := db.Put(ubtExecutionWitnessMetaKey(blockNumber), data); err != nil {
+		log.Crit("Failed to write UBT execution witness meta", "block", blockNumber, "err", err)
+	}
+}
+
+// ReadUBTExecutionWitnessMeta reads execution witness metadata for a block.
+func ReadUBTExecutionWitnessMeta(db ethdb.KeyValueReader, blockNumber uint64) *UBTExecutionWitnessMeta {
+	data, err := db.Get(ubtExecutionWitnessMetaKey(blockNumber))
+	if err != nil {
+		return nil
+	}
+	var meta UBTExecutionWitnessMeta
+	if err := rlp.DecodeBytes(data, &meta); err != nil {
+		log.Error("Failed to decode UBT execution witness meta", "block", blockNumber, "err", err)
+		return nil
+	}
+	return &meta
+}
+
+// DeleteUBTExecutionWitnessMeta deletes execution witness metadata for a block.
+func DeleteUBTExecutionWitnessMeta(db ethdb.KeyValueWriter, blockNumber uint64) {
+	if err := db.Delete(ubtExecutionWitnessMetaKey(blockNumber)); err != nil {
+		log.Crit("Failed to delete UBT execution witness meta", "block", blockNumber, "err", err)
+	}
+}
+
+// WriteUBTExecutionWitnessBlob writes execution witness payload keyed by block hash.
+func WriteUBTExecutionWitnessBlob(db ethdb.KeyValueWriter, blockHash common.Hash, blob []byte) {
+	if blockHash == (common.Hash{}) {
+		log.Crit("Failed to write UBT execution witness blob: zero block hash")
+	}
+	if err := db.Put(ubtExecutionWitnessBlobKey(blockHash), blob); err != nil {
+		log.Crit("Failed to write UBT execution witness blob", "hash", blockHash, "size", len(blob), "err", err)
+	}
+}
+
+// ReadUBTExecutionWitnessBlob reads execution witness payload by block hash.
+func ReadUBTExecutionWitnessBlob(db ethdb.KeyValueReader, blockHash common.Hash) []byte {
+	if blockHash == (common.Hash{}) {
+		return nil
+	}
+	data, err := db.Get(ubtExecutionWitnessBlobKey(blockHash))
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+// DeleteUBTExecutionWitnessBlob deletes execution witness payload by block hash.
+func DeleteUBTExecutionWitnessBlob(db ethdb.KeyValueWriter, blockHash common.Hash) {
+	if blockHash == (common.Hash{}) {
+		return
+	}
+	if err := db.Delete(ubtExecutionWitnessBlobKey(blockHash)); err != nil {
+		log.Crit("Failed to delete UBT execution witness blob", "hash", blockHash, "err", err)
+	}
+}
+
+// DeleteUBTExecutionWitness deletes witness metadata and blob for a block.
+func DeleteUBTExecutionWitness(db ethdb.KeyValueStore, blockNumber uint64) {
+	meta := ReadUBTExecutionWitnessMeta(db, blockNumber)
+	if meta != nil {
+		DeleteUBTExecutionWitnessBlob(db, meta.BlockHash)
+	}
+	DeleteUBTExecutionWitnessMeta(db, blockNumber)
 }
 
 // WriteUBTOutboxEventAtomic atomically writes an outbox event and updates the sequence counter.

@@ -232,8 +232,9 @@ curl -s -H 'Content-Type: application/json' \
 
 ### Witness notes
 
-- `ubt_executionWitnessUBT` currently returns `status: "partial"` by design.
-- `accountsTouched/storageTouched/codeTouched` can be empty depending on selected block/root.
+- `ubt_executionWitnessUBT` returns `status: "complete"` with `witnessType: "proof_pack"` when witness data is available.
+- Witness responses include per-account/storage proof nodes and touched code payloads for the selected block.
+- If complete witness data is unavailable (not retained, not yet persisted, or inconsistent), RPC returns an error (`witness_not_ready`) instead of a partial payload.
 - For strict direct/proxy comparison, query both methods with the **same explicit block**.
 
 ## Catch-up Throughput Controls
