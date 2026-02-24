@@ -4,6 +4,10 @@ This directory contains automation scripts for end-to-end session execution with
 
 ## Script
 - `run_sessions.sh`: orchestrates `geth` + `ubtconv` lifecycle and validation sessions.
+- `run_keeper_witness_smoke.sh`: executes a keeper-style witness flow:
+  - fetch `debug_executionWitnessUBT`
+  - verify all account/storage proofs via `ubt_verifyProof`
+  - run execution parity check (`eth_call` vs `debug_callUBT`) at the same block
 
 ## Sessions
 1. `disabled`
@@ -40,6 +44,9 @@ scripts/ubt_sessions/run_sessions.sh --session all
 
 # Run only execution-enabled session
 scripts/ubt_sessions/run_sessions.sh --session enabled
+
+# Run keeper witness smoke harness
+scripts/ubt_sessions/run_keeper_witness_smoke.sh
 
 # Keep logs/data for debugging
 scripts/ubt_sessions/run_sessions.sh --session restart --keep-data
