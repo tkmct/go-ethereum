@@ -161,6 +161,7 @@ func convertToBinaryTrie(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
+	persistHeadBinaryRoot(chaindb, currentRoot)
 	log.Info("Conversion complete", "binaryRoot", currentRoot)
 
 	if ctx.Bool(deleteSourceFlag.Name) {
@@ -171,6 +172,10 @@ func convertToBinaryTrie(ctx *cli.Context) error {
 		log.Info("Source MPT data deleted")
 	}
 	return nil
+}
+
+func persistHeadBinaryRoot(db ethdb.KeyValueWriter, root common.Hash) {
+	rawdb.WriteHeadBinaryRoot(db, root)
 }
 
 func runConversion(chaindb ethdb.Database, srcTriedb *triedb.Database, binTrie *bintrie.BinaryTrie, root common.Hash) error {

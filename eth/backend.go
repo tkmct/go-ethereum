@@ -166,6 +166,10 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Binary trie (--state.verkle) requires the path-based state scheme.
+	if config.StateVerkle && scheme != rawdb.PathScheme {
+		return nil, fmt.Errorf("--state.verkle requires --state.scheme=path (current: %s)", scheme)
+	}
 	// Try to recover offline state pruning only in hash-based.
 	if scheme == rawdb.HashScheme {
 		if err := pruner.RecoverPruning(stack.ResolvePath(""), chainDb); err != nil {
@@ -243,6 +247,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 			// - DATADIR/triedb/merkle.journal
 			// - DATADIR/triedb/verkle.journal
 			TrieJournalDirectory: stack.ResolvePath("triedb"),
+			StateVerkle:          config.StateVerkle,
 			StateSizeTracking:    config.EnableStateSizeTracking,
 			SlowBlockThreshold:   config.SlowBlockThreshold,
 		}

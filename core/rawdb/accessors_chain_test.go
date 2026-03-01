@@ -308,6 +308,19 @@ func TestHeadStorage(t *testing.T) {
 	}
 }
 
+func TestHeadBinaryRootStorage(t *testing.T) {
+	db := NewMemoryDatabase()
+
+	if entry := ReadHeadBinaryRoot(db); entry != (common.Hash{}) {
+		t.Fatalf("Non head binary root entry returned: %v", entry)
+	}
+	root := common.HexToHash("0x1234")
+	WriteHeadBinaryRoot(db, root)
+	if entry := ReadHeadBinaryRoot(db); entry != root {
+		t.Fatalf("Head binary root mismatch: have %v, want %v", entry, root)
+	}
+}
+
 // Tests that receipts associated with a single block can be stored and retrieved.
 func TestBlockReceiptStorage(t *testing.T) {
 	db := NewMemoryDatabase()

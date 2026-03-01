@@ -283,6 +283,11 @@ var (
 		Usage:    "Scheme to use for storing ethereum state ('hash' or 'path')",
 		Category: flags.StateCategory,
 	}
+	StateVerkleFlag = &cli.BoolFlag{
+		Name:     "state.verkle",
+		Usage:    "Enable verkle trie backend (for chains without EnableVerkleAtGenesis)",
+		Category: flags.StateCategory,
+	}
 	StateSizeTrackingFlag = &cli.BoolFlag{
 		Name:     "state.size-tracking",
 		Usage:    "Enable state size tracking, retrieve state size with debug_stateSize.",
@@ -1044,6 +1049,7 @@ var (
 		RemoteDBFlag,
 		DBEngineFlag,
 		StateSchemeFlag,
+		StateVerkleFlag,
 		HttpHeaderFlag,
 	}
 )
@@ -1701,6 +1707,9 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	}
 	if ctx.IsSet(StateSchemeFlag.Name) {
 		cfg.StateScheme = ctx.String(StateSchemeFlag.Name)
+	}
+	if ctx.IsSet(StateVerkleFlag.Name) {
+		cfg.StateVerkle = ctx.Bool(StateVerkleFlag.Name)
 	}
 	// Parse transaction history flag, if user is still using legacy config
 	// file with 'TxLookupLimit' configured, copy the value to 'TransactionHistory'.

@@ -49,7 +49,6 @@ func TestBintrieConvert(t *testing.T) {
 		Preimages: true,
 		PathDB:    pathdb.Defaults,
 	})
-	defer srcTriedb.Close()
 
 	gspec := &core.Genesis{
 		Config:  params.TestChainConfig,
@@ -74,6 +73,7 @@ func TestBintrieConvert(t *testing.T) {
 	genesisBlock := gspec.MustCommit(chaindb, srcTriedb)
 	root := genesisBlock.Root()
 	t.Logf("Genesis root: %x", root)
+	srcTriedb.Close()
 
 	srcTriedb2 := triedb.NewDatabase(chaindb, &triedb.Config{
 		Preimages: true,
@@ -108,6 +108,10 @@ func TestBintrieConvert(t *testing.T) {
 	}
 	currentRoot = newRoot
 	t.Logf("Binary trie root: %x", currentRoot)
+	persistHeadBinaryRoot(chaindb, currentRoot)
+	if got := rawdb.ReadHeadBinaryRoot(chaindb); got != currentRoot {
+		t.Fatalf("head binary root mismatch: got %x want %x", got, currentRoot)
+	}
 
 	bt2, err := bintrie.NewBinaryTrie(currentRoot, destTriedb)
 	if err != nil {

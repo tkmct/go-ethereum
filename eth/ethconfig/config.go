@@ -114,6 +114,10 @@ type Config struct {
 	// consistent with persistent state.
 	StateScheme string `toml:",omitempty"`
 
+	// StateVerkle enables the verkle trie backend for chains that don't have
+	// EnableVerkleAtGenesis set in the chain config.
+	StateVerkle bool `toml:",omitempty"`
+
 	// RequiredBlocks is a set of block number -> hash mappings which must be in the
 	// canonical chain of all remote peers. Setting the option makes geth verify the
 	// presence of these blocks for every new peer connection.

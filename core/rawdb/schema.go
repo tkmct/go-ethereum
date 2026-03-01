@@ -43,6 +43,9 @@ var (
 	// headFinalizedBlockKey tracks the latest known finalized block hash.
 	headFinalizedBlockKey = []byte("LastFinalized")
 
+	// headBinaryRootKey tracks the latest binary trie root used for execution.
+	headBinaryRootKey = []byte("LastBinaryRoot")
+
 	// persistentStateIDKey tracks the id of latest stored state(for path-based only).
 	persistentStateIDKey = []byte("LastStateID")
 

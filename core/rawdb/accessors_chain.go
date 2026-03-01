@@ -173,6 +173,22 @@ func WriteFinalizedBlockHash(db ethdb.KeyValueWriter, hash common.Hash) {
 	}
 }
 
+// ReadHeadBinaryRoot retrieves the latest binary trie root used for execution.
+func ReadHeadBinaryRoot(db ethdb.KeyValueReader) common.Hash {
+	data, _ := db.Get(headBinaryRootKey)
+	if len(data) == 0 {
+		return common.Hash{}
+	}
+	return common.BytesToHash(data)
+}
+
+// WriteHeadBinaryRoot stores the latest binary trie root used for execution.
+func WriteHeadBinaryRoot(db ethdb.KeyValueWriter, root common.Hash) {
+	if err := db.Put(headBinaryRootKey, root.Bytes()); err != nil {
+		log.Crit("Failed to store head binary root", "err", err)
+	}
+}
+
 // ReadLastPivotNumber retrieves the number of the last pivot block. If the node
 // full synced, the last pivot will always be nil.
 func ReadLastPivotNumber(db ethdb.KeyValueReader) *uint64 {

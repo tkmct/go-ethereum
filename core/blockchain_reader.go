@@ -371,7 +371,11 @@ func (bc *BlockChain) TxIndexDone() bool {
 
 // HasState checks if state trie is fully present in the database or not.
 func (bc *BlockChain) HasState(hash common.Hash) bool {
-	_, err := bc.statedb.OpenTrie(hash)
+	resolved, err := bc.resolveStateRoot(hash)
+	if err != nil {
+		return false
+	}
+	_, err = bc.statedb.OpenTrie(resolved)
 	return err == nil
 }
 
@@ -408,12 +412,19 @@ func (bc *BlockChain) ContractCodeWithPrefix(hash common.Hash) []byte {
 
 // State returns a new mutable state based on the current HEAD block.
 func (bc *BlockChain) State() (*state.StateDB, error) {
+	if bc.binaryFollowEnabled() {
+		return bc.StateAt(bc.getCurrentExecRoot())
+	}
 	return bc.StateAt(bc.CurrentBlock().Root)
 }
 
 // StateAt returns a new mutable state based on a particular point in time.
 func (bc *BlockChain) StateAt(root common.Hash) (*state.StateDB, error) {
-	return state.New(root, bc.statedb)
+	resolved, err := bc.resolveStateRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	return state.New(resolved, bc.statedb)
 }
 
 // HistoricState returns a historic state specified by the given root.

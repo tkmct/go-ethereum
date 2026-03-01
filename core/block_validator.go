@@ -162,8 +162,14 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 	}
 	// Validate the state root against the received state root and throw
 	// an error if they don't match.
-	if root := statedb.IntermediateRoot(v.config.IsEIP158(header.Number)); header.Root != root {
-		return fmt.Errorf("invalid merkle root (remote: %x local: %x) dberr: %w", header.Root, root, statedb.Error())
+	//
+	// In binary follow mode the state root produced by the binary trie will
+	// differ from the MPT root stored in the block header, so this check is
+	// skipped.
+	if !v.bc.binaryFollowEnabled() {
+		if root := statedb.IntermediateRoot(v.config.IsEIP158(header.Number)); header.Root != root {
+			return fmt.Errorf("invalid merkle root (remote: %x local: %x) dberr: %w", header.Root, root, statedb.Error())
+		}
 	}
 	return nil
 }
