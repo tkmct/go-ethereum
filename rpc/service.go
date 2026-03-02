@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
-	"strings"
 	"sync"
 	"unicode"
 
@@ -92,14 +91,22 @@ func (r *serviceRegistry) registerName(name string, rcvr interface{}) error {
 }
 
 // callback returns the callback corresponding to the given RPC method name.
+// It tries all '_' split points, matching the longest registered namespace first.
 func (r *serviceRegistry) callback(method string) *callback {
-	before, after, found := strings.Cut(method, serviceMethodSeparator)
-	if !found {
-		return nil
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.services[before].callbacks[after]
+
+	for i := 0; i < len(method); i++ {
+		if method[i] != '_' {
+			continue
+		}
+		if svc, ok := r.services[method[:i]]; ok {
+			if cb := svc.callbacks[method[i+1:]]; cb != nil {
+				return cb
+			}
+		}
+	}
+	return nil
 }
 
 // subscription returns a subscription callback in the given service.

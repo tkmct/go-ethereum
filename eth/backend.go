@@ -411,6 +411,9 @@ func (s *Ethereum) APIs() []rpc.API {
 			Namespace: "debug",
 			Service:   NewDebugAPI(s),
 		}, {
+			Namespace: "debug_ubt",
+			Service:   NewUBTDebugAPI(s),
+		}, {
 			Namespace: "net",
 			Service:   s.netRPCService,
 		},

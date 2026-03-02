@@ -17,10 +17,20 @@
 package bintrie
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
 )
+
+// ProofResult holds the output of GenerateProofWithPath.
+type ProofResult struct {
+	Siblings []ProofSibling
+	Stem     []byte
+	Values   [][]byte
+	Root     common.Hash
+}
 
 // ProofSibling represents a sibling hash with the depth of the internal node.
 type ProofSibling struct {
@@ -111,4 +121,85 @@ func (t *BinaryTrie) ProofWithDepth(key []byte) ([]ProofSibling, []byte, [][]byt
 			return nil, nil, nil, errInvalidRootType
 		}
 	}
+}
+
+// GenerateProofWithPath generates a Merkle proof with depth-annotated siblings
+// and computes the proof root from the sibling path.
+func GenerateProofWithPath(bt *BinaryTrie, key []byte) (*ProofResult, error) {
+	siblings, stem, values, err := bt.ProofWithDepth(key)
+	if err != nil {
+		return nil, err
+	}
+	leaf := computeLeafHash(stem, values)
+	root := computeRootWithPath(key, siblings, leaf)
+	return &ProofResult{
+		Siblings: siblings,
+		Stem:     stem,
+		Values:   values,
+		Root:     root,
+	}, nil
+}
+
+// computeLeafHash computes the hash of a stem node from its stem and values.
+func computeLeafHash(stem []byte, values [][]byte) common.Hash {
+	if stem == nil {
+		return common.Hash{}
+	}
+	var data [StemNodeWidth]common.Hash
+	for i, v := range values {
+		if len(v) == 0 {
+			continue
+		}
+		h := sha256.Sum256(v)
+		data[i] = common.BytesToHash(h[:])
+	}
+	h := sha256.New()
+	for level := 1; level <= 8; level++ {
+		for i := 0; i < StemNodeWidth/(1<<level); i++ {
+			if data[i*2] == (common.Hash{}) && data[i*2+1] == (common.Hash{}) {
+				data[i] = common.Hash{}
+				continue
+			}
+			h.Reset()
+			h.Write(data[i*2][:])
+			h.Write(data[i*2+1][:])
+			data[i] = common.Hash(h.Sum(nil))
+		}
+	}
+	h.Reset()
+	h.Write(stem)
+	h.Write([]byte{0})
+	h.Write(data[0][:])
+	return common.BytesToHash(h.Sum(nil))
+}
+
+// computeRootWithPath recomputes the trie root by walking the sibling path
+// from leaf to root.
+func computeRootWithPath(key []byte, siblings []ProofSibling, leaf common.Hash) common.Hash {
+	if len(siblings) == 0 {
+		return leaf
+	}
+	ordered := make([]ProofSibling, len(siblings))
+	copy(ordered, siblings)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Depth < ordered[j].Depth })
+	current := leaf
+	for i := len(ordered) - 1; i >= 0; i-- {
+		depth := int(ordered[i].Depth)
+		bit := (key[depth/8] >> (7 - (depth % 8))) & 1
+		if bit == 0 {
+			current = hashPair(current, ordered[i].Hash)
+		} else {
+			current = hashPair(ordered[i].Hash, current)
+		}
+	}
+	return current
+}
+
+// hashPair computes SHA-256(left || right).
+func hashPair(left, right common.Hash) common.Hash {
+	var data [64]byte
+	copy(data[:32], left[:])
+	copy(data[32:], right[:])
+	sum := sha256.Sum256(data[:])
+	return common.BytesToHash(sum[:])
 }

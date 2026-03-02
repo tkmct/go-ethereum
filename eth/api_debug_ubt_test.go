@@ -35,7 +35,7 @@ import (
 	"github.com/holiman/uint256"
 )
 
-func TestGetUBTStateMinimal(t *testing.T) {
+func TestUBTDebugAPI(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
 	genesis := &core.Genesis{
 		Config: params.TestChainConfig,
@@ -61,7 +61,7 @@ func TestGetUBTStateMinimal(t *testing.T) {
 
 	eth := &Ethereum{blockchain: chain, chainDb: db}
 	eth.APIBackend = &EthAPIBackend{eth: eth}
-	api := NewDebugAPI(eth)
+	api := NewUBTDebugAPI(eth)
 
 	sc := chain.UBTSidecar()
 	if sc == nil {
@@ -101,23 +101,41 @@ func TestGetUBTStateMinimal(t *testing.T) {
 		t.Fatalf("expected sidecar to be ready after init")
 	}
 
-	res, err := api.GetUBTState(context.Background(), addr, []string{slot.Hex()}, rpc.BlockNumberOrHashWithNumber(0))
-	if err != nil {
-		t.Fatalf("GetUBTState failed: %v", err)
-	}
-	if res.Address != addr {
-		t.Fatalf("unexpected address: %x", res.Address)
-	}
-	if res.Balance == nil || res.Balance.ToInt().Cmp(big.NewInt(7)) != 0 {
-		t.Fatalf("unexpected balance: %v", res.Balance)
-	}
-	if uint64(res.Nonce) != 2 {
-		t.Fatalf("unexpected nonce: %d", res.Nonce)
-	}
-	if got := res.Storage[slot]; !bytes.Equal(got, value.Bytes()) {
-		t.Fatalf("unexpected storage value: %x", got)
-	}
-	if res.UbtRoot != sc.CurrentRoot() {
-		t.Fatalf("unexpected UBT root: %x", res.UbtRoot)
-	}
+	blockRef := rpc.BlockNumberOrHashWithNumber(0)
+
+	t.Run("GetAccount", func(t *testing.T) {
+		res, err := api.GetAccount(context.Background(), addr, blockRef)
+		if err != nil {
+			t.Fatalf("GetAccount failed: %v", err)
+		}
+		if res.Address != addr {
+			t.Fatalf("unexpected address: %x", res.Address)
+		}
+		if res.Balance == nil || res.Balance.ToInt().Cmp(big.NewInt(7)) != 0 {
+			t.Fatalf("unexpected balance: %v", res.Balance)
+		}
+		if uint64(res.Nonce) != 2 {
+			t.Fatalf("unexpected nonce: %d", res.Nonce)
+		}
+	})
+
+	t.Run("GetBalance", func(t *testing.T) {
+		bal, err := api.GetBalance(context.Background(), addr, blockRef)
+		if err != nil {
+			t.Fatalf("GetBalance failed: %v", err)
+		}
+		if bal.ToInt().Cmp(big.NewInt(7)) != 0 {
+			t.Fatalf("unexpected balance: %v", bal)
+		}
+	})
+
+	t.Run("GetStorageAt", func(t *testing.T) {
+		got, err := api.GetStorageAt(context.Background(), addr, slot, blockRef)
+		if err != nil {
+			t.Fatalf("GetStorageAt failed: %v", err)
+		}
+		if !bytes.Equal(got, value.Bytes()) {
+			t.Fatalf("unexpected storage value: %x", got)
+		}
+	})
 }
