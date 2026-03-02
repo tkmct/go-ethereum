@@ -1476,17 +1476,12 @@ func (p *BlobPool) AvailableBlobs(vhashes []common.Hash) int {
 // Add inserts a set of blob transactions into the pool if they pass validation (both
 // consensus validity and pool restrictions).
 func (p *BlobPool) Add(txs []*types.Transaction, sync bool) []error {
-	var (
-		errs = make([]error, len(txs))
-		adds = make([]*types.Transaction, 0, len(txs))
-	)
+	errs := make([]error, len(txs))
 	for i, tx := range txs {
 		if errs[i] = p.ValidateTxBasics(tx); errs[i] != nil {
 			continue
 		}
-		if errs[i] = p.add(tx); errs[i] == nil {
-			adds = append(adds, tx.WithoutBlobTxSidecar())
-		}
+		errs[i] = p.add(tx)
 	}
 	return errs
 }
@@ -2095,6 +2090,11 @@ func (p *BlobPool) Clear() {
 	p.lookup = newLookup()
 	p.index = make(map[common.Address][]*blobTxMeta)
 	p.spent = make(map[common.Address]*uint256.Int)
+
+	// Reset counters and the gapped buffer
+	p.stored = 0
+	p.gapped = make(map[common.Address][]*types.Transaction)
+	p.gappedSource = make(map[common.Hash]common.Address)
 
 	var (
 		basefee = uint256.MustFromBig(eip1559.CalcBaseFee(p.chain.Config(), p.head.Load()))

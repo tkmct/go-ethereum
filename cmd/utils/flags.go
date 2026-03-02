@@ -224,6 +224,16 @@ var (
 		Usage: "Max number of elements (0 = no limit)",
 		Value: 0,
 	}
+	TopFlag = &cli.IntFlag{
+		Name:  "top",
+		Usage: "Print the top N results",
+		Value: 5,
+	}
+	OutputFileFlag = &cli.StringFlag{
+		Name:  "output",
+		Usage: "Writes the result in json to the output",
+		Value: "",
+	}
 
 	SnapshotFlag = &cli.BoolFlag{
 		Name:     "snapshot",
@@ -304,6 +314,18 @@ var (
 		Name:     "history.state",
 		Usage:    "Number of recent blocks to retain state history for, only relevant in state.scheme=path (default = 90,000 blocks, 0 = entire chain)",
 		Value:    ethconfig.Defaults.StateHistory,
+		Category: flags.StateCategory,
+	}
+	TrienodeHistoryFlag = &cli.Int64Flag{
+		Name:     "history.trienode",
+		Usage:    "Number of recent blocks to retain trienode history for, only relevant in state.scheme=path (default/negative = disabled, 0 = entire chain)",
+		Value:    ethconfig.Defaults.TrienodeHistory,
+		Category: flags.StateCategory,
+	}
+	TrienodeHistoryFullValueCheckpointFlag = &cli.UintFlag{
+		Name:     "history.trienode.full-value-checkpoint",
+		Usage:    "The frequency of full-value encoding. Every n-th node is stored in full-value format; all other nodes are stored as diffs relative to their predecessor",
+		Value:    uint(ethconfig.Defaults.NodeFullValueCheckpoint),
 		Category: flags.StateCategory,
 	}
 	TransactionHistoryFlag = &cli.Uint64Flag{
@@ -647,6 +669,12 @@ var (
 		Value:    ethconfig.Defaults.TxSyncMaxTimeout,
 		Category: flags.APICategory,
 	}
+	RPCGlobalRangeLimitFlag = &cli.Uint64Flag{
+		Name:     "rpc.rangelimit",
+		Usage:    "Maximum block range (end - begin) allowed for range queries (0 = unlimited)",
+		Value:    ethconfig.Defaults.RangeLimit,
+		Category: flags.APICategory,
+	}
 	// Authenticated RPC HTTP settings
 	AuthListenFlag = &cli.StringFlag{
 		Name:     "authrpc.addr",
@@ -685,7 +713,7 @@ var (
 	}
 	LogSlowBlockFlag = &cli.DurationFlag{
 		Name:     "debug.logslowblock",
-		Usage:    "Block execution time threshold beyond which detailed statistics will be logged (0 means disable)",
+		Usage:    "Block execution time threshold beyond which detailed statistics will be logged (0 logs all blocks, negative means disable)",
 		Value:    ethconfig.Defaults.SlowBlockThreshold,
 		Category: flags.LoggingCategory,
 	}
@@ -1009,6 +1037,13 @@ Please note that --` + MetricsHTTPFlag.Name + ` must be set to start the server.
 		Category: flags.MetricsCategory,
 	}
 
+	MetricsInfluxDBIntervalFlag = &cli.DurationFlag{
+		Name:     "metrics.influxdb.interval",
+		Usage:    "Interval between metrics reports to InfluxDB (with time unit, e.g. 10s)",
+		Value:    metrics.DefaultConfig.InfluxDBInterval,
+		Category: flags.MetricsCategory,
+	}
+
 	MetricsEnableInfluxDBV2Flag = &cli.BoolFlag{
 		Name:     "metrics.influxdbv2",
 		Usage:    "Enable metrics export/push to an external InfluxDB v2 database",
@@ -1034,6 +1069,55 @@ Please note that --` + MetricsHTTPFlag.Name + ` must be set to start the server.
 		Usage:    "InfluxDB organization name (v2 only)",
 		Value:    metrics.DefaultConfig.InfluxDBOrganization,
 		Category: flags.MetricsCategory,
+	}
+
+	// RPC Telemetry
+	RPCTelemetryFlag = &cli.BoolFlag{
+		Name:     "rpc.telemetry",
+		Usage:    "Enable RPC telemetry",
+		Category: flags.APICategory,
+	}
+
+	RPCTelemetryEndpointFlag = &cli.StringFlag{
+		Name:     "rpc.telemetry.endpoint",
+		Usage:    "Defines where RPC telemetry is sent (e.g., http://localhost:4318)",
+		Category: flags.APICategory,
+	}
+
+	RPCTelemetryUserFlag = &cli.StringFlag{
+		Name:     "rpc.telemetry.username",
+		Usage:    "HTTP Basic Auth username for OpenTelemetry",
+		Category: flags.APICategory,
+	}
+
+	RPCTelemetryPasswordFlag = &cli.StringFlag{
+		Name:     "rpc.telemetry.password",
+		Usage:    "HTTP Basic Auth password for OpenTelemetry",
+		Category: flags.APICategory,
+	}
+
+	RPCTelemetryInstanceIDFlag = &cli.StringFlag{
+		Name:     "rpc.telemetry.instance-id",
+		Usage:    "OpenTelemetry instance ID",
+		Category: flags.APICategory,
+	}
+
+	RPCTelemetryTagsFlag = &cli.StringFlag{
+		Name:     "rpc.telemetry.tags",
+		Usage:    "Comma-separated tags (key/values) added as attributes to the OpenTelemetry resource struct",
+		Category: flags.APICategory,
+	}
+
+	RPCTelemetrySampleRatioFlag = &cli.Float64Flag{
+		Name:     "rpc.telemetry.sample-ratio",
+		Usage:    "Defines the sampling ratio for RPC telemetry (0.0 to 1.0)",
+		Value:    1.0,
+		Category: flags.APICategory,
+	}
+	// Era flags are a group of flags related to the era archive format.
+	EraFormatFlag = &cli.StringFlag{
+		Name:  "era.format",
+		Usage: "Archive format: 'era1' or 'erae'",
 	}
 )
 
@@ -1427,6 +1511,7 @@ func SetNodeConfig(ctx *cli.Context, cfg *node.Config) {
 	setNodeUserIdent(ctx, cfg)
 	SetDataDir(ctx, cfg)
 	setSmartCard(ctx, cfg)
+	setOpenTelemetry(ctx, cfg)
 
 	if ctx.IsSet(JWTSecretFlag.Name) {
 		cfg.JWTSecret = ctx.String(JWTSecretFlag.Name)
@@ -1492,6 +1577,33 @@ func setSmartCard(ctx *cli.Context, cfg *node.Config) {
 	}
 	// Smartcard daemon path exists and is a socket, enable it
 	cfg.SmartCardDaemonPath = path
+}
+
+func setOpenTelemetry(ctx *cli.Context, cfg *node.Config) {
+	tcfg := &cfg.OpenTelemetry
+	if ctx.IsSet(RPCTelemetryFlag.Name) {
+		tcfg.Enabled = ctx.Bool(RPCTelemetryFlag.Name)
+	}
+	if ctx.IsSet(RPCTelemetryEndpointFlag.Name) {
+		tcfg.Endpoint = ctx.String(RPCTelemetryEndpointFlag.Name)
+	}
+	if ctx.IsSet(RPCTelemetryUserFlag.Name) {
+		tcfg.AuthUser = ctx.String(RPCTelemetryUserFlag.Name)
+	}
+	if ctx.IsSet(RPCTelemetryPasswordFlag.Name) {
+		tcfg.AuthPassword = ctx.String(RPCTelemetryPasswordFlag.Name)
+	}
+	if ctx.IsSet(RPCTelemetryInstanceIDFlag.Name) {
+		tcfg.InstanceID = ctx.String(RPCTelemetryInstanceIDFlag.Name)
+	}
+	if ctx.IsSet(RPCTelemetryTagsFlag.Name) {
+		tcfg.Tags = ctx.String(RPCTelemetryTagsFlag.Name)
+	}
+	tcfg.SampleRatio = ctx.Float64(RPCTelemetrySampleRatioFlag.Name)
+
+	if tcfg.Endpoint != "" && !tcfg.Enabled {
+		log.Warn(fmt.Sprintf("OpenTelemetry endpoint configured but telemetry is not enabled, use --%s to enable.", RPCTelemetryFlag.Name))
+	}
 }
 
 func SetDataDir(ctx *cli.Context, cfg *node.Config) {
@@ -1713,6 +1825,12 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	if ctx.IsSet(StateHistoryFlag.Name) {
 		cfg.StateHistory = ctx.Uint64(StateHistoryFlag.Name)
 	}
+	if ctx.IsSet(TrienodeHistoryFlag.Name) {
+		cfg.TrienodeHistory = ctx.Int64(TrienodeHistoryFlag.Name)
+	}
+	if ctx.IsSet(TrienodeHistoryFullValueCheckpointFlag.Name) {
+		cfg.NodeFullValueCheckpoint = uint32(ctx.Uint(TrienodeHistoryFullValueCheckpointFlag.Name))
+	}
 	if ctx.IsSet(StateSchemeFlag.Name) {
 		cfg.StateScheme = ctx.String(StateSchemeFlag.Name)
 	}
@@ -1769,6 +1887,9 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	}
 	if ctx.IsSet(RPCTxSyncMaxTimeoutFlag.Name) {
 		cfg.TxSyncMaxTimeout = ctx.Duration(RPCTxSyncMaxTimeoutFlag.Name)
+	}
+	if ctx.IsSet(RPCGlobalRangeLimitFlag.Name) {
+		cfg.RangeLimit = ctx.Uint64(RPCGlobalRangeLimitFlag.Name)
 	}
 	if !ctx.Bool(SnapshotFlag.Name) || cfg.SnapshotCache == 0 {
 		// If snap-sync is requested, this flag is also required
@@ -2114,6 +2235,7 @@ func RegisterFilterAPI(stack *node.Node, backend ethapi.Backend, ethcfg *ethconf
 	filterSystem := filters.NewFilterSystem(backend, filters.Config{
 		LogCacheSize:  ethcfg.FilterLogCacheSize,
 		LogQueryLimit: ethcfg.LogQueryLimit,
+		RangeLimit:    ethcfg.RangeLimit,
 	})
 	stack.RegisterAPIs([]rpc.API{{
 		Namespace: "eth",
@@ -2158,13 +2280,14 @@ func SetupMetrics(cfg *metrics.Config) {
 		bucket       = cfg.InfluxDBBucket
 		organization = cfg.InfluxDBOrganization
 		tagsMap      = SplitTagsFlag(cfg.InfluxDBTags)
+		interval     = cfg.InfluxDBInterval
 	)
 	if enableExport {
-		log.Info("Enabling metrics export to InfluxDB")
-		go influxdb.InfluxDBWithTags(metrics.DefaultRegistry, 10*time.Second, endpoint, database, username, password, "geth.", tagsMap)
+		log.Info("Enabling metrics export to InfluxDB", "interval", interval)
+		go influxdb.InfluxDBWithTags(metrics.DefaultRegistry, interval, endpoint, database, username, password, "geth.", tagsMap)
 	} else if enableExportV2 {
-		log.Info("Enabling metrics export to InfluxDB (v2)")
-		go influxdb.InfluxDBV2WithTags(metrics.DefaultRegistry, 10*time.Second, endpoint, token, bucket, organization, "geth.", tagsMap)
+		log.Info("Enabling metrics export to InfluxDB (v2)", "interval", interval)
+		go influxdb.InfluxDBV2WithTags(metrics.DefaultRegistry, interval, endpoint, token, bucket, organization, "geth.", tagsMap)
 	}
 
 	// Expvar exporter.
@@ -2317,15 +2440,17 @@ func MakeChain(ctx *cli.Context, stack *node.Node, readonly bool) (*core.BlockCh
 		Fatalf("%v", err)
 	}
 	options := &core.BlockChainConfig{
-		TrieCleanLimit: ethconfig.Defaults.TrieCleanCache,
-		NoPrefetch:     ctx.Bool(CacheNoPrefetchFlag.Name),
-		TrieDirtyLimit: ethconfig.Defaults.TrieDirtyCache,
-		ArchiveMode:    ctx.String(GCModeFlag.Name) == "archive",
-		TrieTimeLimit:  ethconfig.Defaults.TrieTimeout,
-		SnapshotLimit:  ethconfig.Defaults.SnapshotCache,
-		Preimages:      ctx.Bool(CachePreimagesFlag.Name),
-		StateScheme:    scheme,
-		StateHistory:   ctx.Uint64(StateHistoryFlag.Name),
+		TrieCleanLimit:          ethconfig.Defaults.TrieCleanCache,
+		NoPrefetch:              ctx.Bool(CacheNoPrefetchFlag.Name),
+		TrieDirtyLimit:          ethconfig.Defaults.TrieDirtyCache,
+		ArchiveMode:             ctx.String(GCModeFlag.Name) == "archive",
+		TrieTimeLimit:           ethconfig.Defaults.TrieTimeout,
+		SnapshotLimit:           ethconfig.Defaults.SnapshotCache,
+		Preimages:               ctx.Bool(CachePreimagesFlag.Name),
+		StateScheme:             scheme,
+		StateHistory:            ctx.Uint64(StateHistoryFlag.Name),
+		TrienodeHistory:         ctx.Int64(TrienodeHistoryFlag.Name),
+		NodeFullValueCheckpoint: uint32(ctx.Uint(TrienodeHistoryFullValueCheckpointFlag.Name)),
 
 		// Disable transaction indexing/unindexing.
 		TxLookupLimit: -1,
@@ -2339,8 +2464,12 @@ func MakeChain(ctx *cli.Context, stack *node.Node, readonly bool) (*core.BlockCh
 		// Enable state size tracking if enabled
 		StateSizeTracking: ctx.Bool(StateSizeTrackingFlag.Name),
 
-		// Configure the slow block statistic logger
-		SlowBlockThreshold: ctx.Duration(LogSlowBlockFlag.Name),
+		// Configure the slow block statistic logger (disabled by default)
+		SlowBlockThreshold: ethconfig.Defaults.SlowBlockThreshold,
+	}
+	// Only enable slow block logging if the flag was explicitly set
+	if ctx.IsSet(LogSlowBlockFlag.Name) {
+		options.SlowBlockThreshold = ctx.Duration(LogSlowBlockFlag.Name)
 	}
 	if options.ArchiveMode && !options.Preimages {
 		options.Preimages = true
