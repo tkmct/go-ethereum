@@ -157,7 +157,7 @@ be gzipped.`,
 		Name:      "import-history",
 		Usage:     "Import an Era archive",
 		ArgsUsage: "<dir>",
-		Flags:     slices.Concat([]cli.Flag{utils.TxLookupLimitFlag, utils.TransactionHistoryFlag, utils.EraFormatFlag}, utils.DatabaseFlags, utils.NetworkFlags),
+		Flags:     slices.Concat([]cli.Flag{utils.TxLookupLimitFlag, utils.TransactionHistoryFlag}, utils.DatabaseFlags, utils.NetworkFlags),
 		Description: `
 The import-history command will import blocks and their corresponding receipts
 from Era archives.
@@ -168,7 +168,7 @@ from Era archives.
 		Name:      "export-history",
 		Usage:     "Export blockchain history to Era archives",
 		ArgsUsage: "<dir> <first> <last>",
-		Flags:     slices.Concat([]cli.Flag{utils.EraFormatFlag}, utils.DatabaseFlags),
+		Flags:     utils.DatabaseFlags,
 		Description: `
 The export-history command will export blocks and their corresponding receipts
 into Era archives. Eras are typically packaged in steps of 8192 blocks.
