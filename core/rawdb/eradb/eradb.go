@@ -288,7 +288,7 @@ func (db *Store) fileFailedToOpen(epoch uint64, entry *fileCacheEntry, err error
 
 func (db *Store) openEraFile(epoch uint64) (*onedb.Era, error) {
 	// File name scheme is <network>-<epoch>-<root>.
-	glob := fmt.Sprintf("*-%05d-*.era1", epoch)
+	glob := fmt.Sprintf("*-%05d-*%s", epoch, db.ext)
 	matches, err := filepath.Glob(filepath.Join(db.datadir, glob))
 	if err != nil {
 		return nil, err

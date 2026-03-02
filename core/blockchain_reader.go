@@ -371,11 +371,7 @@ func (bc *BlockChain) TxIndexDone() bool {
 
 // HasState checks if state trie is fully present in the database or not.
 func (bc *BlockChain) HasState(hash common.Hash) bool {
-	resolved, err := bc.resolveStateRoot(hash)
-	if err != nil {
-		return false
-	}
-	_, err = bc.statedb.OpenTrie(resolved)
+	_, err := bc.statedb.OpenTrie(hash)
 	return err == nil
 }
 
@@ -420,11 +416,7 @@ func (bc *BlockChain) State() (*state.StateDB, error) {
 
 // StateAt returns a new mutable state based on a particular point in time.
 func (bc *BlockChain) StateAt(root common.Hash) (*state.StateDB, error) {
-	resolved, err := bc.resolveStateRoot(root)
-	if err != nil {
-		return nil, err
-	}
-	return state.New(resolved, bc.statedb)
+	return state.New(root, bc.statedb)
 }
 
 // HistoricState returns a historic state specified by the given root.

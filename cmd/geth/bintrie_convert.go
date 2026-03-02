@@ -161,7 +161,7 @@ func convertToBinaryTrie(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	persistHeadBinaryRoot(chaindb, currentRoot)
+	rawdb.WriteHeadBinaryRoot(chaindb, currentRoot)
 	log.Info("Conversion complete", "binaryRoot", currentRoot)
 
 	if ctx.Bool(deleteSourceFlag.Name) {
@@ -170,86 +170,6 @@ func convertToBinaryTrie(ctx *cli.Context) error {
 			return fmt.Errorf("MPT deletion failed: %v", err)
 		}
 		log.Info("Source MPT data deleted")
-	}
-	return nil
-}
-
-func persistHeadBinaryRoot(db ethdb.KeyValueWriter, root common.Hash) {
-	rawdb.WriteHeadBinaryRoot(db, root)
-}
-
-func runConversion(chaindb ethdb.Database, srcTriedb *triedb.Database, binTrie *bintrie.BinaryTrie, root common.Hash) error {
-	srcTrie, err := trie.NewStateTrie(trie.StateTrieID(root), srcTriedb)
-	if err != nil {
-		return fmt.Errorf("failed to open source trie: %v", err)
-	}
-	acctIt, err := srcTrie.NodeIterator(nil)
-	if err != nil {
-		return fmt.Errorf("failed to create account iterator: %v", err)
-	}
-	accIter := trie.NewIterator(acctIt)
-
-	for accIter.Next() {
-		var acc types.StateAccount
-		if err := rlp.DecodeBytes(accIter.Value, &acc); err != nil {
-			return fmt.Errorf("invalid account RLP: %v", err)
-		}
-		addrBytes := srcTrie.GetKey(accIter.Key)
-		if addrBytes == nil {
-			return fmt.Errorf("missing preimage for account hash %x (run with --cache.preimages)", accIter.Key)
-		}
-		addr := common.BytesToAddress(addrBytes)
-
-		var code []byte
-		codeHash := common.BytesToHash(acc.CodeHash)
-		if codeHash != types.EmptyCodeHash {
-			code = rawdb.ReadCode(chaindb, codeHash)
-			if code == nil {
-				return fmt.Errorf("missing code for hash %x (account %x)", codeHash, addr)
-			}
-		}
-
-		if err := binTrie.UpdateAccount(addr, &acc, len(code)); err != nil {
-			return fmt.Errorf("failed to update account %x: %v", addr, err)
-		}
-		if len(code) > 0 {
-			if err := binTrie.UpdateContractCode(addr, codeHash, code); err != nil {
-				return fmt.Errorf("failed to update code for %x: %v", addr, err)
-			}
-		}
-
-		if acc.Root != types.EmptyRootHash {
-			addrHash := common.BytesToHash(accIter.Key)
-			storageTrie, err := trie.NewStateTrie(trie.StorageTrieID(root, addrHash, acc.Root), srcTriedb)
-			if err != nil {
-				return fmt.Errorf("failed to open storage trie for %x: %v", addr, err)
-			}
-			storageNodeIt, err := storageTrie.NodeIterator(nil)
-			if err != nil {
-				return fmt.Errorf("failed to create storage iterator for %x: %v", addr, err)
-			}
-			storageIter := trie.NewIterator(storageNodeIt)
-
-			for storageIter.Next() {
-				slotKey := storageTrie.GetKey(storageIter.Key)
-				if slotKey == nil {
-					return fmt.Errorf("missing preimage for storage key %x (account %x)", storageIter.Key, addr)
-				}
-				_, content, _, err := rlp.Split(storageIter.Value)
-				if err != nil {
-					return fmt.Errorf("invalid storage RLP for key %x (account %x): %v", slotKey, addr, err)
-				}
-				if err := binTrie.UpdateStorage(addr, slotKey, content); err != nil {
-					return fmt.Errorf("failed to update storage %x/%x: %v", addr, slotKey, err)
-				}
-			}
-			if storageIter.Err != nil {
-				return fmt.Errorf("storage iteration error for %x: %v", addr, storageIter.Err)
-			}
-		}
-	}
-	if accIter.Err != nil {
-		return fmt.Errorf("account iteration error: %v", accIter.Err)
 	}
 	return nil
 }

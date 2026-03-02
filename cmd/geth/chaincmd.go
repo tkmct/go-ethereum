@@ -483,7 +483,6 @@ func importHistory(ctx *cli.Context) error {
 	var (
 		start   = time.Now()
 		dir     = ctx.Args().Get(0)
-		ext     = "." + ctx.String(utils.EraFormatFlag.Name)
 		network string
 	)
 
@@ -504,7 +503,7 @@ func importHistory(ctx *cli.Context) error {
 		// present in directory.
 		var networks []string
 		for _, n := range params.NetworkNames {
-			entries, err := era.ReadDir(dir, n, ext)
+			entries, err := era.ReadDir(dir, n)
 			if err != nil {
 				return fmt.Errorf("error reading %s: %w", dir, err)
 			}

@@ -267,7 +267,6 @@ func TestStorageRoundTrip(t *testing.T) {
 	}
 }
 
-
 func TestBinaryTrieWitness(t *testing.T) {
 	tracer := trie.NewPrevalueTracer()
 

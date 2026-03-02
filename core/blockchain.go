@@ -620,22 +620,6 @@ func (bc *BlockChain) getCurrentExecRoot() common.Hash {
 	return *root
 }
 
-func (bc *BlockChain) resolveParentExecRoot(parent *types.Header) (common.Hash, error) {
-	if !bc.binaryFollowEnabled() {
-		return parent.Root, nil
-	}
-	// In binary follow mode, use the tracked binary trie root instead of
-	// the MPT root from the block header.
-	return bc.getCurrentExecRoot(), nil
-}
-
-func (bc *BlockChain) resolveStateRoot(root common.Hash) (common.Hash, error) {
-	if !bc.binaryFollowEnabled() {
-		return root, nil
-	}
-	return root, nil
-}
-
 func (bc *BlockChain) setupSnapshot() {
 	// Short circuit if the chain is established with path scheme, as the
 	// state snapshot has been integrated into path database natively.
@@ -1719,9 +1703,9 @@ func (bc *BlockChain) writeKnownBlock(block *types.Block) error {
 
 // writeBlockWithState writes block, metadata and corresponding state data to the
 // database.
-func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.Receipt, statedb *state.StateDB) (common.Hash, error) {
+func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.Receipt, statedb *state.StateDB) error {
 	if !bc.HasHeader(block.ParentHash(), block.NumberU64()-1) {
-		return common.Hash{}, consensus.ErrUnknownAncestor
+		return consensus.ErrUnknownAncestor
 	}
 	// Irrelevant of the canonical status, write the block itself to the database.
 	//
@@ -1750,12 +1734,12 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	if hasStateHook || hasStateSizer {
 		r, update, err := statedb.CommitWithUpdate(block.NumberU64(), isEIP158, isCancun)
 		if err != nil {
-			return common.Hash{}, err
+			return err
 		}
 		if hasStateHook {
 			trUpdate, err := update.ToTracingUpdate()
 			if err != nil {
-				return common.Hash{}, err
+				return err
 			}
 			bc.logger.OnStateUpdate(trUpdate)
 		}
@@ -1766,7 +1750,7 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	} else {
 		root, err = statedb.Commit(block.NumberU64(), isEIP158, isCancun)
 		if err != nil {
-			return common.Hash{}, err
+			return err
 		}
 	}
 	if bc.binaryFollowEnabled() {
@@ -1777,11 +1761,11 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	// If node is running in path mode, skip explicit gc operation
 	// which is unnecessary in this mode.
 	if bc.triedb.Scheme() == rawdb.PathScheme {
-		return root, nil
+		return nil
 	}
 	// If we're running an archive node, always flush
 	if bc.cfg.ArchiveMode {
-		return root, bc.triedb.Commit(root, false)
+		return bc.triedb.Commit(root, false)
 	}
 	// Full but not archive node, do proper garbage collection
 	bc.triedb.Reference(root, common.Hash{}) // metadata reference to keep trie alive
@@ -1790,7 +1774,7 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	// Flush limits are not considered for the first TriesInMemory blocks.
 	current := block.NumberU64()
 	if current <= state.TriesInMemory {
-		return root, nil
+		return nil
 	}
 	// If we exceeded our memory allowance, flush matured singleton nodes to disk
 	var (
@@ -1831,13 +1815,13 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		}
 		bc.triedb.Dereference(root)
 	}
-	return root, nil
+	return nil
 }
 
 // writeBlockAndSetHead is the internal implementation of WriteBlockAndSetHead.
 // This function expects the chain mutex to be held.
 func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types.Receipt, logs []*types.Log, state *state.StateDB, emitHeadEvent bool) (status WriteStatus, err error) {
-	if _, err := bc.writeBlockWithState(block, receipts, state); err != nil {
+	if err := bc.writeBlockWithState(block, receipts, state); err != nil {
 		return NonStatTy, err
 	}
 	currentBlock := bc.CurrentBlock()
@@ -2071,9 +2055,9 @@ func (bc *BlockChain) insertChain(ctx context.Context, chain types.Blocks, setHe
 		if parent == nil {
 			parent = bc.GetHeader(block.ParentHash(), block.NumberU64()-1)
 		}
-		parentExecRoot, err := bc.resolveParentExecRoot(parent)
-		if err != nil {
-			return nil, it.index, err
+		parentExecRoot := parent.Root
+		if bc.binaryFollowEnabled() {
+			parentExecRoot = bc.getCurrentExecRoot()
 		}
 		// The traced section of block import.
 		start := time.Now()
@@ -2337,7 +2321,7 @@ func (bc *BlockChain) ProcessBlock(ctx context.Context, parentRoot common.Hash, 
 	)
 	if !setHead {
 		// Don't set the head, only insert the block
-		_, err = bc.writeBlockWithState(block, res.Receipts, statedb)
+		err = bc.writeBlockWithState(block, res.Receipts, statedb)
 	} else {
 		status, err = bc.writeBlockAndSetHead(block, res.Receipts, res.Logs, statedb, false)
 	}
@@ -2484,7 +2468,7 @@ func (bc *BlockChain) recoverAncestors(ctx context.Context, block *types.Block, 
 	// In binary follow mode, state roots in block headers are MPT roots which
 	// don't exist in the binary triedb. Recovery uses the tracked binary root.
 	if bc.binaryFollowEnabled() {
-		return bc.recoverBinaryAncestors(block, makeWitness)
+		return bc.recoverBinaryAncestors(block)
 	}
 	// Gather all the sidechain hashes (full blocks may be memory heavy)
 	var (
@@ -2536,7 +2520,7 @@ func (bc *BlockChain) recoverAncestors(ctx context.Context, block *types.Block, 
 // binary root is missing. Unlike MPT recovery which walks back through block
 // headers, binary recovery can only use the single tracked binary root since
 // per-block binary roots are not stored in headers.
-func (bc *BlockChain) recoverBinaryAncestors(block *types.Block, makeWitness bool) (common.Hash, error) {
+func (bc *BlockChain) recoverBinaryAncestors(block *types.Block) (common.Hash, error) {
 	binRoot := bc.getCurrentExecRoot()
 	if bc.HasState(binRoot) {
 		return block.Hash(), nil
