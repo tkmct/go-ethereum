@@ -133,6 +133,7 @@ type Config struct {
 	DatabaseCache      int
 	DatabaseFreezer    string
 	DatabaseEra        string
+	DatabaseEraExt     string
 
 	TrieCleanCache int
 	TrieDirtyCache int

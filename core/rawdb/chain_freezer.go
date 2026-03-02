@@ -60,7 +60,7 @@ type chainFreezer struct {
 //     state freezer (e.g. dev mode).
 //   - if non-empty directory is given, initializes the regular file-based
 //     state freezer.
-func newChainFreezer(datadir string, eraDir string, namespace string, readonly bool) (*chainFreezer, error) {
+func newChainFreezer(datadir string, eraDir string, eraExt string, namespace string, readonly bool) (*chainFreezer, error) {
 	if datadir == "" {
 		return &chainFreezer{
 			ancients: NewMemoryFreezer(readonly, chainFreezerTableConfigs),
@@ -72,7 +72,7 @@ func newChainFreezer(datadir string, eraDir string, namespace string, readonly b
 	if err != nil {
 		return nil, err
 	}
-	edb, err := eradb.New(resolveChainEraDir(datadir, eraDir))
+	edb, err := eradb.New(resolveChainEraDir(datadir, eraDir), eraExt)
 	if err != nil {
 		return nil, err
 	}

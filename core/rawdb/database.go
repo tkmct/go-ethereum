@@ -220,6 +220,7 @@ func NewDatabaseWithFreezer(db ethdb.KeyValueStore, ancient string, namespace st
 type OpenOptions struct {
 	Ancient          string // ancients directory
 	Era              string // era files directory
+	EraExt           string // era file extension with leading dot, e.g. ".era1"
 	MetricsNamespace string // prefix added to freezer metric names
 	ReadOnly         bool
 }
@@ -233,7 +234,11 @@ func Open(db ethdb.KeyValueStore, opts OpenOptions) (ethdb.Database, error) {
 	if chainFreezerDir != "" {
 		chainFreezerDir = resolveChainFreezerDir(chainFreezerDir)
 	}
-	frdb, err := newChainFreezer(chainFreezerDir, opts.Era, opts.MetricsNamespace, opts.ReadOnly)
+	eraExt := opts.EraExt
+	if eraExt == "" {
+		eraExt = ".era1"
+	}
+	frdb, err := newChainFreezer(chainFreezerDir, opts.Era, eraExt, opts.MetricsNamespace, opts.ReadOnly)
 	if err != nil {
 		printChainMetadata(db)
 		return nil, err

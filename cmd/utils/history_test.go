@@ -101,7 +101,7 @@ func TestHistoryImportAndExport(t *testing.T) {
 	checksums := strings.Split(string(b), "\n")
 
 	// Verify each Era.
-	entries, _ := era.ReadDir(dir, "mainnet")
+	entries, _ := era.ReadDir(dir, "mainnet", ".era1")
 	for i, filename := range entries {
 		func() {
 			f, err := os.Open(filepath.Join(dir, filename))
@@ -170,7 +170,7 @@ func TestHistoryImportAndExport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to initialize chain: %v", err)
 	}
-	if err := ImportHistory(imported, dir, "mainnet"); err != nil {
+	if err := ImportHistory(imported, dir, "mainnet", ".era1"); err != nil {
 		t.Fatalf("failed to import chain: %v", err)
 	}
 	if have, want := imported.CurrentHeader(), chain.CurrentHeader(); have.Hash() != want.Hash() {

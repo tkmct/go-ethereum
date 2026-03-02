@@ -35,6 +35,10 @@ type DatabaseOptions struct {
 	// ancient/chain or a directory specified via an absolute path.
 	EraDirectory string
 
+	// EraExt is the era file extension with leading dot, e.g. ".era1" or ".erae".
+	// Defaults to ".era1" when empty.
+	EraExt string
+
 	MetricsNamespace string // the namespace for database relevant metrics
 	Cache            int    // the capacity(in megabytes) of the data caching
 	Handles          int    // number of files to be open simultaneously
@@ -60,6 +64,7 @@ func openDatabase(o internalOpenOptions) (ethdb.Database, error) {
 	opts := rawdb.OpenOptions{
 		Ancient:          o.AncientsDirectory,
 		Era:              o.EraDirectory,
+		EraExt:           o.EraExt,
 		MetricsNamespace: o.MetricsNamespace,
 		ReadOnly:         o.ReadOnly,
 	}

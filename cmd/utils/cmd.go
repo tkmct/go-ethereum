@@ -250,11 +250,11 @@ func readList(filename string) ([]string, error) {
 // ImportHistory imports Era1 files containing historical block information,
 // starting from genesis. The assumption is held that the provided chain
 // segment in Era1 file should all be canonical and verified.
-func ImportHistory(chain *core.BlockChain, dir string, network string) error {
+func ImportHistory(chain *core.BlockChain, dir, network, ext string) error {
 	if chain.CurrentSnapBlock().Number.BitLen() != 0 {
 		return errors.New("history import only supported when starting from genesis")
 	}
-	entries, err := era.ReadDir(dir, network)
+	entries, err := era.ReadDir(dir, network, ext)
 	if err != nil {
 		return fmt.Errorf("error reading %s: %w", dir, err)
 	}

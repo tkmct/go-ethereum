@@ -477,6 +477,7 @@ func importHistory(ctx *cli.Context) error {
 	var (
 		start   = time.Now()
 		dir     = ctx.Args().Get(0)
+		ext     = "." + ctx.String(utils.EraFormatFlag.Name)
 		network string
 	)
 
@@ -497,7 +498,7 @@ func importHistory(ctx *cli.Context) error {
 		// present in directory.
 		var networks []string
 		for _, n := range params.NetworkNames {
-			entries, err := era.ReadDir(dir, n)
+			entries, err := era.ReadDir(dir, n, ext)
 			if err != nil {
 				return fmt.Errorf("error reading %s: %w", dir, err)
 			}
@@ -506,7 +507,7 @@ func importHistory(ctx *cli.Context) error {
 			}
 		}
 		if len(networks) == 0 {
-			return fmt.Errorf("no era1 files found in %s", dir)
+			return fmt.Errorf("no era files found in %s", dir)
 		}
 		if len(networks) > 1 {
 			return errors.New("multiple networks found, use a network flag to specify desired network")
@@ -514,7 +515,7 @@ func importHistory(ctx *cli.Context) error {
 		network = networks[0]
 	}
 
-	if err := utils.ImportHistory(chain, dir, network); err != nil {
+	if err := utils.ImportHistory(chain, dir, network, ext); err != nil {
 		return err
 	}
 	fmt.Printf("Import done in %v\n", time.Since(start))

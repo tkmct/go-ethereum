@@ -27,7 +27,7 @@ import (
 )
 
 func TestEraDatabase(t *testing.T) {
-	db, err := New("testdata")
+	db, err := New("testdata", ".era1")
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -49,7 +49,7 @@ func TestEraDatabase(t *testing.T) {
 }
 
 func TestEraDatabaseConcurrentOpen(t *testing.T) {
-	db, err := New("testdata")
+	db, err := New("testdata", ".era1")
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -72,7 +72,7 @@ func TestEraDatabaseConcurrentOpen(t *testing.T) {
 }
 
 func TestEraDatabaseConcurrentOpenClose(t *testing.T) {
-	db, err := New("testdata")
+	db, err := New("testdata", ".era1")
 	require.NoError(t, err)
 	defer db.Close()
 

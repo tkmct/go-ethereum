@@ -35,10 +35,11 @@ const openFileLimit = 64
 
 var errClosed = errors.New("era store is closed")
 
-// Store manages read access to a directory of era1 files.
+// Store manages read access to a directory of era files.
 // The getter methods are thread-safe.
 type Store struct {
 	datadir string
+	ext     string // file extension including dot, e.g. ".era1" or ".erae"
 
 	// The mutex protects all remaining fields.
 	mu      sync.Mutex
@@ -64,15 +65,17 @@ const (
 	fileIsCached
 )
 
-// New opens the store directory.
-func New(datadir string) (*Store, error) {
+// New opens the store directory. The ext parameter is the file extension
+// including the leading dot, e.g. ".era1" or ".erae".
+func New(datadir, ext string) (*Store, error) {
 	db := &Store{
 		datadir: datadir,
+		ext:     ext,
 		lru:     lru.NewBasicLRU[uint64, *fileCacheEntry](openFileLimit),
 		opening: make(map[uint64]*fileCacheEntry),
 	}
 	db.cond = sync.NewCond(&db.mu)
-	log.Info("Opened Era store", "datadir", datadir)
+	log.Info("Opened Era store", "datadir", datadir, "ext", ext)
 	return db, nil
 }
 
@@ -283,30 +286,28 @@ func (db *Store) fileFailedToOpen(epoch uint64, entry *fileCacheEntry, err error
 }
 
 func (db *Store) openEraFile(epoch uint64) (*era.Era, error) {
-	// File name scheme is <network>-<epoch>-<root>.
-	glob := fmt.Sprintf("*-%05d-*.era1", epoch)
+	// File name scheme is <network>-<epoch>-<root><ext>.
+	glob := fmt.Sprintf("*-%05d-*%s", epoch, db.ext)
 	matches, err := filepath.Glob(filepath.Join(db.datadir, glob))
 	if err != nil {
 		return nil, err
 	}
 	if len(matches) > 1 {
-		return nil, fmt.Errorf("multiple era1 files found for epoch %d", epoch)
+		return nil, fmt.Errorf("multiple era files found for epoch %d", epoch)
 	}
 	if len(matches) == 0 {
 		return nil, fs.ErrNotExist
 	}
-	filename := matches[0]
-
-	e, err := era.Open(filename)
+	e, err := era.Open(matches[0])
 	if err != nil {
 		return nil, err
 	}
 	// Sanity-check start block.
 	if e.Start()%uint64(era.MaxEra1Size) != 0 {
 		e.Close()
-		return nil, fmt.Errorf("pre-merge era1 file has invalid boundary. %d %% %d != 0", e.Start(), era.MaxEra1Size)
+		return nil, fmt.Errorf("era file has invalid boundary. %d %% %d != 0", e.Start(), era.MaxEra1Size)
 	}
-	log.Debug("Opened era1 file", "epoch", epoch)
+	log.Debug("Opened era file", "epoch", epoch, "file", matches[0])
 	return e, nil
 }
 

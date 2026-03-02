@@ -114,6 +114,12 @@ var (
 		Usage:    "Root directory for era1 history (default = inside ancient/chain)",
 		Category: flags.EthCategory,
 	}
+	EraFormatFlag = &cli.StringFlag{
+		Name:     "datadir.era.format",
+		Usage:    `Era file format: "era1" or "erae"`,
+		Value:    "era1",
+		Category: flags.EthCategory,
+	}
 	MinFreeDiskSpaceFlag = &cli.IntFlag{
 		Name:     "datadir.minfreedisk",
 		Usage:    "Minimum free disk space in MB, once reached triggers auto shut down (default = --cache.gc converted to MB, 0 = disabled)",
@@ -1046,6 +1052,7 @@ var (
 		DataDirFlag,
 		AncientFlag,
 		EraFlag,
+		EraFormatFlag,
 		RemoteDBFlag,
 		DBEngineFlag,
 		StateSchemeFlag,
@@ -1685,6 +1692,7 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	if ctx.IsSet(EraFlag.Name) {
 		cfg.DatabaseEra = ctx.String(EraFlag.Name)
 	}
+	cfg.DatabaseEraExt = "." + ctx.String(EraFormatFlag.Name)
 
 	if gcmode := ctx.String(GCModeFlag.Name); gcmode != "full" && gcmode != "archive" {
 		Fatalf("--%s must be either 'full' or 'archive'", GCModeFlag.Name)
@@ -2214,6 +2222,7 @@ func MakeChainDatabase(ctx *cli.Context, stack *node.Node, readonly bool) ethdb.
 			AncientsDirectory: ctx.String(AncientFlag.Name),
 			MetricsNamespace:  "eth/db/chaindata/",
 			EraDirectory:      ctx.String(EraFlag.Name),
+			EraExt:            "." + ctx.String(EraFormatFlag.Name),
 		}
 		chainDb, err = stack.OpenDatabaseWithOptions("chaindata", options)
 	}

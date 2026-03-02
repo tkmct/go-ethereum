@@ -169,7 +169,7 @@ func open(ctx *cli.Context, epoch uint64) (*era.Era, error) {
 		dir     = ctx.String(dirFlag.Name)
 		network = ctx.String(networkFlag.Name)
 	)
-	entries, err := era.ReadDir(dir, network)
+	entries, err := era.ReadDir(dir, network, ".era1")
 	if err != nil {
 		return nil, fmt.Errorf("error reading era dir: %w", err)
 	}
@@ -198,7 +198,7 @@ func verify(ctx *cli.Context) error {
 		reported = time.Now()
 	)
 
-	entries, err := era.ReadDir(dir, network)
+	entries, err := era.ReadDir(dir, network, ".era1")
 	if err != nil {
 		return fmt.Errorf("error reading %s: %w", dir, err)
 	}

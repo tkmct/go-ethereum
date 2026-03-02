@@ -17,6 +17,7 @@
 package era
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -35,13 +36,15 @@ import (
 )
 
 var (
-	TypeVersion            uint16 = 0x3265
-	TypeCompressedHeader   uint16 = 0x03
-	TypeCompressedBody     uint16 = 0x04
-	TypeCompressedReceipts uint16 = 0x05
-	TypeTotalDifficulty    uint16 = 0x06
-	TypeAccumulator        uint16 = 0x07
-	TypeBlockIndex         uint16 = 0x3266
+	TypeVersion                uint16 = 0x3265
+	TypeCompressedHeader       uint16 = 0x03
+	TypeCompressedBody         uint16 = 0x04
+	TypeCompressedReceipts     uint16 = 0x05
+	TypeCompressedSlimReceipts uint16 = 0x0a
+	TypeTotalDifficulty        uint16 = 0x06
+	TypeAccumulator            uint16 = 0x07
+	TypeBlockIndex             uint16 = 0x3266
+	TypeBlockIndexEra          uint16 = 0x3267
 
 	MaxEra1Size = 8192
 )
@@ -52,9 +55,10 @@ func Filename(network string, epoch int, root common.Hash) string {
 	return fmt.Sprintf("%s-%05d-%s.era1", network, epoch, root.Hex()[2:10])
 }
 
-// ReadDir reads all the era1 files in a directory for a given network.
-// Format: <network>-<epoch>-<hexroot>.era1
-func ReadDir(dir, network string) ([]string, error) {
+// ReadDir reads all the era files in a directory for a given network and extension.
+// Format: <network>-<epoch>-<hexroot><ext>
+// The ext parameter should include the leading dot, e.g. ".era1" or ".erae".
+func ReadDir(dir, network, ext string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("error reading directory %s: %w", dir, err)
@@ -64,17 +68,18 @@ func ReadDir(dir, network string) ([]string, error) {
 		eras []string
 	)
 	for _, entry := range entries {
-		if path.Ext(entry.Name()) != ".era1" {
+		if path.Ext(entry.Name()) != ext {
 			continue
 		}
 		parts := strings.Split(entry.Name(), "-")
 		if len(parts) != 3 || parts[0] != network {
-			// Invalid era1 filename, skip.
 			continue
 		}
-		if epoch, err := strconv.ParseUint(parts[1], 10, 64); err != nil {
-			return nil, fmt.Errorf("malformed era1 filename: %s", entry.Name())
-		} else if epoch != next {
+		epoch, err := strconv.ParseUint(parts[1], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("malformed era filename: %s", entry.Name())
+		}
+		if epoch != next {
 			return nil, fmt.Errorf("missing epoch %d", next)
 		}
 		next += 1
@@ -127,14 +132,11 @@ func (e *Era) Close() error {
 
 // GetBlockByNumber returns the block for the given block number.
 func (e *Era) GetBlockByNumber(num uint64) (*types.Block, error) {
-	if e.m.start > num || e.m.start+e.m.count <= num {
-		return nil, fmt.Errorf("out-of-bounds: %d not in [%d, %d)", num, e.m.start, e.m.start+e.m.count)
-	}
-	off, err := e.readOffset(num)
+	headerOff, err := e.readComponentOffset(num, 0, TypeCompressedHeader)
 	if err != nil {
 		return nil, err
 	}
-	r, n, err := newSnappyReader(e.s, TypeCompressedHeader, off)
+	r, _, err := newSnappyReader(e.s, TypeCompressedHeader, headerOff)
 	if err != nil {
 		return nil, err
 	}
@@ -142,8 +144,11 @@ func (e *Era) GetBlockByNumber(num uint64) (*types.Block, error) {
 	if err := rlp.Decode(r, &header); err != nil {
 		return nil, err
 	}
-	off += n
-	r, _, err = newSnappyReader(e.s, TypeCompressedBody, off)
+	bodyOff, err := e.readComponentOffset(num, 1, TypeCompressedBody)
+	if err != nil {
+		return nil, err
+	}
+	r, _, err = newSnappyReader(e.s, TypeCompressedBody, bodyOff)
 	if err != nil {
 		return nil, err
 	}
@@ -156,14 +161,7 @@ func (e *Era) GetBlockByNumber(num uint64) (*types.Block, error) {
 
 // GetRawBodyByNumber returns the RLP-encoded body for the given block number.
 func (e *Era) GetRawBodyByNumber(num uint64) ([]byte, error) {
-	if e.m.start > num || e.m.start+e.m.count <= num {
-		return nil, fmt.Errorf("out-of-bounds: %d not in [%d, %d)", num, e.m.start, e.m.start+e.m.count)
-	}
-	off, err := e.readOffset(num)
-	if err != nil {
-		return nil, err
-	}
-	off, err = e.s.SkipN(off, 1)
+	off, err := e.readComponentOffset(num, 1, TypeCompressedBody)
 	if err != nil {
 		return nil, err
 	}
@@ -176,25 +174,72 @@ func (e *Era) GetRawBodyByNumber(num uint64) ([]byte, error) {
 
 // GetRawReceiptsByNumber returns the RLP-encoded receipts for the given block number.
 func (e *Era) GetRawReceiptsByNumber(num uint64) ([]byte, error) {
-	if e.m.start > num || e.m.start+e.m.count <= num {
-		return nil, fmt.Errorf("out-of-bounds: %d not in [%d, %d)", num, e.m.start, e.m.start+e.m.count)
-	}
-	off, err := e.readOffset(num)
+	off, err := e.readComponentOffset(num, 2, TypeCompressedReceipts, TypeCompressedSlimReceipts)
 	if err != nil {
 		return nil, err
 	}
+	typ, _, err := e.s.ReadMetadataAt(off)
+	if err != nil {
+		return nil, err
+	}
+	switch typ {
+	case TypeCompressedReceipts:
+		r, _, err := newSnappyReader(e.s, TypeCompressedReceipts, off)
+		if err != nil {
+			return nil, err
+		}
+		return io.ReadAll(r)
+	case TypeCompressedSlimReceipts:
+		r, _, err := newSnappyReader(e.s, TypeCompressedSlimReceipts, off)
+		if err != nil {
+			return nil, err
+		}
+		data, err := io.ReadAll(r)
+		if err != nil {
+			return nil, err
+		}
+		receipts, err := decodeSlimReceipts(data)
+		if err != nil {
+			return nil, err
+		}
+		return rlp.EncodeToBytes(receipts)
+	default:
+		return nil, fmt.Errorf("unsupported receipts type %d", typ)
+	}
+}
 
-	// Skip over header and body.
-	off, err = e.s.SkipN(off, 2)
-	if err != nil {
-		return nil, err
+func (e *Era) totalDifficultyOffset(num uint64) (int64, error) {
+	// Try explicit indexed components first (eraE).
+	for component := uint64(3); component < e.m.componentCount; component++ {
+		off, err := e.readComponentOffset(num, component)
+		if err != nil {
+			return 0, err
+		}
+		typ, _, err := e.s.ReadMetadataAt(off)
+		if err != nil {
+			continue
+		}
+		if typ == TypeTotalDifficulty {
+			return off, nil
+		}
 	}
-
-	r, _, err := newSnappyReader(e.s, TypeCompressedReceipts, off)
+	// For era1 total difficulty is placed right after receipts.
+	off, err := e.readComponentOffset(num, 2, TypeCompressedReceipts)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	return io.ReadAll(r)
+	off, err = e.s.SkipN(off, 1)
+	if err != nil {
+		return 0, err
+	}
+	typ, _, err := e.s.ReadMetadataAt(off)
+	if err != nil {
+		return 0, err
+	}
+	if typ != TypeTotalDifficulty {
+		return 0, fmt.Errorf("total difficulty not available for block %d", num)
+	}
+	return off, nil
 }
 
 // Accumulator reads the accumulator entry in the Era1 file.
@@ -213,31 +258,26 @@ func (e *Era) InitialTD() (*big.Int, error) {
 		r      io.Reader
 		header types.Header
 		rawTd  []byte
-		n      int64
-		off    int64
 		err    error
 	)
 
 	// Read first header.
-	if off, err = e.readOffset(e.m.start); err != nil {
+	headerOff, err := e.readComponentOffset(e.m.start, 0, TypeCompressedHeader)
+	if err != nil {
 		return nil, err
 	}
-	if r, n, err = newSnappyReader(e.s, TypeCompressedHeader, off); err != nil {
+	if r, _, err = newSnappyReader(e.s, TypeCompressedHeader, headerOff); err != nil {
 		return nil, err
 	}
 	if err := rlp.Decode(r, &header); err != nil {
 		return nil, err
 	}
-	off += n
-
-	// Skip over header and body.
-	off, err = e.s.SkipN(off, 2)
+	tdOff, err := e.totalDifficultyOffset(e.m.start)
 	if err != nil {
 		return nil, err
 	}
-
 	// Read total difficulty after first block.
-	if r, _, err = e.s.ReaderAt(TypeTotalDifficulty, off); err != nil {
+	if r, _, err = e.s.ReaderAt(TypeTotalDifficulty, tdOff); err != nil {
 		return nil, err
 	}
 	rawTd, err = io.ReadAll(r)
@@ -258,27 +298,6 @@ func (e *Era) Count() uint64 {
 	return e.m.count
 }
 
-// readOffset reads a specific block's offset from the block index. The value n
-// is the absolute block number desired.
-func (e *Era) readOffset(n uint64) (int64, error) {
-	var (
-		blockIndexRecordOffset = e.m.length - 24 - int64(e.m.count)*8 // skips start, count, and header
-		firstIndex             = blockIndexRecordOffset + 16          // first index after header / start-num
-		indexOffset            = int64(n-e.m.start) * 8               // desired index * size of indexes
-		offOffset              = firstIndex + indexOffset             // offset of block offset
-	)
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	clear(e.buf[:])
-	if _, err := e.f.ReadAt(e.buf[:], offOffset); err != nil {
-		return 0, err
-	}
-	// Since the block offset is relative from the start of the block index record
-	// we need to add the record offset to it's offset to get the block's absolute
-	// offset.
-	return blockIndexRecordOffset + int64(binary.LittleEndian.Uint64(e.buf[:])), nil
-}
-
 // newSnappyReader returns a snappy.Reader for the e2store entry value at off.
 func newSnappyReader(e *e2store.Reader, expectedType uint16, off int64) (io.Reader, int64, error) {
 	r, n, err := e.ReaderAt(expectedType, off)
@@ -290,28 +309,188 @@ func newSnappyReader(e *e2store.Reader, expectedType uint16, off int64) (io.Read
 
 // metadata wraps the metadata in the block index.
 type metadata struct {
-	start  uint64
-	count  uint64
-	length int64
+	start          uint64
+	count          uint64
+	length         int64
+	indexOffset    int64
+	componentCount uint64
 }
 
 // readMetadata reads the metadata stored in an Era1 file's block index.
+// The block index is always the last e2store entry. Its layout:
+//
+//	era1: start(8) | count * offset(8) | count(8)
+//	eraE: start(8) | count * componentCount * offset(8) | componentCount(8) | count(8)
+//
+// We locate the entry by reading count (and componentCount for eraE) from
+// the end of the file, computing the expected entry offset, and verifying
+// the e2store type header.
 func readMetadata(f ReadAtSeekCloser) (m metadata, err error) {
-	// Determine length of reader.
 	if m.length, err = f.Seek(0, io.SeekEnd); err != nil {
 		return
 	}
+	r := e2store.NewReader(f)
 	b := make([]byte, 16)
-	// Read count. It's the last 8 bytes of the file.
-	if _, err = f.ReadAt(b[:8], m.length-8); err != nil {
+
+	// Last 16 bytes contain either:
+	//   era1: [last_offset(8), count(8)]
+	//   eraE: [componentCount(8), count(8)]
+	if _, err = f.ReadAt(b, m.length-16); err != nil {
 		return
 	}
-	m.count = binary.LittleEndian.Uint64(b)
-	// Read start. It's at the offset -sizeof(m.count) -
-	// count*sizeof(indexEntry) - sizeof(m.start)
-	if _, err = f.ReadAt(b[8:], m.length-16-int64(m.count*8)); err != nil {
-		return
+	count := binary.LittleEndian.Uint64(b[8:])
+	penultimate := binary.LittleEndian.Uint64(b[:8])
+
+	// Try era1: value size = 16 + count*8
+	era1ValueSize := int64(16 + count*8)
+	if off := m.length - 8 - era1ValueSize; off >= 0 { // 8 = e2store header
+		if typ, _, e := r.ReadMetadataAt(off); e == nil && typ == TypeBlockIndex {
+			if _, err = f.ReadAt(b[:8], off+8); err != nil {
+				return
+			}
+			m.indexOffset = off
+			m.start = binary.LittleEndian.Uint64(b[:8])
+			m.count = count
+			m.componentCount = 1
+			return
+		}
 	}
-	m.start = binary.LittleEndian.Uint64(b[8:])
-	return
+	// Try eraE: penultimate is componentCount, value size = 24 + count*componentCount*8
+	componentCount := penultimate
+	if componentCount == 0 {
+		return m, fmt.Errorf("no era block index found")
+	}
+	eraEValueSize := int64(24 + count*componentCount*8)
+	if off := m.length - 8 - eraEValueSize; off >= 0 {
+		if typ, _, e := r.ReadMetadataAt(off); e == nil && typ == TypeBlockIndexEra {
+			if _, err = f.ReadAt(b[:8], off+8); err != nil {
+				return
+			}
+			m.indexOffset = off
+			m.start = binary.LittleEndian.Uint64(b[:8])
+			m.count = count
+			m.componentCount = componentCount
+			return
+		}
+	}
+	return m, fmt.Errorf("no era block index found")
+}
+
+func (e *Era) readComponentOffset(n uint64, component uint64, expectedTypes ...uint16) (int64, error) {
+	if n < e.m.start || n >= e.m.start+e.m.count {
+		return 0, fmt.Errorf("out-of-bounds: %d not in [%d, %d)", n, e.m.start, e.m.start+e.m.count)
+	}
+	// Era1 block index stores only the header offset. Remaining components are
+	// laid out sequentially in the file.
+	if e.m.componentCount == 1 && component > 0 {
+		base, err := e.readComponentOffset(n, 0)
+		if err != nil {
+			return 0, err
+		}
+		off, err := e.s.SkipN(base, component)
+		if err != nil {
+			return 0, err
+		}
+		if len(expectedTypes) == 0 {
+			return off, nil
+		}
+		typ, _, err := e.s.ReadMetadataAt(off)
+		if err != nil {
+			return 0, err
+		}
+		for _, want := range expectedTypes {
+			if typ == want {
+				return off, nil
+			}
+		}
+		return 0, fmt.Errorf("unexpected component type %d at block %d component %d", typ, n, component)
+	}
+	if component >= e.m.componentCount {
+		return 0, fmt.Errorf("component %d out of range [0,%d)", component, e.m.componentCount)
+	}
+	var (
+		firstIndex = e.m.indexOffset + 16
+		blockBase  = int64(n-e.m.start) * int64(e.m.componentCount*8)
+		offOffset  = firstIndex + blockBase + int64(component*8)
+	)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	clear(e.buf[:])
+	if _, err := e.f.ReadAt(e.buf[:], offOffset); err != nil {
+		return 0, err
+	}
+	rel := int64(binary.LittleEndian.Uint64(e.buf[:]))
+
+	// Different era producers have used different offset bases. Try both:
+	// 1) relative to start of block-index record
+	// 2) relative to the index-field location itself
+	candidates := []int64{
+		e.m.indexOffset + rel,
+		offOffset + rel,
+	}
+	seen := make(map[int64]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		if len(expectedTypes) == 0 {
+			return candidate, nil
+		}
+		typ, _, err := e.s.ReadMetadataAt(candidate)
+		if err != nil {
+			continue
+		}
+		for _, want := range expectedTypes {
+			if typ == want {
+				return candidate, nil
+			}
+		}
+	}
+	if len(expectedTypes) > 0 {
+		return 0, fmt.Errorf("unable to resolve component offset for block %d component %d", n, component)
+	}
+	return candidates[0], nil
+}
+
+func decodePostStateOrStatus(r *types.Receipt, status []byte) error {
+	switch {
+	case bytes.Equal(status, []byte{0x01}):
+		r.Status = types.ReceiptStatusSuccessful
+	case len(status) == 0:
+		r.Status = types.ReceiptStatusFailed
+	case len(status) == len(common.Hash{}):
+		r.PostState = common.CopyBytes(status)
+	default:
+		return fmt.Errorf("invalid receipt status %x", status)
+	}
+	return nil
+}
+
+type slimReceipt struct {
+	Type              uint64
+	PostStateOrStatus []byte
+	CumulativeGasUsed uint64
+	Logs              []*types.Log
+}
+
+func decodeSlimReceipts(input []byte) (types.Receipts, error) {
+	var slim []slimReceipt
+	if err := rlp.DecodeBytes(input, &slim); err != nil {
+		return nil, err
+	}
+	receipts := make(types.Receipts, len(slim))
+	for i := range slim {
+		r := &types.Receipt{
+			Type:              uint8(slim[i].Type),
+			CumulativeGasUsed: slim[i].CumulativeGasUsed,
+			Logs:              slim[i].Logs,
+		}
+		if err := decodePostStateOrStatus(r, slim[i].PostStateOrStatus); err != nil {
+			return nil, err
+		}
+		r.Bloom = types.CreateBloom(r)
+		receipts[i] = r
+	}
+	return receipts, nil
 }
