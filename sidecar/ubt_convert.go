@@ -102,6 +102,18 @@ func (sc *UBTSidecar) BeginConversion(root common.Hash, blockNum uint64, blockHa
 		sc.mu.Unlock()
 		return false
 	}
+	sc.mu.Unlock()
+
+	// Reset the UBT trie so the disk layer root returns to EmptyBinaryHash.
+	// This is necessary because buildFromGenesis (or a previous partial
+	// conversion) may have advanced the disk layer root, and ConvertFromMPT
+	// always starts from an empty trie with EmptyBinaryHash as parent.
+	if err := sc.resetVerkleTrie(); err != nil {
+		log.Error("Failed to reset UBT trie before conversion", "err", err)
+		return false
+	}
+
+	sc.mu.Lock()
 	sc.converting = true
 	sc.ready = false
 	sc.stale = false
