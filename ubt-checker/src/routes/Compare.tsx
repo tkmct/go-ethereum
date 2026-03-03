@@ -21,20 +21,26 @@ const defaultBlock: BlockSelection = {
 
 type MptResult = {
   balance: string;
+  nonce: string;
   code: string;
   storage: Record<string, string>;
   stateRoot?: string;
 };
 
-type UbtResult = {
+type UbtAccount = {
   address: string;
   balance: string;
   nonce: string;
   codeHash: string;
   codeSize: string;
+};
+
+type UbtResult = {
+  balance: string;
+  nonce: string;
+  codeHash: string;
+  codeSize: string;
   storage: Record<string, string>;
-  stateRoot: string;
-  ubtRoot: string;
 };
 
 function normalizeHex(input: string): string {
@@ -116,9 +122,12 @@ export default function Compare() {
       const blockRef = selectionToBlockRef(blockSelection);
       const blockParam = blockRefToParam(blockRef);
 
-      const [balance, code] = await Promise.all([
+      // Fetch MPT state
+      const [balance, nonce, code, stateRoot] = await Promise.all([
         clientMpt.call<string>('eth_getBalance', [address, blockParam]),
+        clientMpt.call<string>('eth_getTransactionCount', [address, blockParam]),
         clientMpt.call<string>('eth_getCode', [address, blockParam]),
+        fetchStateRoot(clientMpt, blockSelection),
       ]);
 
       const storage: Record<string, string> = {};
@@ -131,11 +140,25 @@ export default function Compare() {
         });
       }
 
-      const ubtState = await clientUbt.call<UbtResult>('debug_getUBTState', [address, keys, blockParam]);
-      const stateRoot = await fetchStateRoot(clientMpt, blockSelection);
+      // Fetch UBT state via debug_ubt_getAccount + storage
+      const [ubtAccount, ...ubtStorageValues] = await Promise.all([
+        clientUbt.call<UbtAccount>('debug_ubt_getAccount', [address, blockParam]),
+        ...keys.map((key) => clientUbt.call<string>('debug_ubt_getStorageAt', [address, key, blockParam])),
+      ]);
 
-      setMpt({ balance, code, storage, stateRoot });
-      setUbt(ubtState);
+      const ubtStorage: Record<string, string> = {};
+      paddedKeys.forEach((key, index) => {
+        ubtStorage[key] = ubtStorageValues[index];
+      });
+
+      setMpt({ balance, nonce, code, storage, stateRoot });
+      setUbt({
+        balance: ubtAccount?.balance ?? '0x0',
+        nonce: ubtAccount?.nonce ?? '0x0',
+        codeHash: ubtAccount?.codeHash ?? '0x',
+        codeSize: ubtAccount?.codeSize ?? '0x0',
+        storage: ubtStorage,
+      });
       setStatus('success');
     } catch (err) {
       setStatus('error');
@@ -151,7 +174,7 @@ export default function Compare() {
       <div className="page-header">
         <div>
           <h1>State Compare</h1>
-          <p>Compare MPT-backed state with UBT sidecar state.</p>
+          <p>Compare MPT-backed state with UBT daemon state.</p>
         </div>
         <span className="badge">Dual Endpoint</span>
       </div>
@@ -191,6 +214,10 @@ export default function Compare() {
                   {renderHexWithDecimal(mpt.balance)}
                 </div>
                 <div className="diff-row">
+                  <span>Nonce</span>
+                  {renderHexWithDecimal(mpt.nonce)}
+                </div>
+                <div className="diff-row">
                   <span>Code Size</span>
                   <div className="mono">{codeSize ?? '0'}</div>
                 </div>
@@ -217,19 +244,11 @@ export default function Compare() {
                 </div>
                 <div className="diff-row">
                   <span>Code Size</span>
-                  {renderHexWithDecimal(ubt.codeSize)}
+                  <div className="mono">{ubt.codeSize}</div>
                 </div>
                 <div className="diff-row">
                   <span>Code Hash</span>
                   <div className="mono">{ubt.codeHash}</div>
-                </div>
-                <div className="diff-row">
-                  <span>State Root</span>
-                  <div className="mono">{ubt.stateRoot}</div>
-                </div>
-                <div className="diff-row">
-                  <span>UBT Root</span>
-                  <div className="mono">{ubt.ubtRoot}</div>
                 </div>
               </div>
             </div>
