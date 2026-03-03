@@ -520,14 +520,32 @@ func importHistory(ctx *cli.Context) error {
 		network = networks[0]
 	}
 
+	entries, err := era.ReadDir(dir, network)
+	if err != nil {
+		return fmt.Errorf("error reading %s: %w", dir, err)
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("no era files found in %s", dir)
+	}
+	detectedFormat := strings.TrimPrefix(strings.ToLower(filepath.Ext(entries[0])), ".")
+
 	var (
 		format = ctx.String(utils.EraFormatFlag.Name)
 		from   func(era.ReadAtSeekCloser) (era.Era, error)
 	)
+	if !ctx.IsSet(utils.EraFormatFlag.Name) {
+		format = detectedFormat
+	}
 	switch format {
 	case "era1", "era":
+		if detectedFormat != "era1" {
+			return fmt.Errorf("archive format mismatch: --%s=era1 but directory contains .%s files", utils.EraFormatFlag.Name, detectedFormat)
+		}
 		from = onedb.From
 	case "erae":
+		if detectedFormat != "erae" {
+			return fmt.Errorf("archive format mismatch: --%s=erae but directory contains .%s files", utils.EraFormatFlag.Name, detectedFormat)
+		}
 		from = execdb.From
 	default:
 		return fmt.Errorf("unknown --era.format %q (expected 'era1' or 'erae')", format)
