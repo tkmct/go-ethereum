@@ -39,6 +39,10 @@ import (
 
 const ubtConversionLogInterval = 200_000
 
+// ubtConversionBatchSize is the number of accounts processed before an
+// intermediate commit+flush of the UBT trie to bound memory usage.
+const ubtConversionBatchSize = 500_000
+
 // Maximum number of consecutive iterator-open failures before giving up.
 const maxIteratorRetries = 20
 
@@ -93,6 +97,29 @@ func retryBackoff(attempt int) {
 	}
 	jitter := time.Duration(rand.Int63n(int64(time.Second)))
 	time.Sleep(base + jitter)
+}
+
+// commitConversionBatch commits the in-memory BinaryTrie to the UBT triedb
+// and flushes to disk, then reopens the trie from the new root. This bounds
+// memory usage during conversion by not holding the entire trie in memory.
+// Returns the reopened trie and the new parent root.
+func (sc *UBTSidecar) commitConversionBatch(bt *bintrie.BinaryTrie, parentRoot common.Hash, accounts uint64) (*bintrie.BinaryTrie, common.Hash, error) {
+	newRoot, nodeset := bt.Commit(false)
+	merged := trienode.NewWithNodeSet(nodeset)
+	if err := sc.triedb.Update(newRoot, parentRoot, 0, merged, triedb.NewStateSet()); err != nil {
+		return nil, common.Hash{}, sc.fail("batch update ubt trie", err)
+	}
+	if err := sc.triedb.Commit(newRoot, false); err != nil {
+		return nil, common.Hash{}, sc.fail("batch commit ubt trie", err)
+	}
+	log.Info("UBT conversion batch committed", "accounts", accounts, "root", newRoot)
+
+	// Reopen the trie from the committed root.
+	bt2, err := bintrie.NewBinaryTrie(newRoot, sc.triedb)
+	if err != nil {
+		return nil, common.Hash{}, sc.fail("reopen ubt trie after batch", err)
+	}
+	return bt2, newRoot, nil
 }
 
 // BeginConversion transitions the sidecar into converting mode.
@@ -166,6 +193,8 @@ func (sc *UBTSidecar) ConvertFromMPT(root common.Hash, blockNum uint64, blockHas
 		lastSeek       common.Hash // resume point (zero = start)
 		done           bool        // true when all accounts have been processed
 		accounts       uint64
+		batchAccounts  uint64      // accounts since last batch commit
+		ubtParentRoot  = types.EmptyBinaryHash // tracks the UBT triedb parent for Update calls
 		currentRoot    = root
 		openRetries    int
 	)
@@ -273,8 +302,20 @@ func (sc *UBTSidecar) ConvertFromMPT(root common.Hash, blockNum uint64, blockHas
 			// Account fully processed; advance seek past it.
 			lastSeek = accountHash
 			accounts++
+			batchAccounts++
 			if accounts%ubtConversionLogInterval == 0 {
 				log.Info("UBT conversion progress", "accounts", accounts, "lastHash", accountHash)
+			}
+			// Periodically commit the trie to disk to bound memory usage.
+			if batchAccounts >= ubtConversionBatchSize {
+				bt2, newParent, err := sc.commitConversionBatch(bt, ubtParentRoot, accounts)
+				if err != nil {
+					accIt.Release()
+					return err
+				}
+				bt = bt2
+				ubtParentRoot = newParent
+				batchAccounts = 0
 			}
 		}
 
@@ -323,7 +364,7 @@ func (sc *UBTSidecar) ConvertFromMPT(root common.Hash, blockNum uint64, blockHas
 	// queue replay brings the UBT to a canonical block.
 	newRoot, nodeset := bt.Commit(false)
 	merged := trienode.NewWithNodeSet(nodeset)
-	if err := sc.triedb.Update(newRoot, types.EmptyBinaryHash, blockNum, merged, triedb.NewStateSet()); err != nil {
+	if err := sc.triedb.Update(newRoot, ubtParentRoot, blockNum, merged, triedb.NewStateSet()); err != nil {
 		return sc.fail("update ubt trie", err)
 	}
 
