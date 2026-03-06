@@ -242,12 +242,12 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 			// within the data directory. The corresponding paths will be either:
 			// - DATADIR/triedb/merkle.journal
 			// - DATADIR/triedb/verkle.journal
-			TrieJournalDirectory: stack.ResolvePath("triedb"),
-			StateSizeTracking:    config.EnableStateSizeTracking,
-			SlowBlockThreshold:   config.SlowBlockThreshold,
-
+			TrieJournalDirectory:    stack.ResolvePath("triedb"),
+			StateSizeTracking:       config.EnableStateSizeTracking,
+			SlowBlockThreshold:      config.SlowBlockThreshold,
 			StatelessSelfValidation: config.StatelessSelfValidation,
 			EnableWitnessStats:      config.EnableWitnessStats,
+			UBT:                     config.UBT,
 		}
 	)
 	if config.VMTrace != "" {
@@ -406,6 +406,9 @@ func (s *Ethereum) APIs() []rpc.API {
 		}, {
 			Namespace: "debug",
 			Service:   NewDebugAPI(s),
+		}, {
+			Namespace: "debug",
+			Service:   &UBTDebugAPI{e: s},
 		}, {
 			Namespace: "net",
 			Service:   s.netRPCService,

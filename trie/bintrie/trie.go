@@ -331,6 +331,7 @@ func (t *BinaryTrie) Commit(_ bool) (common.Hash, *trienode.NodeSet) {
 	if err != nil {
 		panic(fmt.Errorf("CollectNodes failed: %v", err))
 	}
+
 	// Serialize root commitment form
 	return t.Hash(), nodeset
 }

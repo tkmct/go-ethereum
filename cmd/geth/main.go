@@ -93,6 +93,7 @@ var (
 		utils.LogNoHistoryFlag,
 		utils.LogExportCheckpointsFlag,
 		utils.StateHistoryFlag,
+		utils.UBTFlag,
 		utils.TrienodeHistoryFlag,
 		utils.TrienodeHistoryFullValueCheckpointFlag,
 		utils.LightKDFFlag,

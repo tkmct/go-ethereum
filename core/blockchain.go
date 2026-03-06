@@ -54,6 +54,7 @@ import (
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/sidecar"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/ethereum/go-ethereum/triedb/hashdb"
 	"github.com/ethereum/go-ethereum/triedb/pathdb"
@@ -223,6 +224,9 @@ type BlockChainConfig struct {
 	// Execution configs
 	StatelessSelfValidation bool // Generate execution witnesses and self-check against them (testing purpose)
 	EnableWitnessStats      bool // Whether trie access statistics collection is enabled
+
+	// UBT enables the UBT (Unified Binary Trie) sidecar shadow state.
+	UBT bool
 }
 
 // DefaultConfig returns the default config.
@@ -370,6 +374,9 @@ type BlockChain struct {
 
 	lastForkReadyAlert time.Time     // Last time there was a fork readiness print out
 	slowBlockThreshold time.Duration // Block execution time threshold beyond which detailed statistics will be logged
+
+	// UBT sidecar
+	ubtSidecar *sidecar.UBTSidecar
 }
 
 // NewBlockChain returns a fully initialised block chain using information
@@ -572,6 +579,18 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 		} else {
 			log.Info("Failed to setup size tracker", "err", err)
 		}
+	}
+	// Initialize UBT sidecar if enabled
+	if bc.cfg.UBT {
+		sc, err := sidecar.NewUBTSidecar(db, bc.triedb)
+		if err != nil {
+			return nil, err
+		}
+		if err := sc.InitFromDB(); err != nil {
+			return nil, err
+		}
+		bc.ubtSidecar = sc
+		bc.ubtSidecar.MaybeStartAutoConvert("startup", bc.chainContextAdapter())
 	}
 	return bc, nil
 }
@@ -1394,6 +1413,10 @@ func (bc *BlockChain) Stop() {
 	if bc.logger != nil && bc.logger.OnClose != nil {
 		bc.logger.OnClose()
 	}
+	// Shut down UBT sidecar before closing the main trie database.
+	if bc.ubtSidecar != nil {
+		bc.ubtSidecar.Shutdown()
+	}
 	// Close the trie database, release all the held resources as the last step.
 	if err := bc.triedb.Close(); err != nil {
 		log.Error("Failed to close trie database", "err", err)
@@ -1676,8 +1699,9 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		isCancun      = bc.chainConfig.IsCancun(block.Number(), block.Time())
 		hasStateHook  = bc.logger != nil && bc.logger.OnStateUpdate != nil
 		hasStateSizer = bc.stateSizer != nil
+		hasUBT        = bc.ubtSidecar != nil
 	)
-	if hasStateHook || hasStateSizer {
+	if hasStateHook || hasStateSizer || hasUBT {
 		r, update, err := statedb.CommitWithUpdate(block.NumberU64(), isEIP158, isCancun)
 		if err != nil {
 			return err
@@ -1691,6 +1715,9 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		}
 		if hasStateSizer {
 			bc.stateSizer.Notify(update)
+		}
+		if hasUBT {
+			bc.ubtSidecar.HandleStateUpdate(block, update, bc.chainContextAdapter())
 		}
 		root = r
 	} else {
@@ -2589,6 +2616,13 @@ func (bc *BlockChain) reorg(oldHead *types.Header, newHead *types.Header) error 
 		// rewind the canonical chain to a lower point.
 		log.Error("Impossible reorg, please file an issue", "oldnum", oldHead.Number, "oldhash", oldHead.Hash(), "oldblocks", len(oldChain), "newnum", newHead.Number, "newhash", newHead.Hash(), "newblocks", len(newChain))
 	}
+	// Notify UBT sidecar about the reorg to roll back to the common ancestor.
+	if bc.ubtSidecar != nil {
+		if err := bc.ubtSidecar.HandleReorg(commonBlock.Hash(), commonBlock.Number.Uint64()); err != nil {
+			log.Error("Failed to handle UBT sidecar reorg", "err", err)
+			bc.ubtSidecar.MaybeStartAutoConvert("reorg", bc.chainContextAdapter())
+		}
+	}
 	// Acquire the tx-lookup lock before mutation. This step is essential
 	// as the txlookups should be changed atomically, and all subsequent
 	// reads should be blocked until the mutation is complete.
@@ -2981,4 +3015,34 @@ func (bc *BlockChain) GetTrieFlushInterval() time.Duration {
 // StateSizer returns the state size tracker, or nil if it's not initialized
 func (bc *BlockChain) StateSizer() *state.SizeTracker {
 	return bc.stateSizer
+}
+
+// UBTSidecar returns the UBT sidecar instance, or nil if not enabled.
+func (bc *BlockChain) UBTSidecar() *sidecar.UBTSidecar {
+	return bc.ubtSidecar
+}
+
+// ubtChainContextAdapter implements sidecar.ChainContext for BlockChain.
+type ubtChainContextAdapter struct {
+	bc *BlockChain
+}
+
+func (a *ubtChainContextAdapter) HeadRoot() common.Hash {
+	head := a.bc.CurrentBlock()
+	if head == nil {
+		return common.Hash{}
+	}
+	return head.Root
+}
+
+func (a *ubtChainContextAdapter) HeadBlock() *types.Header {
+	return a.bc.CurrentBlock()
+}
+
+func (a *ubtChainContextAdapter) CanonicalHash(num uint64) common.Hash {
+	return rawdb.ReadCanonicalHash(a.bc.db, num)
+}
+
+func (bc *BlockChain) chainContextAdapter() sidecar.ChainContext {
+	return &ubtChainContextAdapter{bc: bc}
 }

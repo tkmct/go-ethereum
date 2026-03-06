@@ -367,3 +367,39 @@ func (sc *stateUpdate) ToTracingUpdate() (*tracing.StateUpdate, error) {
 	}
 	return update, nil
 }
+
+// StateUpdate is the exported type alias for stateUpdate, used by the UBT sidecar.
+type StateUpdate = stateUpdate
+
+// Accounts returns the mutated accounts in slim RLP encoding, keyed by account hash.
+func (sc *stateUpdate) Accounts() map[common.Hash][]byte { return sc.accounts }
+
+// AccountsOrigin returns the original values of mutated accounts in slim RLP encoding.
+func (sc *stateUpdate) AccountsOrigin() map[common.Address][]byte { return sc.accountsOrigin }
+
+// Storages returns the mutated storage slots keyed by account hash and slot key hash.
+func (sc *stateUpdate) Storages() map[common.Hash]map[common.Hash][]byte { return sc.storages }
+
+// StoragesOrigin returns the original values of mutated slots.
+func (sc *stateUpdate) StoragesOrigin() map[common.Address]map[common.Hash][]byte {
+	return sc.storagesOrigin
+}
+
+// RawStorageKey returns whether the storage origin keys are raw (unhashed).
+func (sc *stateUpdate) RawStorageKey() bool { return sc.rawStorageKey }
+
+// Codes returns the dirty contract codes keyed by address.
+// Each entry contains the code hash and bytecode blob.
+func (sc *stateUpdate) Codes() map[common.Address]ContractCode {
+	result := make(map[common.Address]ContractCode, len(sc.codes))
+	for addr, c := range sc.codes {
+		result[addr] = ContractCode{Hash: c.hash, Blob: c.blob}
+	}
+	return result
+}
+
+// ContractCode holds the hash and bytecode of a contract, exported for the UBT sidecar.
+type ContractCode struct {
+	Hash common.Hash
+	Blob []byte
+}
