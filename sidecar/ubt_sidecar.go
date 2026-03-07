@@ -96,14 +96,17 @@ type UBTSidecar struct {
 
 	// Databases
 	triedb    *triedb.Database // UBT-specific (verkle namespace)
-	chainDB   ethdb.Database   // Main chain DB for metadata and code
+	chainDB   ethdb.Database   // Main chain DB for preimages, code, and canonical hashes (read-only)
+	ubtDB     ethdb.Database   // UBT metadata and trie storage (may be same as chainDB)
 	mptTrieDB *triedb.Database // MPT trie DB for preimage resolution and iterators
 }
 
 // NewUBTSidecar creates a new UBT sidecar instance.
-func NewUBTSidecar(chainDB ethdb.Database, mptTrieDB *triedb.Database) (*UBTSidecar, error) {
+// ubtDB is the database for UBT trie data and metadata. It may be the same as
+// chainDB (when no separate --ubt.datadir is configured) or a dedicated database.
+func NewUBTSidecar(chainDB ethdb.Database, ubtDB ethdb.Database, mptTrieDB *triedb.Database) (*UBTSidecar, error) {
 	// Create UBT trie database using verkle namespace with path scheme
-	ubtTrieDB := triedb.NewDatabase(chainDB, &triedb.Config{
+	ubtTrieDB := triedb.NewDatabase(ubtDB, &triedb.Config{
 		IsVerkle: true,
 		PathDB:   pathdb.Defaults,
 	})
@@ -111,6 +114,7 @@ func NewUBTSidecar(chainDB ethdb.Database, mptTrieDB *triedb.Database) (*UBTSide
 		state:     StateStale,
 		triedb:    ubtTrieDB,
 		chainDB:   chainDB,
+		ubtDB:     ubtDB,
 		mptTrieDB: mptTrieDB,
 	}, nil
 }
@@ -122,10 +126,10 @@ func (sc *UBTSidecar) InitFromDB() error {
 	defer sc.mu.Unlock()
 
 	// Check for persisted current root
-	root, block, blockHash, ok := rawdb.ReadUBTCurrentRoot(sc.chainDB)
+	root, block, blockHash, ok := rawdb.ReadUBTCurrentRoot(sc.ubtDB)
 	if !ok {
 		// No persisted state - check for conversion progress
-		if rawdb.ReadUBTConversionProgress(sc.chainDB) != nil {
+		if rawdb.ReadUBTConversionProgress(sc.ubtDB) != nil {
 			log.Info("UBT sidecar found conversion progress, will resume")
 		}
 		sc.state = StateStale
@@ -152,7 +156,7 @@ func (sc *UBTSidecar) InitFromDB() error {
 		if hash == (common.Hash{}) {
 			continue
 		}
-		ubtRoot, found := rawdb.ReadUBTBlockRoot(sc.chainDB, hash)
+		ubtRoot, found := rawdb.ReadUBTBlockRoot(sc.ubtDB, hash)
 		if !found || ubtRoot == (common.Hash{}) || ubtRoot == types.EmptyBinaryHash {
 			continue
 		}
@@ -195,7 +199,7 @@ func (sc *UBTSidecar) CurrentInfo() (common.Hash, uint64, common.Hash) {
 
 // GetUBTRoot returns the UBT root for a given block hash.
 func (sc *UBTSidecar) GetUBTRoot(blockHash common.Hash) (common.Hash, bool) {
-	return rawdb.ReadUBTBlockRoot(sc.chainDB, blockHash)
+	return rawdb.ReadUBTBlockRoot(sc.ubtDB, blockHash)
 }
 
 // OpenBinaryTrie opens a BinaryTrie at the given root.
@@ -387,8 +391,8 @@ func (sc *UBTSidecar) applyUBTUpdate(update *UBTUpdate) error {
 	sc.currentHash = update.BlockHash
 	sc.mu.Unlock()
 
-	rawdb.WriteUBTCurrentRoot(sc.chainDB, newRoot, update.BlockNum, update.BlockHash)
-	rawdb.WriteUBTBlockRoot(sc.chainDB, update.BlockHash, newRoot)
+	rawdb.WriteUBTCurrentRoot(sc.ubtDB, newRoot, update.BlockNum, update.BlockHash)
+	rawdb.WriteUBTBlockRoot(sc.ubtDB, update.BlockHash, newRoot)
 
 	return nil
 }
@@ -400,14 +404,14 @@ func (sc *UBTSidecar) EnqueueUpdate(block *types.Block, update *state.StateUpdat
 	if err != nil {
 		return fmt.Errorf("ubt encode queue entry: %w", err)
 	}
-	rawdb.WriteUBTUpdateQueueEntry(sc.chainDB, block.NumberU64(), block.Hash(), data)
+	rawdb.WriteUBTUpdateQueueEntry(sc.ubtDB, block.NumberU64(), block.Hash(), data)
 
 	// Update queue metadata
-	start, _, ok := rawdb.ReadUBTUpdateQueueMeta(sc.chainDB)
+	start, _, ok := rawdb.ReadUBTUpdateQueueMeta(sc.ubtDB)
 	if !ok {
-		rawdb.WriteUBTUpdateQueueMeta(sc.chainDB, block.NumberU64(), block.NumberU64())
+		rawdb.WriteUBTUpdateQueueMeta(sc.ubtDB, block.NumberU64(), block.NumberU64())
 	} else {
-		rawdb.WriteUBTUpdateQueueMeta(sc.chainDB, start, block.NumberU64())
+		rawdb.WriteUBTUpdateQueueMeta(sc.ubtDB, start, block.NumberU64())
 	}
 	log.Debug("UBT queue enqueue", "block", block.NumberU64())
 	return nil
@@ -453,7 +457,7 @@ func (sc *UBTSidecar) HandleReorg(ancestorHash common.Hash, ancestorNum uint64) 
 		sc.currentBlock = ancestorNum
 		sc.currentHash = ancestorHash
 		sc.mu.Unlock()
-		rawdb.WriteUBTCurrentRoot(sc.chainDB, ancestorUBTRoot, ancestorNum, ancestorHash)
+		rawdb.WriteUBTCurrentRoot(sc.ubtDB, ancestorUBTRoot, ancestorNum, ancestorHash)
 		log.Info("UBT sidecar reorg rollback", "ancestor", ancestorNum)
 		return nil
 
@@ -482,17 +486,17 @@ func (sc *UBTSidecar) BeginConversion() bool {
 // cleanupConversionState removes old queue entries, queue metadata, and
 // conversion progress. Must be called when starting a fresh conversion.
 func (sc *UBTSidecar) cleanupConversionState() {
-	start, end, ok := rawdb.ReadUBTUpdateQueueMeta(sc.chainDB)
+	start, end, ok := rawdb.ReadUBTUpdateQueueMeta(sc.ubtDB)
 	if ok {
 		for blockNum := start; blockNum <= end; blockNum++ {
 			canonHash := rawdb.ReadCanonicalHash(sc.chainDB, blockNum)
 			if canonHash != (common.Hash{}) {
-				rawdb.DeleteUBTUpdateQueueEntry(sc.chainDB, blockNum, canonHash)
+				rawdb.DeleteUBTUpdateQueueEntry(sc.ubtDB, blockNum, canonHash)
 			}
 		}
-		rawdb.DeleteUBTUpdateQueueMeta(sc.chainDB)
+		rawdb.DeleteUBTUpdateQueueMeta(sc.ubtDB)
 	}
-	rawdb.DeleteUBTConversionProgress(sc.chainDB)
+	rawdb.DeleteUBTConversionProgress(sc.ubtDB)
 }
 
 // SetReady transitions the sidecar from Converting to Ready state.

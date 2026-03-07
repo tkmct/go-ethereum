@@ -68,7 +68,7 @@ func (sc *UBTSidecar) ConvertFromMPT(ctx context.Context, chain ChainContext) er
 	log.Info("UBT conversion starting", "block", head.Number.Uint64(), "root", headRoot)
 
 	// Check for existing conversion progress to decide resume vs fresh start.
-	progress := rawdb.ReadUBTConversionProgress(sc.chainDB)
+	progress := rawdb.ReadUBTConversionProgress(sc.ubtDB)
 
 	var (
 		startKey  common.Hash
@@ -113,7 +113,7 @@ func (sc *UBTSidecar) ConvertFromMPT(ctx context.Context, chain ChainContext) er
 		processed = 0
 
 		// Persist initial conversion progress.
-		rawdb.WriteUBTConversionProgress(sc.chainDB, &rawdb.UBTConversionProgress{
+		rawdb.WriteUBTConversionProgress(sc.ubtDB, &rawdb.UBTConversionProgress{
 			Root:              headRoot,
 			Block:             head.Number.Uint64(),
 			BlockHash:         head.Hash(),
@@ -142,10 +142,10 @@ func (sc *UBTSidecar) ConvertFromMPT(ctx context.Context, chain ChainContext) er
 		log.Warn("UBT conversion completed but sidecar state changed (reorg?)")
 		return nil
 	}
-	rawdb.WriteUBTCurrentRoot(sc.chainDB, result.root, result.blockNum, result.blockHash)
-	rawdb.WriteUBTBlockRoot(sc.chainDB, result.blockHash, result.root)
-	rawdb.DeleteUBTConversionProgress(sc.chainDB)
-	rawdb.DeleteUBTUpdateQueueMeta(sc.chainDB)
+	rawdb.WriteUBTCurrentRoot(sc.ubtDB, result.root, result.blockNum, result.blockHash)
+	rawdb.WriteUBTBlockRoot(sc.ubtDB, result.blockHash, result.root)
+	rawdb.DeleteUBTConversionProgress(sc.ubtDB)
+	rawdb.DeleteUBTUpdateQueueMeta(sc.ubtDB)
 
 	log.Info("UBT conversion complete",
 		"block", result.blockNum, "root", result.root, "accounts", processed)
@@ -386,7 +386,7 @@ func (sc *UBTSidecar) commitConversionBatch(
 	}
 
 	// Persist conversion progress.
-	rawdb.WriteUBTConversionProgress(sc.chainDB, &rawdb.UBTConversionProgress{
+	rawdb.WriteUBTConversionProgress(sc.ubtDB, &rawdb.UBTConversionProgress{
 		Root:                    head.Hash(),
 		Block:                   head.Number.Uint64(),
 		BlockHash:               head.Hash(),
@@ -457,7 +457,7 @@ func (sc *UBTSidecar) replayUpdateQueue(
 	currentHash common.Hash,
 	chain ChainContext,
 ) (*replayResult, error) {
-	start, end, ok := rawdb.ReadUBTUpdateQueueMeta(sc.chainDB)
+	start, end, ok := rawdb.ReadUBTUpdateQueueMeta(sc.ubtDB)
 	if !ok {
 		log.Info("UBT conversion: no queued updates to replay")
 		return &replayResult{root: currentRoot, blockNum: currentBlock, blockHash: currentHash}, nil
@@ -491,7 +491,7 @@ func (sc *UBTSidecar) replayUpdateQueue(
 			// Clean up the entry.
 			canonHash := chain.CanonicalHash(blockNum)
 			if canonHash != (common.Hash{}) {
-				rawdb.DeleteUBTUpdateQueueEntry(sc.chainDB, blockNum, canonHash)
+				rawdb.DeleteUBTUpdateQueueEntry(sc.ubtDB, blockNum, canonHash)
 			}
 			continue
 		}
@@ -504,7 +504,7 @@ func (sc *UBTSidecar) replayUpdateQueue(
 		}
 
 		// Read the queued entry.
-		data := rawdb.ReadUBTUpdateQueueEntry(sc.chainDB, blockNum, canonHash)
+		data := rawdb.ReadUBTUpdateQueueEntry(sc.ubtDB, blockNum, canonHash)
 		if len(data) == 0 {
 			// Entry might have been for a non-canonical hash; skip it.
 			log.Debug("UBT queue replay: no entry for canonical block", "block", blockNum)
@@ -540,7 +540,7 @@ func (sc *UBTSidecar) replayUpdateQueue(
 		lastParentHash = update.BlockHash
 
 		// Delete the processed queue entry.
-		rawdb.DeleteUBTUpdateQueueEntry(sc.chainDB, blockNum, canonHash)
+		rawdb.DeleteUBTUpdateQueueEntry(sc.ubtDB, blockNum, canonHash)
 
 		if blockNum%1000 == 0 {
 			log.Info("UBT queue replay progress", "block", blockNum, "end", end)
@@ -566,13 +566,13 @@ func (sc *UBTSidecar) resetVerkleNamespace() error {
 	}
 
 	// Delete all data under the verkle prefix.
-	verkleTable := rawdb.NewTable(sc.chainDB, string(rawdb.VerklePrefix))
+	verkleTable := rawdb.NewTable(sc.ubtDB, string(rawdb.VerklePrefix))
 	if err := verkleTable.DeleteRange(nil, nil); err != nil {
 		return fmt.Errorf("verkle namespace reset: %w", err)
 	}
 
 	// Recreate the UBT trie database.
-	sc.triedb = triedb.NewDatabase(sc.chainDB, &triedb.Config{
+	sc.triedb = triedb.NewDatabase(sc.ubtDB, &triedb.Config{
 		IsVerkle: true,
 		PathDB:   pathdb.Defaults,
 	})

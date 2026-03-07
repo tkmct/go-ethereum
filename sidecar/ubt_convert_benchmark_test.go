@@ -49,7 +49,7 @@ func BenchmarkConvertFromMPT(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		sidecar, err := NewUBTSidecar(fixture.chainDB, fixture.mptTrieDB)
+		sidecar, err := NewUBTSidecar(fixture.chainDB, fixture.chainDB, fixture.mptTrieDB)
 		if err != nil {
 			b.Fatal(err)
 		}

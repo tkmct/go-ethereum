@@ -248,6 +248,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 			StatelessSelfValidation: config.StatelessSelfValidation,
 			EnableWitnessStats:      config.EnableWitnessStats,
 			UBT:                     config.UBT,
+			UBTDataDir:               config.UBTDataDir,
 		}
 	)
 	if config.VMTrace != "" {

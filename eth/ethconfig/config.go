@@ -213,6 +213,10 @@ type Config struct {
 	// UBT enables the UBT (Unified Binary Trie) sidecar shadow state.
 	// When enabled, path scheme is forced, full sync is required, and preimages are auto-enabled.
 	UBT bool
+
+	// UBTDataDir is the file system path for the UBT database. When set, UBT trie
+	// data and metadata are stored in a separate database instead of the main chaindata.
+	UBTDataDir string `toml:",omitempty"`
 }
 
 // CreateConsensusEngine creates a consensus engine for the given chain config.

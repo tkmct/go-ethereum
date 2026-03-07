@@ -46,6 +46,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/ethdb/pebble"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/internal/syncx"
 	"github.com/ethereum/go-ethereum/internal/telemetry"
@@ -227,6 +228,9 @@ type BlockChainConfig struct {
 
 	// UBT enables the UBT (Unified Binary Trie) sidecar shadow state.
 	UBT bool
+	// UBTDataDir is the file system path for a separate UBT database.
+	// When empty, UBT data is stored in the main chaindata database.
+	UBTDataDir string
 }
 
 // DefaultConfig returns the default config.
@@ -377,6 +381,7 @@ type BlockChain struct {
 
 	// UBT sidecar
 	ubtSidecar *sidecar.UBTSidecar
+	ubtDB      ethdb.Database // separate UBT database (nil if using chainDB)
 }
 
 // NewBlockChain returns a fully initialised block chain using information
@@ -582,7 +587,16 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 	}
 	// Initialize UBT sidecar if enabled
 	if bc.cfg.UBT {
-		sc, err := sidecar.NewUBTSidecar(db, bc.triedb)
+		ubtDB := ethdb.Database(db)
+		if bc.cfg.UBTDataDir != "" {
+			kvstore, err := pebble.New(bc.cfg.UBTDataDir, 256, 64, "eth/db/ubt/", false)
+			if err != nil {
+				return nil, fmt.Errorf("failed to open UBT database: %w", err)
+			}
+			ubtDB = rawdb.NewDatabase(kvstore)
+			bc.ubtDB = ubtDB
+		}
+		sc, err := sidecar.NewUBTSidecar(db, ubtDB, bc.triedb)
 		if err != nil {
 			return nil, err
 		}
@@ -1416,6 +1430,12 @@ func (bc *BlockChain) Stop() {
 	// Shut down UBT sidecar before closing the main trie database.
 	if bc.ubtSidecar != nil {
 		bc.ubtSidecar.Shutdown()
+	}
+	// Close the separate UBT database if one was opened.
+	if bc.ubtDB != nil {
+		if err := bc.ubtDB.Close(); err != nil {
+			log.Error("Failed to close UBT database", "err", err)
+		}
 	}
 	// Close the trie database, release all the held resources as the last step.
 	if err := bc.triedb.Close(); err != nil {

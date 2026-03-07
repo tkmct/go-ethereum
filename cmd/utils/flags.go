@@ -304,6 +304,11 @@ var (
 		Usage:    "Enable UBT (Unified Binary Trie) shadow state. Forces path scheme, requires full sync, auto-enables preimages",
 		Category: flags.StateCategory,
 	}
+	UBTDataDirFlag = &cli.StringFlag{
+		Name:     "ubt.datadir",
+		Usage:    "Store UBT trie data and metadata in a separate database directory (default: inside chaindata)",
+		Category: flags.StateCategory,
+	}
 	StateHistoryFlag = &cli.Uint64Flag{
 		Name:     "history.state",
 		Usage:    "Number of recent blocks to retain state history for, only relevant in state.scheme=path (default = 90,000 blocks, 0 = entire chain)",
@@ -1815,6 +1820,9 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	}
 	if ctx.Bool(UBTFlag.Name) {
 		cfg.UBT = true
+	}
+	if ctx.IsSet(UBTDataDirFlag.Name) {
+		cfg.UBTDataDir = ctx.String(UBTDataDirFlag.Name)
 	}
 	if ctx.IsSet(StateHistoryFlag.Name) {
 		cfg.StateHistory = ctx.Uint64(StateHistoryFlag.Name)

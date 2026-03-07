@@ -48,7 +48,7 @@ func newApplyUBTUpdateBenchmarkFixture(tb testing.TB) *applyUBTUpdateBenchmarkFi
 	tb.Helper()
 
 	chainDB := rawdb.NewMemoryDatabase()
-	sidecar, err := NewUBTSidecar(chainDB, nil)
+	sidecar, err := NewUBTSidecar(chainDB, chainDB, nil)
 	if err != nil {
 		tb.Fatal(err)
 	}

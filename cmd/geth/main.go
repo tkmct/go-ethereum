@@ -94,6 +94,7 @@ var (
 		utils.LogExportCheckpointsFlag,
 		utils.StateHistoryFlag,
 		utils.UBTFlag,
+		utils.UBTDataDirFlag,
 		utils.TrienodeHistoryFlag,
 		utils.TrienodeHistoryFullValueCheckpointFlag,
 		utils.LightKDFFlag,

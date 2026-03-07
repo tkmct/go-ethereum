@@ -69,6 +69,7 @@ func (c Config) MarshalTOML() (interface{}, error) {
 		TxSyncMaxTimeout        time.Duration `toml:",omitempty"`
 		RangeLimit              uint64        `toml:",omitempty"`
 		UBT                     bool
+		UBTDataDir              string `toml:",omitempty"`
 	}
 	var enc Config
 	enc.Genesis = c.Genesis
@@ -123,6 +124,7 @@ func (c Config) MarshalTOML() (interface{}, error) {
 	enc.TxSyncMaxTimeout = c.TxSyncMaxTimeout
 	enc.RangeLimit = c.RangeLimit
 	enc.UBT = c.UBT
+	enc.UBTDataDir = c.UBTDataDir
 	return &enc, nil
 }
 
@@ -181,6 +183,7 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 		TxSyncMaxTimeout        *time.Duration `toml:",omitempty"`
 		RangeLimit              *uint64        `toml:",omitempty"`
 		UBT                     *bool
+		UBTDataDir              *string `toml:",omitempty"`
 	}
 	var dec Config
 	if err := unmarshal(&dec); err != nil {
@@ -341,6 +344,9 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	}
 	if dec.UBT != nil {
 		c.UBT = *dec.UBT
+	}
+	if dec.UBTDataDir != nil {
+		c.UBTDataDir = *dec.UBTDataDir
 	}
 	return nil
 }
