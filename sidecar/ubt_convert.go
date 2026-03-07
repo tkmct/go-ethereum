@@ -180,7 +180,7 @@ func (sc *UBTSidecar) scanAccounts(
 		if iterErr == nil {
 			// Iteration completed successfully. Final commit for remaining mutations.
 			var commitErr error
-			lastRoot, commitErr = sc.commitConversionBatch(t, head, startKey, processed)
+			lastRoot, commitErr = sc.commitConversionBatch(t, lastRoot, head, startKey, processed)
 			if commitErr != nil {
 				return nil, common.Hash{}, 0, commitErr
 			}
@@ -199,7 +199,7 @@ func (sc *UBTSidecar) scanAccounts(
 		}
 
 		// Stale error: commit what we have, then retry with backoff.
-		lastRoot, err = sc.commitConversionBatch(t, head, startKey, processed)
+		lastRoot, err = sc.commitConversionBatch(t, lastRoot, head, startKey, processed)
 		if err != nil {
 			return nil, common.Hash{}, 0, err
 		}
@@ -283,9 +283,11 @@ func (sc *UBTSidecar) iterateAccounts(
 			*mutationCount++
 		}
 
-		// Iterate and insert storage slots for this account.
-		if err := sc.convertAccountStorage(ctx, t, headRoot, accountHash, addr, mutationCount); err != nil {
-			return err
+		// Skip iterator setup for accounts without storage.
+		if acct.Root != types.EmptyRootHash {
+			if err := sc.convertAccountStorage(ctx, t, headRoot, accountHash, addr, mutationCount); err != nil {
+				return err
+			}
 		}
 
 		*processed++
@@ -295,7 +297,7 @@ func (sc *UBTSidecar) iterateAccounts(
 		// Batch commit check.
 		if *batchCount >= conversionBatchSize || *mutationCount >= maxMutationsPerBatch {
 			var err error
-			*lastRoot, err = sc.commitConversionBatch(t, head, *startKey, *processed)
+			*lastRoot, err = sc.commitConversionBatch(t, *lastRoot, head, *startKey, *processed)
 			if err != nil {
 				return err
 			}
@@ -352,15 +354,15 @@ func (sc *UBTSidecar) convertAccountStorage(
 // commitConversionBatch commits the trie and persists conversion progress.
 func (sc *UBTSidecar) commitConversionBatch(
 	t *bintrie.BinaryTrie,
+	parentRoot common.Hash,
 	head *types.Header,
 	lastKey common.Hash,
 	processed uint64,
 ) (common.Hash, error) {
-	parentRoot := t.Hash()
 	newRoot, nodeset := t.Commit(false)
 
 	if nodeset != nil {
-		if err := sc.triedb.Update(newRoot, parentRoot, 0, trienode.NewWithNodeSet(nodeset), nil); err != nil {
+		if err := sc.triedb.Update(newRoot, parentRoot, 0, trienode.NewWithNodeSet(nodeset), triedb.NewStateSet()); err != nil {
 			return common.Hash{}, sc.fail("conversion triedb update", err)
 		}
 	}

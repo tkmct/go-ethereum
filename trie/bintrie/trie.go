@@ -244,7 +244,7 @@ func (t *BinaryTrie) UpdateAccount(addr common.Address, acc *types.StateAccount,
 	var (
 		err       error
 		basicData [HashSize]byte
-		values    = make([][]byte, StemNodeWidth)
+		values    [StemNodeWidth][]byte
 		stem      = GetBinaryTreeKey(addr, zero[:])
 	)
 	binary.BigEndian.PutUint32(basicData[BasicDataCodeSizeOffset-1:], uint32(codeLen))
@@ -263,7 +263,7 @@ func (t *BinaryTrie) UpdateAccount(addr common.Address, acc *types.StateAccount,
 	values[BasicDataLeafKey] = basicData[:]
 	values[CodeHashLeafKey] = acc.CodeHash[:]
 
-	t.root, err = t.root.InsertValuesAtStem(stem, values, t.nodeResolver, 0)
+	t.root, err = t.root.InsertValuesAtStem(stem, values[:], t.nodeResolver, 0)
 	return err
 }
 

@@ -277,6 +277,7 @@ func (sc *UBTSidecar) applyUBTUpdate(update *UBTUpdate) error {
 
 	// Build resolver caches to avoid O(n²) scanning with keccak256.
 	resolver := update.buildResolver(sc.chainDB)
+	codeSizeByHash := make(map[common.Hash]int, len(update.Codes))
 
 	// Step 1: Process deletions (accounts with nil data).
 	// BinaryTrie.DeleteAccount is a no-op, so we explicitly zero the account's
@@ -327,20 +328,26 @@ func (sc *UBTSidecar) applyUBTUpdate(update *UBTUpdate) error {
 		if err != nil {
 			return sc.fail("decode account", err)
 		}
+		codeHash := common.BytesToHash(acct.CodeHash)
 		// Determine code length for UpdateAccount
 		codeLen := 0
 		if code, ok := update.Codes[addr]; ok {
 			codeLen = len(code)
-		} else if acct.CodeHash != nil && common.BytesToHash(acct.CodeHash) != types.EmptyCodeHash {
-			code := rawdb.ReadCode(sc.chainDB, common.BytesToHash(acct.CodeHash))
-			codeLen = len(code)
+			codeSizeByHash[codeHash] = codeLen
+		} else if codeHash != types.EmptyCodeHash {
+			if cached, ok := codeSizeByHash[codeHash]; ok {
+				codeLen = cached
+			} else {
+				codeLen = len(rawdb.ReadCode(sc.chainDB, codeHash))
+				codeSizeByHash[codeHash] = codeLen
+			}
 		}
 		if err := t.UpdateAccount(addr, acct, codeLen); err != nil {
 			return sc.fail("update account", err)
 		}
 		// Update contract code if changed
 		if code, ok := update.Codes[addr]; ok {
-			if err := t.UpdateContractCode(addr, common.BytesToHash(acct.CodeHash), code); err != nil {
+			if err := t.UpdateContractCode(addr, codeHash, code); err != nil {
 				return sc.fail("update code", err)
 			}
 		}
@@ -361,7 +368,14 @@ func (sc *UBTSidecar) applyUBTUpdate(update *UBTUpdate) error {
 	// Step 3: Commit trie changes → triedb.Update (auto-cap handles disk flush)
 	newRoot, nodeset := t.Commit(false)
 	if nodeset != nil {
-		if err := sc.triedb.Update(newRoot, root, update.BlockNum, trienode.NewWithNodeSet(nodeset), nil); err != nil {
+		stateSet := &triedb.StateSet{
+			Accounts:       update.Accounts,
+			AccountsOrigin: update.AccountsOrigin,
+			Storages:       update.Storages,
+			StoragesOrigin: update.StoragesOrigin,
+			RawStorageKey:  update.RawStorageKey,
+		}
+		if err := sc.triedb.Update(newRoot, root, update.BlockNum, trienode.NewWithNodeSet(nodeset), stateSet); err != nil {
 			return sc.fail("triedb update", err)
 		}
 	}
