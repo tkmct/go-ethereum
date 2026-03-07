@@ -40,6 +40,8 @@ func keyToPath(depth int, key []byte) ([]byte, error) {
 type InternalNode struct {
 	left, right BinaryNode
 	depth       int
+	hash        common.Hash
+	hashDirty   bool
 }
 
 // GetValuesAtStem retrieves the group of values located at the given stem key.
@@ -108,14 +110,19 @@ func (bt *InternalNode) Insert(key []byte, value []byte, resolver NodeResolverFn
 // Copy creates a deep copy of the node.
 func (bt *InternalNode) Copy() BinaryNode {
 	return &InternalNode{
-		left:  bt.left.Copy(),
-		right: bt.right.Copy(),
-		depth: bt.depth,
+		left:      bt.left.Copy(),
+		right:     bt.right.Copy(),
+		depth:     bt.depth,
+		hash:      bt.hash,
+		hashDirty: bt.hashDirty,
 	}
 }
 
 // Hash returns the hash of the node.
 func (bt *InternalNode) Hash() common.Hash {
+	if !bt.hashDirty {
+		return bt.hash
+	}
 	h := sha256.New()
 	if bt.left != nil {
 		h.Write(bt.left.Hash().Bytes())
@@ -127,7 +134,9 @@ func (bt *InternalNode) Hash() common.Hash {
 	} else {
 		h.Write(zero[:])
 	}
-	return common.BytesToHash(h.Sum(nil))
+	bt.hash = common.BytesToHash(h.Sum(nil))
+	bt.hashDirty = false
+	return bt.hash
 }
 
 // InsertValuesAtStem inserts a full value group at the given stem in the internal node.
@@ -157,6 +166,7 @@ func (bt *InternalNode) InsertValuesAtStem(stem []byte, values [][]byte, resolve
 		}
 
 		bt.left, err = bt.left.InsertValuesAtStem(stem, values, resolver, depth+1)
+		bt.hashDirty = true
 		return bt, err
 	}
 
@@ -181,6 +191,7 @@ func (bt *InternalNode) InsertValuesAtStem(stem []byte, values [][]byte, resolve
 	}
 
 	bt.right, err = bt.right.InsertValuesAtStem(stem, values, resolver, depth+1)
+	bt.hashDirty = true
 	return bt, err
 }
 

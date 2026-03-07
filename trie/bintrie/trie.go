@@ -325,8 +325,8 @@ func (t *BinaryTrie) Commit(_ bool) (common.Hash, *trienode.NodeSet) {
 
 	// The root can be any type of BinaryNode (InternalNode, StemNode, etc.)
 	err := t.root.CollectNodes(nil, func(path []byte, node BinaryNode) {
-		serialized := SerializeNode(node)
-		nodeset.AddNode(path, trienode.NewNodeWithPrev(node.Hash(), serialized, t.tracer.Get(path)))
+		serialized, hash := SerializeNodeAndHash(node)
+		nodeset.AddNodeWithPrev(path, hash, serialized, t.tracer.Get(path))
 	})
 	if err != nil {
 		panic(fmt.Errorf("CollectNodes failed: %v", err))
@@ -374,8 +374,12 @@ func (t *BinaryTrie) IsVerkle() bool {
 //
 // Note: the basic data leaf needs to have been previously created for this to work
 func (t *BinaryTrie) UpdateContractCode(addr common.Address, codeHash common.Hash, code []byte) error {
+	return t.UpdateContractCodeChunks(addr, codeHash, ChunkifyCode(code))
+}
+
+// UpdateContractCodeChunks updates pre-chunked contract code into the trie.
+func (t *BinaryTrie) UpdateContractCodeChunks(addr common.Address, codeHash common.Hash, chunks ChunkedCode) error {
 	var (
-		chunks = ChunkifyCode(code)
 		values [][]byte
 		key    []byte
 		err    error

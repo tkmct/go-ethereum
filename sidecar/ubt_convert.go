@@ -166,6 +166,8 @@ func (sc *UBTSidecar) scanAccounts(
 	batchCount := uint64(0)
 	mutationCount := uint64(0)
 	lastRoot := t.Hash()
+	codeByHash := make(map[common.Hash][]byte)
+	chunkedCodeByHash := make(map[common.Hash]bintrie.ChunkedCode)
 
 	for {
 		// Create account iterator from the MPT trie database.
@@ -174,7 +176,7 @@ func (sc *UBTSidecar) scanAccounts(
 			return nil, common.Hash{}, 0, sc.fail("conversion account iterator", err)
 		}
 
-		iterErr := sc.iterateAccounts(ctx, t, accIt, headRoot, head, &startKey, &processed, &batchCount, &mutationCount, &lastRoot)
+		iterErr := sc.iterateAccounts(ctx, t, accIt, headRoot, head, &startKey, &processed, &batchCount, &mutationCount, &lastRoot, codeByHash, chunkedCodeByHash)
 		accIt.Release()
 
 		if iterErr == nil {
@@ -239,6 +241,8 @@ func (sc *UBTSidecar) iterateAccounts(
 	batchCount *uint64,
 	mutationCount *uint64,
 	lastRoot *common.Hash,
+	codeByHash map[common.Hash][]byte,
+	chunkedCodeByHash map[common.Hash]bintrie.ChunkedCode,
 ) error {
 	for accIt.Next() {
 		// Check context cancellation periodically.
@@ -263,10 +267,21 @@ func (sc *UBTSidecar) iterateAccounts(
 		}
 
 		// Determine code and code length.
-		var code []byte
+		var (
+			code    []byte
+			chunked bintrie.ChunkedCode
+		)
 		codeHash := common.BytesToHash(acct.CodeHash)
 		if codeHash != types.EmptyCodeHash {
-			code = rawdb.ReadCode(sc.chainDB, codeHash)
+			if cached, ok := codeByHash[codeHash]; ok {
+				code = cached
+				chunked = chunkedCodeByHash[codeHash]
+			} else {
+				code = rawdb.ReadCode(sc.chainDB, codeHash)
+				codeByHash[codeHash] = code
+				chunked = bintrie.ChunkifyCode(code)
+				chunkedCodeByHash[codeHash] = chunked
+			}
 		}
 
 		// Insert account into binary trie.
@@ -277,7 +292,7 @@ func (sc *UBTSidecar) iterateAccounts(
 
 		// Insert contract code if present.
 		if len(code) > 0 {
-			if err := t.UpdateContractCode(addr, codeHash, code); err != nil {
+			if err := t.UpdateContractCodeChunks(addr, codeHash, chunked); err != nil {
 				return fmt.Errorf("update code %x: %w", addr, err)
 			}
 			*mutationCount++

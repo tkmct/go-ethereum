@@ -134,6 +134,19 @@ func (set *NodeSet) AddNode(path []byte, n *NodeWithPrev) {
 	set.Origins[key] = n.Prev
 }
 
+// AddNodeWithPrev adds the provided node data into the set without allocating
+// an intermediate NodeWithPrev wrapper.
+func (set *NodeSet) AddNodeWithPrev(path []byte, hash common.Hash, blob []byte, prev []byte) {
+	if len(blob) == 0 {
+		set.deletes += 1
+	} else {
+		set.updates += 1
+	}
+	key := string(path)
+	set.Nodes[key] = &Node{Hash: hash, Blob: blob}
+	set.Origins[key] = prev
+}
+
 // MergeDisjoint merges this 'set' with 'other'. It assumes that the sets are disjoint,
 // and thus does not deduplicate data (count deletes, dedup leaves etc).
 func (set *NodeSet) MergeDisjoint(other *NodeSet) error {
