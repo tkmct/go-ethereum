@@ -167,6 +167,13 @@ var (
 
 	// Verkle transition information
 	VerkleTransitionStatePrefix = []byte("verkle-transition-state-")
+
+	// UBT sidecar metadata keys
+	UBTCurrentRootKey        = []byte("ubt-current-root")
+	UBTConversionProgressKey = []byte("ubt-conv-progress")
+	UBTBlockRootPrefix       = []byte("ubt-block-root-")   // + blockHash
+	UBTUpdateQueuePrefix     = []byte("ubt-update-queue-") // + blockNum(8byte big-endian) + blockHash
+	UBTUpdateQueueMetaKey    = []byte("ubt-update-queue-meta")
 )
 
 // LegacyTxLookupEntry is the legacy TxLookupEntry definition with some unnecessary

@@ -209,6 +209,10 @@ type Config struct {
 
 	// RangeLimit restricts the maximum range (end - start) for range queries.
 	RangeLimit uint64 `toml:",omitempty"`
+
+	// UBT enables the UBT (Unified Binary Trie) sidecar shadow state.
+	// When enabled, path scheme is forced, full sync is required, and preimages are auto-enabled.
+	UBT bool
 }
 
 // CreateConsensusEngine creates a consensus engine for the given chain config.
