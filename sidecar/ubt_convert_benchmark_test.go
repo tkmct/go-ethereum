@@ -64,6 +64,15 @@ func BenchmarkConvertFromMPT(b *testing.B) {
 }
 
 func newConvertFromMPTBenchmarkFixture(tb testing.TB) *convertFromMPTBenchmarkFixture {
+	return newScaledConvertFromMPTBenchmarkFixture(tb, convertBenchmarkEOAs, convertBenchmarkCodeAccounts, convertBenchmarkStorageAccounts)
+}
+
+func newSizedConvertFromMPTBenchmarkFixture(tb testing.TB, totalAccounts int) *convertFromMPTBenchmarkFixture {
+	eoas, codeAccounts, storageAccounts := scaledConvertBenchmarkCounts(totalAccounts)
+	return newScaledConvertFromMPTBenchmarkFixture(tb, eoas, codeAccounts, storageAccounts)
+}
+
+func newScaledConvertFromMPTBenchmarkFixture(tb testing.TB, eoas, codeAccounts, storageAccounts int) *convertFromMPTBenchmarkFixture {
 	tb.Helper()
 
 	chainDB := rawdb.NewMemoryDatabase()
@@ -86,19 +95,19 @@ func newConvertFromMPTBenchmarkFixture(tb testing.TB) *convertFromMPTBenchmarkFi
 		codeVariants[i] = code
 	}
 
-	for i := 0; i < convertBenchmarkEOAs; i++ {
+	for i := 0; i < eoas; i++ {
 		addr := benchmarkAddress(i)
 		st.AddBalance(addr, uint256.NewInt(uint64(i+1)), tracing.BalanceChangeUnspecified)
 		st.SetNonce(addr, uint64(i+1), tracing.NonceChangeUnspecified)
 	}
-	for i := 0; i < convertBenchmarkCodeAccounts; i++ {
-		addr := benchmarkAddress(convertBenchmarkEOAs + i)
+	for i := 0; i < codeAccounts; i++ {
+		addr := benchmarkAddress(eoas + i)
 		st.AddBalance(addr, uint256.NewInt(uint64(10_000+i)), tracing.BalanceChangeUnspecified)
 		st.SetNonce(addr, uint64(i+1), tracing.NonceChangeUnspecified)
 		st.SetCode(addr, codeVariants[i%len(codeVariants)], tracing.CodeChangeUnspecified)
 	}
-	for i := 0; i < convertBenchmarkStorageAccounts; i++ {
-		addr := benchmarkAddress(convertBenchmarkEOAs + convertBenchmarkCodeAccounts + i)
+	for i := 0; i < storageAccounts; i++ {
+		addr := benchmarkAddress(eoas + codeAccounts + i)
 		st.AddBalance(addr, uint256.NewInt(uint64(20_000+i)), tracing.BalanceChangeUnspecified)
 		st.SetNonce(addr, uint64(i+1), tracing.NonceChangeUnspecified)
 		st.SetCode(addr, codeVariants[i%len(codeVariants)], tracing.CodeChangeUnspecified)
@@ -134,4 +143,11 @@ func newConvertFromMPTBenchmarkFixture(tb testing.TB) *convertFromMPTBenchmarkFi
 			head: head,
 		},
 	}
+}
+
+func scaledConvertBenchmarkCounts(totalAccounts int) (int, int, int) {
+	codeAccounts := totalAccounts * convertBenchmarkCodeAccounts / (convertBenchmarkEOAs + convertBenchmarkCodeAccounts + convertBenchmarkStorageAccounts)
+	storageAccounts := totalAccounts * convertBenchmarkStorageAccounts / (convertBenchmarkEOAs + convertBenchmarkCodeAccounts + convertBenchmarkStorageAccounts)
+	eoas := totalAccounts - codeAccounts - storageAccounts
+	return eoas, codeAccounts, storageAccounts
 }

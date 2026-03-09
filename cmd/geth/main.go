@@ -256,6 +256,8 @@ func init() {
 		licenseCommand,
 		// See config.go
 		dumpConfigCommand,
+		// See ubtcmd.go
+		ubtCommand,
 		// see dbcmd.go
 		dbCommand,
 		// See cmd/utils/flags_legacy.go
